@@ -106,7 +106,7 @@ echo ""
 test_title "測試 1: 版本與說明資訊"
 
 test_item "測試 --version 參數"
-if "$BETTER_RM" --version | grep -q "better-rm 1.1.0"; then
+if "$BETTER_RM" --version | grep -q "better-rm 1.2.0"; then
     test_pass "--version 顯示正確版本"
 else
     test_fail "--version 版本不正確"
@@ -250,11 +250,11 @@ test_item "相同檔名但不同內容產生不同 Hash"
 echo "content1" > test.txt
 "$BETTER_RM" test.txt
 sleep 0.01  # 確保時間戳記不同
-hash1=$(find "$TEST_TRASH_DIR" -name "test.txt__*" | head -1 | awk -F'__' '{print $NF}')
+hash1=$(find "$TEST_TRASH_DIR" -name "test.txt__*" | sort | head -1 | awk -F'__' '{print $NF}')
 
 echo "content2" > test.txt
 "$BETTER_RM" test.txt
-hash2=$(find "$TEST_TRASH_DIR" -name "test.txt__*" | tail -1 | awk -F'__' '{print $NF}')
+hash2=$(find "$TEST_TRASH_DIR" -name "test.txt__*" | sort | tail -1 | awk -F'__' '{print $NF}')
 
 if [ -n "$hash1" ] && [ -n "$hash2" ] && [ "$hash1" != "$hash2" ]; then
     test_pass "不同內容產生不同 Hash (hash1=$hash1, hash2=$hash2)"
@@ -435,8 +435,9 @@ echo "deep content" > deep/nested/directory/structure/file.txt
 original_path="$TEST_WORK_DIR/deep/nested/directory/structure/file.txt"
 "$BETTER_RM" deep/nested/directory/structure/file.txt
 
-# 檢查垃圾桶中是否保留了路徑結構
-if find "$TEST_TRASH_DIR$TEST_WORK_DIR/deep/nested/directory/structure" -name "file.txt__*" | grep -q .; then
+# 檢查垃圾桶中是否保留了路徑結構 (考慮 macOS 的 /tmp -> /private/tmp)
+resolved_work_dir=$(readlink -f "$TEST_WORK_DIR" 2>/dev/null || realpath "$TEST_WORK_DIR" 2>/dev/null || echo "$TEST_WORK_DIR")
+if find "$TEST_TRASH_DIR$resolved_work_dir/deep/nested/directory/structure" -name "file.txt__*" | grep -q .; then
     test_pass "路徑結構成功保留"
 else
     test_fail "路徑結構未保留"

@@ -189,12 +189,23 @@ is_protected() {
     # 移除結尾的斜線以便比較
     # Remove trailing slash for comparison
     real_path="${real_path%/}"
+
+    # 計算未解析符號連結的標準化絕對路徑，以支援如 macOS 的 /home, /etc, /var 等符號連結目錄的保護
+    # Calculate normalized absolute path without symlink resolution to support directory symlinks like /home, /etc, /var on macOS
+    local norm_path
+    if [[ "$path" = /* ]]; then
+        norm_path="$path"
+    else
+        norm_path="$(pwd)/$path"
+    fi
+    norm_path=$(normalize_path "$norm_path")
+    norm_path="${norm_path%/}"
     
     # 檢查是否與受保護目錄完全符合
     # Check if exactly matches protected directories
     for protected in "${PROTECTED_DIRS[@]}"; do
         protected="${protected%/}"
-        if [ "$real_path" = "$protected" ]; then
+        if [ "$real_path" = "$protected" ] || [ "$norm_path" = "$protected" ]; then
             return 0  # 是受保護的目錄
         fi
     done
@@ -202,9 +213,11 @@ is_protected() {
     # 檢查是否符合受保護的模式
     # Check if matches protected patterns
     local basename_path=$(basename "$real_path")
+    local basename_norm=$(basename "$norm_path")
     for pattern in "${PROTECTED_PATTERNS[@]}"; do
         pattern="${pattern%/}"
-        if [[ "$basename_path" = ${pattern} ]] || [[ "$real_path" = */${pattern} ]] || [[ "$real_path" = ${pattern} ]]; then
+        if [[ "$basename_path" = ${pattern} ]] || [[ "$real_path" = */${pattern} ]] || [[ "$real_path" = ${pattern} ]] || \
+           [[ "$basename_norm" = ${pattern} ]] || [[ "$norm_path" = */${pattern} ]] || [[ "$norm_path" = ${pattern} ]]; then
             return 0  # 符合受保護模式
         fi
     done
@@ -252,7 +265,7 @@ EOF
 # 顯示版本資訊
 # Display version information
 show_version() {
-    echo "better-rm 1.1.0"
+    echo "better-rm 1.2.0"
     echo "更安全的 rm 命令 - 將檔案移至垃圾桶而非永久刪除"
     echo "A safer rm command - moves files to trash instead of permanent deletion"
 }
