@@ -106,7 +106,7 @@ echo ""
 test_title "測試 1: 版本與說明資訊"
 
 test_item "測試 --version 參數"
-if "$BETTER_RM" --version | grep -q "better-rm 1.2.1"; then
+if "$BETTER_RM" --version | grep -q "better-rm 1.3.0"; then
     test_pass "--version 顯示正確版本"
 else
     test_fail "--version 版本不正確"
@@ -464,9 +464,77 @@ fi
 rm -rf "$custom_trash"
 
 # ============================================================================
+# 測試 13: 還原功能 (Test 13: Restore Function)
+# ============================================================================
+test_title "測試 13: 還原功能"
+
+test_item "基本還原功能"
+cd "$TEST_WORK_DIR"
+echo "original content" > test_restore.txt
+"$BETTER_RM" test_restore.txt
+
+if [ -f "test_restore.txt" ]; then
+    test_fail "測試還原前的刪除失敗"
+else
+    # 執行還原
+    "$BETTER_RM" --restore test_restore.txt
+    if [ -f "test_restore.txt" ] && [ "$(cat test_restore.txt)" = "original content" ]; then
+        test_pass "基本還原成功"
+    else
+        test_fail "基本還原失敗"
+    fi
+fi
+
+test_item "再次還原（已不存在於垃圾桶）"
+# 因為已經被還原移出，再次還原應提示找不到
+if "$BETTER_RM" --restore test_restore.txt 2>/dev/null; then
+    test_fail "不應成功還原已不在垃圾桶的檔案"
+else
+    test_pass "再次還原正確地回傳失敗"
+fi
+
+test_item "同名檔案存在時的覆蓋確認 - 選擇否 (n)"
+echo "content v1" > test_restore.txt
+"$BETTER_RM" test_restore.txt
+echo "local content v2" > test_restore.txt
+
+# 模擬使用者輸入 n
+echo "n" | "$BETTER_RM" --restore test_restore.txt >/dev/null 2>&1
+if [ "$(cat test_restore.txt)" = "local content v2" ]; then
+    test_pass "選擇否 (n) 時未覆蓋同名檔案"
+else
+    test_fail "選擇否 (n) 時同名檔案被錯誤覆蓋"
+fi
+
+test_item "同名檔案存在時的覆蓋確認 - 選擇是 (y)"
+# 模擬使用者輸入 y
+echo "y" | "$BETTER_RM" --restore test_restore.txt >/dev/null 2>&1
+if [ "$(cat test_restore.txt)" = "content v1" ]; then
+    test_pass "選擇是 (y) 時成功覆蓋同名檔案"
+else
+    test_fail "選擇是 (y) 時同名檔案未被覆蓋"
+fi
+
+test_item "同名檔案存在時的 -f 強制覆蓋"
+# 重新刪除並準備環境
+echo "content v1" > test_restore.txt
+"$BETTER_RM" test_restore.txt
+echo "local content v3" > test_restore.txt
+
+# 使用 -f 參數，不應提示確認且應直接覆蓋
+"$BETTER_RM" -f --restore test_restore.txt >/dev/null 2>&1
+if [ "$(cat test_restore.txt)" = "content v1" ]; then
+    test_pass "-f 強制覆蓋同名檔案成功"
+else
+    test_fail "-f 強制覆蓋同名檔案失敗"
+fi
+
+# 清理測試產生的檔案
+rm -f test_restore.txt
+
+# ============================================================================
 # 測試結果統計 (Test Results Summary)
 # ============================================================================
-
 cleanup
 
 echo ""

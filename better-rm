@@ -240,6 +240,8 @@ A safer alternative to the rm command
   -i                     每次刪除前提示確認
   -I                     刪除超過三個檔案或遞迴刪除前提示一次
   -v, --verbose          顯示詳細操作過程
+  --restore <檔案>       還原最後一次刪除的檔案到目前資料夾
+                         Restore the last deleted file to the current directory
   --help                 顯示此說明訊息
   --version              顯示版本資訊
 
@@ -265,7 +267,7 @@ EOF
 # 顯示版本資訊
 # Display version information
 show_version() {
-    echo "better-rm 1.2.1"
+    echo "better-rm 1.3.0"
     echo "更安全的 rm 命令 - 將檔案移至垃圾桶而非永久刪除"
     echo "A safer rm command - moves files to trash instead of permanent deletion"
 }
@@ -399,6 +401,131 @@ move_to_trash() {
     fi
 }
 
+# 移除字串前後空白
+# Trim leading and trailing whitespace
+trim() {
+    local var="$*"
+    # remove leading whitespace characters
+    var="${var#"${var%%[![:space:]]*}"}"
+    # remove trailing whitespace characters
+    var="${var%"${var##*[![:space:]]}"}"
+    echo -n "$var"
+}
+
+# 還原檔案
+# Restore file
+restore_file() {
+    local target_name="$1"
+    local force="$2"
+    local verbose="$3"
+    
+    local log_file="$TRASH_DIR/.deletion_log"
+    if [ ! -f "$log_file" ]; then
+        error_msg "找不到刪除日誌，無法還原檔案"
+        error_msg "Deletion log not found, cannot restore file"
+        return 1
+    fi
+    
+    # 從日誌尾部開始尋找符合檔名/路徑的刪除記錄
+    # Search from the end of the log for a matching deletion record
+    local matched_line=""
+    local trash_path=""
+    local original_path=""
+    local file_hash=""
+    local timestamp=""
+    local file_type=""
+    
+    # 讀取日誌的所有行
+    local IFS=$'\n'
+    local lines=()
+    while read -r line || [[ -n "$line" ]]; do
+        if [[ -n "$line" && ! "$line" =~ ^# ]]; then
+            lines+=("$line")
+        fi
+    done < "$log_file"
+    
+    local found=0
+    local i
+    for ((i=${#lines[@]}-1; i>=0; i--)); do
+        local line="${lines[i]}"
+        # 解析日誌行：TIMESTAMP | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE
+        local parts=()
+        IFS='|' read -r -a parts <<< "$line"
+        
+        timestamp=$(trim "${parts[0]}")
+        original_path=$(trim "${parts[1]}")
+        trash_path=$(trim "${parts[2]}")
+        file_hash=$(trim "${parts[3]}")
+        file_type=$(trim "${parts[4]}")
+        
+        # 檢查 trash_path 是否真的存在於磁碟上
+        if [ ! -e "$trash_path" ] && [ ! -L "$trash_path" ]; then
+            continue
+        fi
+        
+        # 比對規則：
+        # 1. 如果 target_name 是絕對路徑，則精確比對 original_path
+        # 2. 如果 target_name 是相對路徑或僅檔名，則檢查 original_path 是否以 "/target_name" 結尾，或是 original_path 是否等於 "/target_name"
+        local match=0
+        if [[ "$target_name" = /* ]]; then
+            if [ "$original_path" = "$target_name" ]; then
+                match=1
+            fi
+        else
+            # 移除 target_name 開頭的 ./（如果有的話）
+            local clean_target="${target_name#./}"
+            if [ "$original_path" = "/$clean_target" ] || [[ "$original_path" = */"$clean_target" ]]; then
+                match=1
+            fi
+        fi
+        
+        if [ $match -eq 1 ]; then
+            found=1
+            break
+        fi
+    done
+    
+    if [ $found -eq 0 ]; then
+        error_msg "在垃圾桶中找不到符合 '$target_name' 的刪除記錄或檔案本體"
+        error_msg "No matching deletion record or file found in trash for '$target_name'"
+        return 1
+    fi
+    
+    # 決定還原目的地：目前資料夾下的相同檔名
+    # Restore destination: same filename in the current folder
+    local dest_filename=$(basename "$original_path")
+    local dest_path="$(pwd)/$dest_filename"
+    
+    # 檢查目標路徑是否已存在同名檔案/目錄
+    # Check if a file/directory with the same name already exists in the destination
+    if [ -e "$dest_path" ] || [ -L "$dest_path" ]; then
+        if [ "$force" != "1" ]; then
+            echo -n "rm: 檔案或目錄 '$dest_filename' 已存在於目前資料夾，是否覆蓋？(y/N) " >&2
+            read -r response
+            if [[ ! "$response" =~ ^[yY] ]]; then
+                echo "操作已取消 / Operation cancelled" >&2
+                return 0
+            fi
+        fi
+    fi
+    
+    # 執行還原：移動檔案
+    if [ -e "$dest_path" ] || [ -L "$dest_path" ]; then
+        /bin/rm -rf "$dest_path"
+    fi
+    
+    if mv "$trash_path" "$dest_path" 2>/dev/null; then
+        if [ "$verbose" = "1" ]; then
+            success_msg "已還原 '$dest_filename' 到目前資料夾 (restored to: $dest_path)"
+        fi
+        return 0
+    else
+        error_msg "還原失敗：無法將檔案移回目前資料夾"
+        error_msg "Restore failed: cannot move file back to current folder"
+        return 1
+    fi
+}
+
 # 主程式
 # Main program
 main() {
@@ -409,6 +536,8 @@ main() {
     local interactive=0
     local interactive_once=0
     local verbose=0
+    local restore_mode=0
+    local restore_target=""
     local files=()
     
     # 如果沒有參數，顯示錯誤
@@ -431,6 +560,18 @@ main() {
             --version)
                 show_version
                 return 0
+                ;;
+            --restore)
+                restore_mode=1
+                shift
+                if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+                    restore_target="$1"
+                    shift
+                else
+                    error_msg "選項 '--restore' 需要一個引數"
+                    error_msg "option '--restore' requires an argument"
+                    return 1
+                fi
                 ;;
             -r|-R|--recursive)
                 recursive=1
@@ -521,6 +662,13 @@ main() {
         esac
     done
     
+    # 如果是還原模式
+    # If in restore mode
+    if [ "$restore_mode" = "1" ]; then
+        restore_file "$restore_target" "$force_mode" "$verbose"
+        return $?
+    fi
+
     # 檢查是否有指定檔案
     # Check if files are specified
     if [ ${#files[@]} -eq 0 ]; then

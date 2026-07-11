@@ -580,16 +580,31 @@ ls -la ~/.Trash/
 /bin/rm -rf ~/.Trash/*
 ```
 
-### 還原檔案
+### 還原檔案 / Restore Files
 
-由於檔案保留了原始路徑結構，你可以輕鬆還原：
+`better-rm` 提供了自動與手動還原功能：
+
+#### 1. 自動還原（推薦）
+您可以使用 `--restore` 選項來將最後一次刪除的檔案或目錄還原至**目前資料夾**：
 
 ```bash
-# 手動還原檔案
-mv ~/.Trash/home/user/projects/myapp/file.txt /home/user/projects/myapp/
+rm --restore LICENSE
 ```
 
-> **注意：** 未來版本計畫提供自動還原功能。
+- **重名保護機制**：若目前資料夾已存在同名檔案或目錄，`better-rm` 會提示您是否確認覆蓋（`y/N`）。
+- **強制覆蓋**：如果您希望直接覆蓋而不顯示提示，可以加上 `-f` 參數：
+  ```bash
+  rm -f --restore LICENSE
+  ```
+
+#### 2. 手動還原
+由於被刪除的檔案在垃圾桶中仍保留了原始的完整路徑結構，您也可以使用系統原生的 `mv` 命令手動移回。
+請至 `~/.Trash/.deletion_log` 或垃圾桶中找到您的檔案，然後手動移動：
+
+```bash
+# 手動還原範例
+mv ~/.Trash/home/user/projects/myapp/file.txt__20251209_143052_123456789__hash /home/user/projects/myapp/file.txt
+```
 
 ## 技術細節
 
@@ -729,7 +744,7 @@ find ~/.Trash -mtime +30 -delete
 
 ## 未來計畫
 
-- [ ] 實作還原功能（`rm --restore`）
+- [x] 實作還原功能（`rm --restore`）
 - [ ] 自動清理過期的垃圾檔案
 - [ ] 提供垃圾桶管理介面
 - [ ] 支援更多自訂保護規則

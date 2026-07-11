@@ -112,7 +112,7 @@ This project uses GitHub Copilot, Google Antigravity, Pi, Grok Build, and AI-ass
 ## Suggested Future Enhancements
 
 ### High Priority
-- [ ] Implement restore functionality (`rm --restore`)
+- [x] Implement restore functionality (`rm --restore`)
 - [ ] Add trash management commands (list, clean, empty)
 - [ ] Automatic cleanup of old trashed files
 - [ ] Configuration file support (~/.better-rm.conf)

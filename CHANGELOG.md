@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-11
+
+### Added
+- File restore capability (`rm --restore <file>`) to restore the last deleted version of a file to the current folder.
+- Interactive overwrite prompts if a file with the same name already exists in the destination folder.
+- `-f` (force) flag integration to automatically overwrite existing destination files without prompts.
+- Expanded the test suite with a new section "測試 13: 還原功能" covering core restore operations, overwrite handling, and force mode.
+
 ## [1.2.1] - 2026-07-11
 
 ### Added
