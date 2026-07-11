@@ -20,6 +20,18 @@ This project uses GitHub Copilot, Google Antigravity, Pi, and AI-assisted develo
 - **Integration**: Native TypeScript hook in `.omp/hooks/pre/protect-important-paths.ts` and JSON configuration in `.pi/hooks.json`
 - **Feedback**: Stops execution and supplies a rejection reason when a deletion violates security policy
 
+### Cursor Agent
+- **Purpose**: Safety gating and execution control for shell commands
+- **Scope**: Intercepts shell execution to block dangerous deletions of protected directories
+- **Integration**: Workspace-scoped hooks config in `.cursor/hooks.json`
+- **Feedback**: Automatically blocks unauthorized shell execution and returns a descriptive permission rejection
+
+### OpenCode Agent
+- **Purpose**: Safety gating and validation for tool calls
+- **Scope**: Intercepts tool execution to block dangerous deletions of protected directories
+- **Integration**: Workspace-scoped TypeScript plugin in `.opencode/plugins/protect-important-paths.ts`
+- **Feedback**: Stops tool execution and throws an error when a deletion violates security policy
+
 ### Code Review Agent
 - **Purpose**: Automated code review for pull requests
 - **Scope**: Reviews all code changes for security, performance, and maintainability issues

@@ -297,6 +297,8 @@ export TRASH_DIR="$HOME/MyTrash"
 | Antigravity CLI／2.0 | `.agents/hooks.json` |
 | Qoder | `.qoder/settings.json` |
 | Pi | `.omp/hooks/pre/protect-important-paths.ts` (native) / `.pi/hooks.json` (JSON) |
+| Cursor | `.cursor/hooks.json` |
+| OpenCode | `.opencode/plugins/protect-important-paths.ts` |
 
 預設保護範圍與 `better-rm` 相同：系統根目錄、使用者家目錄，以及任何位置的
 `.git` 目錄。若要加入其他重要目錄，請以平台的 PATH 分隔字元設定
@@ -461,6 +463,58 @@ Pi 支援兩種整合方式，您可以選擇其中一種：
       }
     }
     ```
+
+#### 7. Cursor
+* **設定檔位置**：`.cursor/hooks.json`
+* **設定內容**：
+  ```json
+  {
+    "version": 1,
+    "hooks": {
+      "beforeShellExecution": [
+        {
+          "command": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\"",
+          "matcher": ".*"
+        }
+      ]
+    }
+  }
+  ```
+* **說明**：Cursor 在執行 `beforeShellExecution` 生命週期事件前會先執行此 hook。當判定為高風險時，回傳 `permission: "deny"` 將其完全阻擋。
+
+#### 8. OpenCode
+* **路徑**：`.opencode/plugins/protect-important-paths.ts`
+* **內容**：
+  ```typescript
+  import type { Plugin } from "@opencode-ai/plugin";
+  // @ts-ignore
+  import { evaluate } from "../../hooks/protect-important-paths";
+
+  export const ProtectImportantPathsPlugin: Plugin = async (ctx) => {
+    return {
+      "tool.execute.before": async (input, output) => {
+        if (input.tool === "bash") {
+          const command = output.args.command;
+          const cwd = (ctx as any)?.directory || process.cwd();
+
+          const payload = {
+            tool_input: { command },
+            cwd
+          };
+
+          const result = evaluate(payload);
+          if (result && result.hookSpecificOutput?.permissionDecision === "deny") {
+            throw new Error(result.hookSpecificOutput.permissionDecisionReason);
+          }
+        }
+      },
+    };
+  };
+
+  export default ProtectImportantPathsPlugin;
+  ```
+* **說明**：OpenCode 會在啟動時自動載入此 TypeScript 插件。該插件會在執行 `bash` 工具前攔截指令並執行檢查，若判定為高風險刪除動作將拋出錯誤以阻止執行。
+
 
 這些 hooks 是額外防護欄，不是作業系統層級的安全邊界。目前只檢查 coding
 agent 透過已支援 shell 工具送出的 `rm` 與 `rmdir` 命令；無法防止代理未攔截

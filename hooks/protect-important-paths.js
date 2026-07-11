@@ -133,16 +133,30 @@ function extractInput(payload) {
   if (typeof toolInput === 'string') {
     try { toolInput = JSON.parse(toolInput); } catch (_) { toolInput = { command: toolInput }; }
   }
+  const command = toolInput?.command ?? toolInput?.cmd ?? toolInput?.CommandLine ?? payload.command ?? '';
+  const cwd = payload.cwd || toolInput?.Cwd || process.cwd();
+  const isCopilot = 'toolName' in payload || 'toolArgs' in payload;
+  const isAntigravity = 'toolCall' in payload;
+  const isCursor = payload.hook_event_name === 'beforeShellExecution';
+
   return {
-    command: toolInput?.command ?? toolInput?.cmd ?? toolInput?.CommandLine ?? '',
-    cwd: payload.cwd || toolInput?.Cwd || process.cwd(),
-    isCopilot: 'toolName' in payload || 'toolArgs' in payload,
-    isAntigravity: 'toolCall' in payload,
+    command,
+    cwd,
+    isCopilot,
+    isAntigravity,
+    isCursor,
   };
 }
 
-function denial(reason, isCopilot, isAntigravity) {
+function denial(reason, isCopilot, isAntigravity, isCursor) {
   const message = `拒絕刪除受保護的目錄：${reason} / Refused to remove protected directory: ${reason}`;
+  if (isCursor) {
+    return {
+      permission: 'deny',
+      user_message: message,
+      agent_message: message,
+    };
+  }
   if (isAntigravity) {
     return {
       allow_tool: false,
@@ -161,8 +175,9 @@ function denial(reason, isCopilot, isAntigravity) {
 }
 
 function evaluate(payload, env = process.env) {
-  const { command, cwd, isCopilot, isAntigravity } = extractInput(payload);
+  const { command, cwd, isCopilot, isAntigravity, isCursor } = extractInput(payload);
   if (!command) {
+    if (isCursor) return { permission: 'allow' };
     if (isAntigravity) return { allow_tool: true };
     return null;
   }
@@ -172,9 +187,10 @@ function evaluate(payload, env = process.env) {
 
   for (const target of commandTargets(command)) {
     const reason = protectedReason(target, cwd, home, extraDirs);
-    if (reason) return denial(reason, isCopilot, isAntigravity);
+    if (reason) return denial(reason, isCopilot, isAntigravity, isCursor);
   }
 
+  if (isCursor) return { permission: 'allow' };
   if (isAntigravity) return { allow_tool: true };
   return null;
 }

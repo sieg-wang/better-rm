@@ -76,4 +76,23 @@ const piResult = evaluate({ tool_input: { command: 'rm -rf .git' }, cwd: '/works
 assert.equal(piResult?.hookSpecificOutput?.permissionDecision, 'deny');
 assert.match(piResult?.hookSpecificOutput?.permissionDecisionReason, /Refused to remove protected directory/);
 
-console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 2 + 10}`);
+// Cursor tests
+function cursor(command, cwd = '/workspace/project') {
+  return {
+    hook_event_name: 'beforeShellExecution',
+    command,
+    cwd
+  };
+}
+
+for (const command of blocked) {
+  const result = evaluate(cursor(command), env);
+  assert.equal(result.permission, 'deny', command);
+  assert.match(result.user_message, /Refused to remove protected directory/, command);
+}
+
+for (const command of ['rm -rf build', 'rm file.txt', 'echo rm -rf /', 'better-rm -r tmp']) {
+  assert.equal(evaluate(cursor(command), env).permission, 'allow', command);
+}
+
+console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 3 + 14}`);

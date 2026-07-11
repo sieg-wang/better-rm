@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Cross-agent hooks support for Cursor (`.cursor/hooks.json`) and OpenCode (`.opencode/plugins/protect-important-paths.ts`)
+- Added Cursor test suites to `test-hooks.js`
+
 ## [1.2.0] - 2026-07-11
 
 ### Added
