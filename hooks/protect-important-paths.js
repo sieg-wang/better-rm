@@ -129,19 +129,26 @@ function commandTargets(command) {
 }
 
 function extractInput(payload) {
-  let toolInput = payload.tool_input ?? payload.toolArgs ?? {};
+  let toolInput = payload.tool_input ?? payload.toolArgs ?? payload.toolCall?.args ?? {};
   if (typeof toolInput === 'string') {
     try { toolInput = JSON.parse(toolInput); } catch (_) { toolInput = { command: toolInput }; }
   }
   return {
-    command: toolInput?.command ?? toolInput?.cmd ?? '',
-    cwd: payload.cwd || process.cwd(),
+    command: toolInput?.command ?? toolInput?.cmd ?? toolInput?.CommandLine ?? '',
+    cwd: payload.cwd || toolInput?.Cwd || process.cwd(),
     isCopilot: 'toolName' in payload || 'toolArgs' in payload,
+    isAntigravity: 'toolCall' in payload,
   };
 }
 
-function denial(reason, isCopilot) {
+function denial(reason, isCopilot, isAntigravity) {
   const message = `拒絕刪除受保護的目錄：${reason} / Refused to remove protected directory: ${reason}`;
+  if (isAntigravity) {
+    return {
+      allow_tool: false,
+      deny_reason: message,
+    };
+  }
   return isCopilot
     ? { permissionDecision: 'deny', permissionDecisionReason: message }
     : {
@@ -154,16 +161,21 @@ function denial(reason, isCopilot) {
 }
 
 function evaluate(payload, env = process.env) {
-  const { command, cwd, isCopilot } = extractInput(payload);
-  if (!command) return null;
+  const { command, cwd, isCopilot, isAntigravity } = extractInput(payload);
+  if (!command) {
+    if (isAntigravity) return { allow_tool: true };
+    return null;
+  }
   const home = env.HOME || os.homedir();
   const extraDirs = (env.BETTER_RM_PROTECTED_DIRS || '')
     .split(path.delimiter).filter(Boolean).map((item) => path.resolve(cwd, item));
 
   for (const target of commandTargets(command)) {
     const reason = protectedReason(target, cwd, home, extraDirs);
-    if (reason) return denial(reason, isCopilot);
+    if (reason) return denial(reason, isCopilot, isAntigravity);
   }
+
+  if (isAntigravity) return { allow_tool: true };
   return null;
 }
 

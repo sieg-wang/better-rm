@@ -294,7 +294,9 @@ export TRASH_DIR="$HOME/MyTrash"
 | Claude Code | `.claude/settings.json` |
 | Codex | `.codex/hooks.json` |
 | GitHub Copilot CLI／cloud agent | `.github/hooks/better-rm.json` |
+| Antigravity CLI／2.0 | `.agents/hooks.json` |
 | Qoder | `.qoder/settings.json` |
+| Pi | `.omp/hooks/pre/protect-important-paths.ts` (native) / `.pi/hooks.json` (JSON) |
 
 預設保護範圍與 `better-rm` 相同：系統根目錄、使用者家目錄，以及任何位置的
 `.git` 目錄。若要加入其他重要目錄，請以平台的 PATH 分隔字元設定
@@ -306,6 +308,159 @@ export BETTER_RM_PROTECTED_DIRS="/srv/data:/workspace/secrets"
 
 hooks 執行時需要 `node` 可用。Codex 還會要求使用者透過 `/hooks` 審閱並信任
 專案 hook；其他代理也可能依各自的安全設定要求確認。
+
+### 各個 Coding Agent 的安裝與設定說明 / Detailed Agent Configurations
+
+本專案支援將防護機制嵌入多種熱門的 AI Coding Agent。以下是為各代理設定 `PreToolUse` 的詳細說明：
+
+#### 1. Claude Code
+* **設定檔位置**：`.claude/settings.json`
+* **設定內容**：
+  ```json
+  {
+    "hooks": {
+      "PreToolUse": [
+        {
+          "matcher": "Bash",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\"",
+              "timeout": 5,
+              "statusMessage": "Checking protected directories..."
+            }
+          ]
+        }
+      ]
+    }
+  }
+  ```
+* **說明**：Claude Code 在執行 `Bash` 工具前，會先呼叫此 hook 檢查指令是否包含刪除受保護目錄的指令。
+
+#### 2. Codex
+* **設定檔位置**：`.codex/hooks.json`
+* **設定內容**：結構與 Claude Code 相同。
+* **說明**：載入設定檔後，請在 Codex 介面中執行 `/hooks` 來審閱並信任此專案 hook，以使防護生效。
+
+#### 3. GitHub Copilot CLI / Cloud Agent
+* **設定檔位置**：`.github/hooks/better-rm.json`
+* **設定內容**：
+  ```json
+  {
+    "version": 1,
+    "hooks": {
+      "preToolUse": [
+        {
+          "type": "command",
+          "bash": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\"",
+          "powershell": "node \"$(git rev-parse --show-toplevel)\\hooks\\protect-important-paths.js\"",
+          "matcher": "bash|powershell",
+          "timeoutSec": 5
+        }
+      ]
+    }
+  }
+  ```
+* **說明**：Copilot 會依據作業系統選擇執行 `bash` 或 `powershell` 版指令。
+
+#### 4. Antigravity CLI / Antigravity 2.0
+* **設定檔位置**：`.agents/hooks.json`
+* **設定內容**：
+  ```json
+  {
+    "better-rm-protection": {
+      "PreToolUse": [
+        {
+          "matcher": "run_command",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\"",
+              "timeout": 5
+            }
+          ]
+        }
+      ]
+    }
+  }
+  ```
+* **說明**：Antigravity 透過攔截 `run_command` 工具來防止對受保護目錄的刪除動作。若被阻擋會直接向 agent 回傳拒絕訊息。
+
+#### 5. Qoder
+* **設定檔位置**：`.qoder/settings.json`
+* **設定內容**：
+  ```json
+  {
+    "hooks": {
+      "PreToolUse": [
+        {
+          "matcher": "Bash",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\""
+            }
+          ]
+        }
+      ]
+    }
+  }
+  ```
+
+#### 6. Pi Coding Agent
+Pi 支援兩種整合方式，您可以選擇其中一種：
+* **方式 A：原生 TypeScript Hook (推薦)**
+  * **路徑**：`.omp/hooks/pre/protect-important-paths.ts`
+  * **內容**：
+    ```typescript
+    import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
+    // @ts-ignore
+    import { evaluate } from "../../../hooks/protect-important-paths";
+
+    export default function hook(pi: HookAPI): void {
+      pi.on("tool_call", async (event, ctx) => {
+        if (event.toolName === "bash") {
+          const command = event.input.command as string;
+          const cwd = (ctx as any)?.cwd || process.cwd();
+
+          const payload = {
+            tool_input: { command },
+            cwd
+          };
+
+          const result = evaluate(payload);
+          if (result && result.hookSpecificOutput?.permissionDecision === "deny") {
+            return {
+              block: true,
+              reason: result.hookSpecificOutput.permissionDecisionReason
+            };
+          }
+        }
+      });
+    }
+    ```
+* **方式 B：JSON 設定檔 (透過社群擴充套件如 `pi-hooks`)**
+  * **路徑**：`.pi/hooks.json`
+  * **內容**：
+    ```json
+    {
+      "hooks": {
+        "PreToolUse": [
+          {
+            "matcher": "Bash",
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\"",
+                "timeout": 5,
+                "statusMessage": "Checking protected directories..."
+              }
+            ]
+          }
+        ]
+      }
+    }
+    ```
 
 這些 hooks 是額外防護欄，不是作業系統層級的安全邊界。目前只檢查 coding
 agent 透過已支援 shell 工具送出的 `rm` 與 `rmdir` 命令；無法防止代理未攔截

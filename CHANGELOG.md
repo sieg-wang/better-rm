@@ -8,10 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Cross-agent `PreToolUse` hooks for Claude Code, Codex, GitHub Copilot, and Qoder
+- Cross-agent `PreToolUse` hooks for Claude Code, Codex, GitHub Copilot, Qoder, Google Antigravity (CLI / 2.0), and Pi coding agent
 - Shared protected-directory policy for destructive `rm` and `rmdir` commands
 - `BETTER_RM_PROTECTED_DIRS` support for adding project-specific protected paths
-- Hook protocol and policy tests in `test-hooks.js`
+- Hook protocol and policy tests in `test-hooks.js` including Antigravity and Pi payload support
+- Workspace configuration `.agents/hooks.json` for Google Antigravity
+- Native TypeScript hook `.omp/hooks/pre/protect-important-paths.ts` and JSON configuration `.pi/hooks.json` for Pi coding agent
 
 ## [1.1.0] - 2025-12-09
 

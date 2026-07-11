@@ -37,7 +37,6 @@ for (const command of blocked) {
   const result = evaluate(claude(command), env);
   assert.equal(result?.hookSpecificOutput?.permissionDecision, 'deny', command);
 }
-
 for (const command of ['rm -rf build', 'rm file.txt', 'echo rm -rf /', 'better-rm -r tmp']) {
   assert.equal(evaluate(claude(command), env), null, command);
 }
@@ -46,4 +45,35 @@ const copilotResult = evaluate(copilot('rm -rf .git'), env);
 assert.equal(copilotResult.permissionDecision, 'deny');
 assert.match(copilotResult.permissionDecisionReason, /Refused to remove protected directory/);
 
-console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length + 5}`);
+// Antigravity tests
+function antigravity(command, cwd = '/workspace/project') {
+  return {
+    conversationId: 'test-uuid-12345',
+    workspacePaths: ['/workspace/project'],
+    stepIdx: 1,
+    toolCall: {
+      name: 'run_command',
+      args: {
+        CommandLine: command,
+        Cwd: cwd
+      }
+    }
+  };
+}
+
+for (const command of blocked) {
+  const result = evaluate(antigravity(command), env);
+  assert.equal(result.allow_tool, false, command);
+  assert.match(result.deny_reason, /Refused to remove protected directory/, command);
+}
+
+for (const command of ['rm -rf build', 'rm file.txt', 'echo rm -rf /', 'better-rm -r tmp']) {
+  assert.equal(evaluate(antigravity(command), env).allow_tool, true, command);
+}
+
+// Pi coding agent tests
+const piResult = evaluate({ tool_input: { command: 'rm -rf .git' }, cwd: '/workspace/project' }, env);
+assert.equal(piResult?.hookSpecificOutput?.permissionDecision, 'deny');
+assert.match(piResult?.hookSpecificOutput?.permissionDecisionReason, /Refused to remove protected directory/);
+
+console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 2 + 10}`);

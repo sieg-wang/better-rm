@@ -4,9 +4,21 @@ This document describes the AI agents and automation used in the development of 
 
 ## Overview
 
-This project uses GitHub Copilot and AI-assisted development to maintain code quality, implement features, and address issues efficiently.
+This project uses GitHub Copilot, Google Antigravity, Pi, and AI-assisted development to maintain code quality, implement features, and address issues efficiently.
 
 ## Development Agents
+
+### Google Antigravity (CLI / 2.0)
+- **Purpose**: Safety gating and execution control
+- **Scope**: Intercepts run_command tool calls to prevent destructive deletions of protected paths
+- **Integration**: Workspace-scoped hooks config in `.agents/hooks.json`
+- **Feedback**: Automatically blocks unauthorized tool execution and returns a descriptive denial reason
+
+### Pi Coding Agent
+- **Purpose**: Safety gating and validation for tool calls
+- **Scope**: Intercepts bash tool execution to block dangerous deletions of protected directories
+- **Integration**: Native TypeScript hook in `.omp/hooks/pre/protect-important-paths.ts` and JSON configuration in `.pi/hooks.json`
+- **Feedback**: Stops execution and supplies a rejection reason when a deletion violates security policy
 
 ### Code Review Agent
 - **Purpose**: Automated code review for pull requests
