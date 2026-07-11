@@ -60,14 +60,14 @@ rm --version
 1. 複製專案到本地目錄：
 
 ```bash
-git clone https://github.com/doggy8088/better-rm.git ~/better-rm
+git clone https://github.com/doggy8088/better-rm.git ~/.better-rm
 ```
 
 2. 設定別名，在 `~/.bashrc` 或 `~/.zshrc` 中加入以下內容：
 
 ```bash
 # 使用 better-rm 替代 rm 命令
-alias rm='~/better-rm/better-rm'
+alias rm='~/.better-rm/better-rm'
 ```
 
 3. 重新載入設定檔：
@@ -671,28 +671,37 @@ rm -rf /   # 刪除整個系統！
 
 ## 疑難排解
 
-### 問題：找不到 rm 命令
+### 問題：找不到 rm 命令 / Command not found
 
 **解決方法：**
 
-1. 檢查 `~/bin` 是否在 PATH 中：
+1. 如果您使用**快速安裝（推薦）**或**方法一（手動別名）**，可能是因為尚未重新載入 shell 設定檔。請執行以下命令以重新載入，或重啟終端機：
    ```bash
-   echo $PATH
+   source ~/.bashrc  # 如果使用 bash
+   # 或
+   source ~/.zshrc   # 如果使用 zsh
    ```
 
-2. 重新載入設定檔：
-   ```bash
-   source ~/.bashrc  # 或 source ~/.zshrc
-   ```
+2. 如果您使用**方法二（複製到 PATH）**：
+   - 請檢查 `~/bin` 或 `/usr/local/bin` 是否已加入 `PATH` 中（可以使用 `echo $PATH` 檢視）。
+   - 確保已重新載入設定檔。
 
-### 問題：提示權限被拒
+### 問題：提示權限被拒 / Permission denied
 
 **解決方法：**
 
-確保腳本有執行權限：
-```bash
-chmod +x ~/bin/rm
-```
+請確保 `better-rm` 檔案具備執行權限。依據您的安裝方式，執行對應的指令：
+
+- 若使用**快速安裝**或**方法一（手動別名）**：
+  ```bash
+  chmod +x ~/.better-rm/better-rm
+  ```
+- 若使用**方法二（複製到 PATH）**：
+  ```bash
+  chmod +x ~/bin/better-rm
+  # 或如果是複製到 /usr/local/bin（需要 sudo）
+  sudo chmod +x /usr/local/bin/better-rm
+  ```
 
 ### 問題：垃圾桶佔用太多空間
 
