@@ -284,6 +284,33 @@ export TRASH_DIR="$HOME/MyTrash"
 
 - `.git` - Git 版本控制目錄（任何位置的 .git 目錄）
 
+## Coding agent hooks
+
+本專案提供共用的 `PreToolUse` 防護程式，讓支援 hooks 的 coding agent 在執行
+`rm` 或 `rmdir` 前檢查目標路徑。下列專案層級設定會自動載入同一支程式：
+
+| Coding agent | 設定檔 |
+|---|---|
+| Claude Code | `.claude/settings.json` |
+| Codex | `.codex/hooks.json` |
+| GitHub Copilot CLI／cloud agent | `.github/hooks/better-rm.json` |
+| Qoder | `.qoder/settings.json` |
+
+預設保護範圍與 `better-rm` 相同：系統根目錄、使用者家目錄，以及任何位置的
+`.git` 目錄。若要加入其他重要目錄，請以平台的 PATH 分隔字元設定
+`BETTER_RM_PROTECTED_DIRS`：
+
+```bash
+export BETTER_RM_PROTECTED_DIRS="/srv/data:/workspace/secrets"
+```
+
+hooks 執行時需要 `node` 可用。Codex 還會要求使用者透過 `/hooks` 審閱並信任
+專案 hook；其他代理也可能依各自的安全設定要求確認。
+
+這些 hooks 是額外防護欄，不是作業系統層級的安全邊界。目前只檢查 coding
+agent 透過已支援 shell 工具送出的 `rm` 與 `rmdir` 命令；無法防止代理未攔截
+的工具路徑、停用 hooks 後的操作，或使用者在代理外直接執行的命令。
+
 ### 保護機制
 
 當你嘗試刪除受保護的目錄時，`better-rm` 會：

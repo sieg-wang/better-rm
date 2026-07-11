@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Cross-agent `PreToolUse` hooks for Claude Code, Codex, GitHub Copilot, and Qoder
+- Shared protected-directory policy for destructive `rm` and `rmdir` commands
+- `BETTER_RM_PROTECTED_DIRS` support for adding project-specific protected paths
+- Hook protocol and policy tests in `test-hooks.js`
+
 ## [1.1.0] - 2025-12-09
 
 ### Added
