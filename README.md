@@ -299,6 +299,7 @@ export TRASH_DIR="$HOME/MyTrash"
 | Pi | `.omp/hooks/pre/protect-important-paths.ts` (native) / `.pi/hooks.json` (JSON) |
 | Cursor | `.cursor/hooks.json` |
 | OpenCode | `.opencode/plugins/protect-important-paths.ts` |
+| Grok Build | `.grok/hooks/better-rm.json` |
 
 預設保護範圍與 `better-rm` 相同：系統根目錄、使用者家目錄，以及任何位置的
 `.git` 目錄。若要加入其他重要目錄，請以平台的 PATH 分隔字元設定
@@ -514,6 +515,30 @@ Pi 支援兩種整合方式，您可以選擇其中一種：
   export default ProtectImportantPathsPlugin;
   ```
 * **說明**：OpenCode 會在啟動時自動載入此 TypeScript 插件。該插件會在執行 `bash` 工具前攔截指令並執行檢查，若判定為高風險刪除動作將拋出錯誤以阻止執行。
+
+#### 9. Grok Build
+* **設定檔位置**：`.grok/hooks/better-rm.json`
+* **設定內容**：
+  ```json
+  {
+    "hooks": {
+      "PreToolUse": [
+        {
+          "matcher": "Bash",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\"",
+              "timeout": 5
+            }
+          ]
+        }
+      ]
+    }
+  }
+  ```
+* **說明**：Grok Build 會讀取 `.grok/hooks/` 目錄下的所有 JSON 檔以載入 hooks。當偵測到危險指令時，本防護程式會回傳 `{"decision": "deny", "reason": "..."}` 供其阻擋指令的執行。請注意，專案層級的 hooks 首次執行時可能需要藉由 TUI 中的 `/hooks-trust` 或是帶有 `--trust` 參數啟動以取得授權。
+
 
 
 這些 hooks 是額外防護欄，不是作業系統層級的安全邊界。目前只檢查 coding

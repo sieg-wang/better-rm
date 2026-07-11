@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

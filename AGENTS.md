@@ -4,7 +4,7 @@ This document describes the AI agents and automation used in the development of 
 
 ## Overview
 
-This project uses GitHub Copilot, Google Antigravity, Pi, and AI-assisted development to maintain code quality, implement features, and address issues efficiently.
+This project uses GitHub Copilot, Google Antigravity, Pi, Grok Build, and AI-assisted development to maintain code quality, implement features, and address issues efficiently.
 
 ## Development Agents
 
@@ -31,6 +31,12 @@ This project uses GitHub Copilot, Google Antigravity, Pi, and AI-assisted develo
 - **Scope**: Intercepts tool execution to block dangerous deletions of protected directories
 - **Integration**: Workspace-scoped TypeScript plugin in `.opencode/plugins/protect-important-paths.ts`
 - **Feedback**: Stops tool execution and throws an error when a deletion violates security policy
+
+### Grok Build Agent
+- **Purpose**: Safety gating and execution control
+- **Scope**: Intercepts tool calls (like Bash) to prevent dangerous deletions of protected directories
+- **Integration**: Workspace-scoped hooks config in `.grok/hooks/better-rm.json`
+- **Feedback**: Stops tool execution and returns a descriptive denial reason
 
 ### Code Review Agent
 - **Purpose**: Automated code review for pull requests

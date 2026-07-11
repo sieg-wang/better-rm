@@ -95,4 +95,28 @@ for (const command of ['rm -rf build', 'rm file.txt', 'echo rm -rf /', 'better-r
   assert.equal(evaluate(cursor(command), env).permission, 'allow', command);
 }
 
-console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 3 + 14}`);
+// Grok Build tests
+function grok(command, cwd = '/workspace/project') {
+  return {
+    hookEventName: 'PreToolUse',
+    sessionId: 'test-session-555',
+    cwd,
+    workspaceRoot: '/workspace/project',
+    toolName: 'Bash',
+    toolInput: {
+      command
+    }
+  };
+}
+
+for (const command of blocked) {
+  const result = evaluate(grok(command), env);
+  assert.equal(result.decision, 'deny', command);
+  assert.match(result.reason, /Refused to remove protected directory/, command);
+}
+
+for (const command of ['rm -rf build', 'rm file.txt', 'echo rm -rf /', 'better-rm -r tmp']) {
+  assert.equal(evaluate(grok(command), env).decision, 'allow', command);
+}
+
+console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + 18}`);

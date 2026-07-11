@@ -129,7 +129,7 @@ function commandTargets(command) {
 }
 
 function extractInput(payload) {
-  let toolInput = payload.tool_input ?? payload.toolArgs ?? payload.toolCall?.args ?? {};
+  let toolInput = payload.tool_input ?? payload.toolArgs ?? payload.toolCall?.args ?? payload.toolInput ?? {};
   if (typeof toolInput === 'string') {
     try { toolInput = JSON.parse(toolInput); } catch (_) { toolInput = { command: toolInput }; }
   }
@@ -138,6 +138,7 @@ function extractInput(payload) {
   const isCopilot = 'toolName' in payload || 'toolArgs' in payload;
   const isAntigravity = 'toolCall' in payload;
   const isCursor = payload.hook_event_name === 'beforeShellExecution';
+  const isGrok = 'toolInput' in payload || payload.hookEventName === 'PreToolUse';
 
   return {
     command,
@@ -145,11 +146,18 @@ function extractInput(payload) {
     isCopilot,
     isAntigravity,
     isCursor,
+    isGrok,
   };
 }
 
-function denial(reason, isCopilot, isAntigravity, isCursor) {
+function denial(reason, isCopilot, isAntigravity, isCursor, isGrok) {
   const message = `拒絕刪除受保護的目錄：${reason} / Refused to remove protected directory: ${reason}`;
+  if (isGrok) {
+    return {
+      decision: 'deny',
+      reason: message,
+    };
+  }
   if (isCursor) {
     return {
       permission: 'deny',
@@ -175,8 +183,9 @@ function denial(reason, isCopilot, isAntigravity, isCursor) {
 }
 
 function evaluate(payload, env = process.env) {
-  const { command, cwd, isCopilot, isAntigravity, isCursor } = extractInput(payload);
+  const { command, cwd, isCopilot, isAntigravity, isCursor, isGrok } = extractInput(payload);
   if (!command) {
+    if (isGrok) return { decision: 'allow' };
     if (isCursor) return { permission: 'allow' };
     if (isAntigravity) return { allow_tool: true };
     return null;
@@ -187,9 +196,10 @@ function evaluate(payload, env = process.env) {
 
   for (const target of commandTargets(command)) {
     const reason = protectedReason(target, cwd, home, extraDirs);
-    if (reason) return denial(reason, isCopilot, isAntigravity, isCursor);
+    if (reason) return denial(reason, isCopilot, isAntigravity, isCursor, isGrok);
   }
 
+  if (isGrok) return { decision: 'allow' };
   if (isCursor) return { permission: 'allow' };
   if (isAntigravity) return { allow_tool: true };
   return null;
