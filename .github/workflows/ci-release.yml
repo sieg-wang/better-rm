@@ -1,0 +1,172 @@
+name: CI and release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "**"
+
+permissions:
+  contents: read
+
+# Keep Node explicit because hook and installer tests execute Node.js directly.
+env:
+  NODE_VERSION: "22.17.0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Test source tree
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out pushed revision
+        # actions/checkout v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        # actions/setup-node v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          check-latest: false
+
+      - name: Show test runtime versions
+        run: |
+          set -euo pipefail
+          bash --version
+          git --version
+          node --version
+
+      - name: Run repository test suites
+        run: |
+          set -euo pipefail
+          ./test-better-rm.sh
+          node ./test-hooks.js
+          ./test-install-hooks.sh
+
+      - name: Verify tests did not modify the checkout
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
+
+  release:
+    name: Package and publish release
+    needs: test
+    if: github.ref_type == 'tag' && needs.test.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out tagged revision
+        # actions/checkout v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Package complete source distribution
+        id: package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # The source archive is the complete supported distribution. The existing
+          # one-line bootstrap installer intentionally follows main, not a tag.
+          asset_tag="${TAG//\//-}"
+          archive_name="better-rm-${asset_tag}.tar.gz"
+          checksum_name="${archive_name}.sha256"
+          prefix="better-rm-${asset_tag}/"
+          archive_path="dist/${archive_name}"
+          manifest_path="dist/MANIFEST.txt"
+          archive_manifest="$(mktemp)"
+          extract_dir="$(mktemp -d)"
+          trap 'rm -f "$archive_manifest"; rm -rf "$extract_dir"' EXIT
+
+          mkdir -p dist
+          release_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          git ls-tree -r --name-only "$release_commit" | LC_ALL=C sort > "$manifest_path"
+          git archive --format=tar --prefix="$prefix" "$release_commit" | gzip -n > "$archive_path"
+
+          tar -tzf "$archive_path" | while IFS= read -r archive_entry; do
+            relative_entry="${archive_entry#"$prefix"}"
+            if [ -n "$relative_entry" ] && [[ "$relative_entry" != */ ]]; then
+              printf '%s\n' "$relative_entry"
+            fi
+          done | LC_ALL=C sort > "$archive_manifest"
+          diff -u "$manifest_path" "$archive_manifest"
+
+          for required_file in \
+            better-rm \
+            install.sh \
+            install-hooks.sh \
+            hooks/protect-important-paths.js \
+            README.md \
+            CHANGELOG.md \
+            LICENSE; do
+            grep -Fqx "$required_file" "$archive_manifest"
+          done
+
+          tar -xzf "$archive_path" -C "$extract_dir"
+          for executable_file in \
+            better-rm \
+            install.sh \
+            install-hooks.sh \
+            hooks/protect-important-paths.js; do
+            test -x "$extract_dir/$prefix$executable_file"
+          done
+
+          (
+            cd dist
+            sha256sum "$archive_name" > "$checksum_name"
+          )
+
+          {
+            printf 'archive_name=%s\n' "$archive_name"
+            printf 'checksum_name=%s\n' "$checksum_name"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ARCHIVE_NAME: ${{ steps.package.outputs.archive_name }}
+          CHECKSUM_NAME: ${{ steps.package.outputs.checksum_name }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "A release already exists for tag '$TAG'; refusing to overwrite published assets." >&2
+            exit 1
+          fi
+
+          release_flags=(--generate-notes --verify-tag)
+          semver_pattern='^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ "$TAG" =~ $semver_pattern ]]; then
+            if [[ "$TAG" == *-* ]]; then
+              release_flags+=(--prerelease --latest=false)
+            else
+              release_flags+=(--latest)
+            fi
+          else
+            release_flags+=(--latest=false)
+          fi
+
+          gh release create "$TAG" \
+            "dist/$ARCHIVE_NAME" \
+            "dist/$CHECKSUM_NAME" \
+            dist/MANIFEST.txt \
+            --title "better-rm $TAG" \
+            "${release_flags[@]}"
