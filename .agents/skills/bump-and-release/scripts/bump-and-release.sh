@@ -6,7 +6,8 @@ set -euo pipefail
 
 PROJECT=""
 MODE=""
-BUMP_MODE=""
+BUMP_MODE="patch"
+BUMP_MODE_EXPLICIT=0
 TARGET_VERSION=""
 CHANGELOG_NOTE=""
 DRY_RUN=0
@@ -17,7 +18,7 @@ SKIP_CHANGELOG=0
 show_help() {
   cat <<'EOF'
 Usage:
-  bump-and-release.sh bump [options] <major|minor|patch>
+  bump-and-release.sh bump [options] [major|minor|patch]
   bump-and-release.sh bump [options] --to <version>
   bump-and-release.sh release [options]
 
@@ -31,8 +32,13 @@ Options:
   --tag-prefix <prefix>    Tag prefix for release (default: v)
   -h, --help               Show this help
 
+Note:
+  若未指定 bump 類型，預設使用 patch。
+  目前版本直接從 better-rm 取得，避免手動輸入。
+
 Examples:
   bump-and-release.sh bump --repo ~/projects/better-rm minor
+  bump-and-release.sh bump --repo ~/projects/better-rm
   bump-and-release.sh bump --repo ~/projects/better-rm --to 1.5.0
   bump-and-release.sh release --repo ~/projects/better-rm
 EOF
@@ -82,13 +88,13 @@ parse_args() {
         exit 0
         ;;
       major|minor|patch)
-        if [[ -z "$BUMP_MODE" ]]; then
-          BUMP_MODE="$1"
-          shift
-        else
+        if [[ "$BUMP_MODE_EXPLICIT" -eq 1 ]]; then
           echo "Duplicate bump mode: $1" >&2
           exit 2
         fi
+        BUMP_MODE_EXPLICIT=1
+        BUMP_MODE="$1"
+        shift
         ;;
       *)
         echo "未知參數：$1" >&2

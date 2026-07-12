@@ -27,6 +27,7 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
 ```bash
 ./.agents/skills/bump-and-release/scripts/bump-and-release.sh bump --repo /path/to/better-rm <major|minor|patch>
 ./.agents/skills/bump-and-release/scripts/bump-and-release.sh bump --repo /path/to/better-rm --to 1.5.0
+./.agents/skills/bump-and-release/scripts/bump-and-release.sh bump --repo /path/to/better-rm
 ```
 
 - 會更新版本來源與驗證：
@@ -38,24 +39,27 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
 - 預設會在 `CHANGELOG.md` 的 `[Unreleased]` 下新增一則「Added」項目，除非傳入 `--skip-changelog`。
 - 新版本計算錯誤或已存在於檔案中的版本會直接失敗，避免誤更新。
 
+- 若不指定 `major` 或 `minor`，預設為 `patch`。
+- 版本來源一律從 `better-rm` 讀取，避免手動輸入版本號。
+
 ### 2) 做版本提升並跑發佈前檢核
 
 ```bash
 ./.agents/skills/bump-and-release/scripts/bump-and-release.sh release --repo /path/to/better-rm
 ```
 
-- 先檢查 `git status` 是否乾淨與目前版本是否正確一致。
+- 先檢查 `git status` 是否乾淨與目前版本是否正確一致；`--apply` 允許在有未提交變更時仍繼續執行，但建議先清理乾淨。
 - 依序執行：
   - `./test-better-rm.sh`
   - `node ./test-hooks.js`
   - `./test-install-hooks.sh`
 - 列出推薦發佈命令（包含 `git commit`、`git tag`、`git push`），不會預設直接推播。
-- 可用 `--apply` 在執行前加上 `bump` 動作，或搭配 `--dry-run` 僅檢查流程。
+- 可搭配 `--dry-run` 僅檢查流程。
 
 ## 建議工作流程
 
 1. `bump` 到目標版本並檢查 `git diff`，確認 `README.md`、`CHANGELOG.md`、版本輸出一致。
-2. `release --repo <repo> --apply --version <new_version>` 或由外部流程輸入變更訊息後提交。
+2. 進行提交與推播前，視需求執行 `release --repo <repo>` 取得建議發佈指令，或直接依流程提交。
 3. 如需直接打 tag，執行輸出的 `git tag` 指令；發佈前再次檢查 `ci-release.yml` 是否無需額外修正。
 
 ## 參考資源
