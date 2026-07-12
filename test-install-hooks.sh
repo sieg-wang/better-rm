@@ -194,8 +194,7 @@ for agent in claude codex cursor copilot antigravity qoder pi grok; do
     assert_file "matrix project install creates ${agent} settings" "$AGENT_SETTINGS"
     assert_equal "matrix ${agent} hook count is one" "1" "$(hook_count "$AGENT_SETTINGS" "$agent")"
     assert_equal "matrix ${agent} settings mode is 644" "644" "$(file_mode "$AGENT_SETTINGS")"
-
-    assert_contains "matrix ${agent} hook is placed beside settings" "$(cat "$AGENT_SETTINGS")" "$AGENT_SETTINGS_DIR/protect-important-paths.js"
+    assert_file "matrix ${agent} hook is placed beside settings" "$AGENT_SETTINGS_DIR/protect-important-paths.js"
 
     AGENT_HASH_BEFORE=$(file_hash "$AGENT_SETTINGS")
     (
@@ -420,12 +419,9 @@ mkdir -p "$MISSING_SOURCE"
 cp "$INSTALLER" "$MISSING_SOURCE/install-hooks.sh"
 chmod +x "$MISSING_SOURCE/install-hooks.sh"
 MISSING_HOME="$TMP_ROOT/missing-home"
-assert_failure "missing shared hook fails" env HOME="$MISSING_HOME" CLAUDE_CONFIG_DIR= "$MISSING_SOURCE/install-hooks.sh" -a claude --global
-if [ ! -e "$MISSING_HOME/.claude/settings.json" ]; then
-    pass "missing shared hook does not create settings"
-else
-    fail "missing shared hook does not create settings"
-fi
+assert_success "missing shared hook installs from release" env HOME="$MISSING_HOME" CLAUDE_CONFIG_DIR= "$MISSING_SOURCE/install-hooks.sh" -a claude --global
+assert_file "missing shared hook creates settings" "$MISSING_HOME/.claude/settings.json"
+assert_file "missing shared hook installs local runtime" "$MISSING_HOME/.claude/protect-important-paths.js"
 
 echo ""
 echo "========================================"
