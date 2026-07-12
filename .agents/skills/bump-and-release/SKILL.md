@@ -18,6 +18,7 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
 
 - 目前工作目錄位於 `better-rm` 專案根目錄（或以 `--repo` 指定）。
 - 需要安裝 `git`、`bash`、`node`。
+- 需要安裝 `gh`（GitHub CLI），自動化 release 流程會用它更新 Release Note。
 - `./test-better-rm.sh`、`./test-hooks.js`、`./test-install-hooks.sh` 可正常執行。
 
 ## 主要指令
@@ -33,7 +34,8 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
   - 若標籤已存在：直接停止，提醒先進行 bump。
   - 若標籤不存在：以目前版本進行 release 準備，不會再做版本位元調整。
   - 若 release 相關檔案無變更，將直接建立標籤；若有變更，會自動提交後再標籤。
-- 真正的 GitHub Release 建立並非由本技能直接執行，而是由 GitHub Actions 的 `ci-release.yml` 依 tag push 觸發。
+- tag push 觸發後，流程會等待 `ci-release.yml` 完成，並在 Release 建立後自動使用 `gh release edit` 以**繁體中文**更新 Release Note。
+- 真正的 GitHub Release 物件建立仍由 GitHub Actions 的 `ci-release.yml` 負責。
 - 預設會啟用 `--apply`，避免在本機工作目錄有未提交變更時中斷流程（這些變更若不在 release 檔案清單內，仍不會被提交到 release commit）。
 
 ```bash
@@ -79,7 +81,7 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
   - `node ./test-hooks.js`
   - `./test-install-hooks.sh`
 - 若未指定 `--auto`，僅列出推薦發佈命令（包含 `git commit`、`git tag`、`git push`）。
-- `git push` 會觸發 CI 流程建立 GitHub Release；本腳本不負責直接呼叫 GitHub Release API。
+- `git push` 會先觸發 CI 流程建立 GitHub Release，完成後腳本會改為直接更新對應 Release 的說明文字。
 - 可搭配 `--dry-run` 僅檢查流程。
 
 ## 建議工作流程

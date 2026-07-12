@@ -16,6 +16,18 @@ VERSION_PREFIX="v"
 SKIP_CHANGELOG=0
 AUTO_RELEASE=0
 PUSH=1
+CI_WAIT_TIMEOUT_SECONDS=1800
+CI_WAIT_INTERVAL_SECONDS=15
+CI_WORKFLOW_FILE="ci-release.yml"
+
+RELEASE_FILES=(
+  "CHANGELOG.md"
+  "better-rm"
+  "test-better-rm.sh"
+  "install.sh"
+  "install-hooks.sh"
+  "README.md"
+)
 
 show_help() {
   cat <<'EOF'
@@ -37,12 +49,13 @@ Options:
   --tag-prefix <prefix>    Tag prefix for release (default: v)
   -h, --help               Show this help
 
-Note:
+  Note:
   若未指定 bump 類型，預設使用 patch。
   目前版本直接從 better-rm 取得，避免手動輸入。
   不輸入 mode 時預設執行 release；若當前版本標籤已存在，將停止並要求先 bump。
   不輸入其它參數時，會預設啟用 auto 模式，直接完成發佈流程（不再只是列出建議命令）。
-  release 僅會完成測試、標記與推播；實際 GitHub Release 建立由 `.github/workflows/ci-release.yml` 在 tags push 時完成。
+  release 僅會完成測試、標記與推播；推播後會等待 `.github/workflows/ci-release.yml` 執行完成，
+  並以繁中 Release Note 更新 Release 內容。
 
 Examples:
   bump-and-release.sh                     # 一鍵走完整發佈流程
@@ -343,16 +356,29 @@ run_release() {
   local version
   version="$(current_version)"
   local tag="${VERSION_PREFIX}${version}"
-  local -a release_files=(
-    "CHANGELOG.md"
-    "better-rm"
-    "test-better-rm.sh"
-    "install.sh"
-    "install-hooks.sh"
-    "README.md"
-  )
+  local previous_tag
+  previous_tag="$(git -C "$PROJECT" tag --sort=-creatordate | grep -m 1 "^${VERSION_PREFIX}[0-9]\+\.[0-9]\+\.[0-9]\+$" || true)"
+  local previous_tag_or_head=""
   local changed
   local -a push_cmd=(git -C "$PROJECT" push origin HEAD --follow-tags)
+  local branch
+  local sha
+  local release_notes_file
+  local commit_summary
+  local run_info
+  local ci_run_status
+  local ci_conclusion
+  local ci_url
+  local deadline
+  local run_count=0
+  local release_body
+  local release_ready=0
+  local release_files_list
+  local commit_count
+  local release_url
+
+  branch="$(git -C "$PROJECT" rev-parse --abbrev-ref HEAD)"
+  sha="$(git -C "$PROJECT" rev-parse HEAD)"
 
   if release_tag_exists "$version"; then
     echo "目前版本 ${version} 已存在標籤 ${tag}，請先執行 bump 後再做 release。"
@@ -361,12 +387,12 @@ run_release() {
 
   run_release_checks
 
-  changed="$(git -C "$PROJECT" status --short -- "${release_files[@]}" || true)"
+  changed="$(git -C "$PROJECT" status --short -- "${RELEASE_FILES[@]}" || true)"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     if [[ -n "$changed" ]]; then
       echo "DRY-RUN: 要新增並提交 release 檔案如下："
       echo "$changed"
-      echo "DRY-RUN: git -C \"$PROJECT\" add ${release_files[*]}"
+      echo "DRY-RUN: git -C \"$PROJECT\" add ${RELEASE_FILES[*]}"
       echo "DRY-RUN: git -C \"$PROJECT\" commit -m \"chore(release): bump to ${version}\""
     else
       echo "DRY-RUN: 目前版本檔案無待提交差異，將直接標記標籤。"
@@ -382,8 +408,8 @@ run_release() {
 
   if [[ "$AUTO_RELEASE" -eq 1 ]]; then
     if [[ -n "$changed" ]]; then
-      git -C "$PROJECT" add "${release_files[@]}"
-      if ! git -C "$PROJECT" diff --cached --quiet -- "${release_files[@]}"; then
+      git -C "$PROJECT" add "${RELEASE_FILES[@]}"
+      if ! git -C "$PROJECT" diff --cached --quiet -- "${RELEASE_FILES[@]}"; then
         echo "發現版本相關變更，將自動提交："
         git -C "$PROJECT" commit -m "chore(release): bump to ${version}"
       else
@@ -396,9 +422,136 @@ run_release() {
     git -C "$PROJECT" tag -a "${tag}" -m "Release ${tag}"
     echo "已建立標籤：${tag}"
     if [[ "$PUSH" -eq 1 ]]; then
+      require_command gh
       echo "開始推播..."
       "${push_cmd[@]}"
       echo "已完成推播。CI 發佈流程會基於標籤建立 GitHub Release。"
+
+      echo "等待 ${CI_WORKFLOW_FILE} CI 完成（標籤 ${tag}）。"
+      deadline=$((SECONDS + CI_WAIT_TIMEOUT_SECONDS))
+      while [[ $SECONDS -lt $deadline ]]; do
+        run_count=$((run_count + 1))
+        run_info="$(gh run list \
+          --workflow "$CI_WORKFLOW_FILE" \
+          --limit 20 \
+          --json status,conclusion,url,headSha,createdAt \
+          --jq 'map(select(.headSha == "'$sha'")) | sort_by(.createdAt) | reverse | if length > 0 then (.[0].status + "\t" + (.[0].conclusion // "") + "\t" + (.[0].url // "")) else "" end' \
+          || true)"
+
+        ci_run_status=""
+        ci_conclusion=""
+        ci_url=""
+        if [[ -n "$run_info" ]]; then
+          IFS=$'\t' read -r ci_run_status ci_conclusion ci_url <<< "$run_info"
+        fi
+
+        if [[ -z "$ci_run_status" ]]; then
+          echo "未找到對應的 ci-release workflow 執行紀錄，稍後再查（已檢查 ${run_count} 次）。"
+        elif [[ "$ci_run_status" == "completed" ]]; then
+          if [[ "$ci_conclusion" == "success" ]]; then
+            echo "CI 已完成，流程網址：${ci_url}"
+            break
+          fi
+          echo "CI 結束但未成功，status=${ci_run_status}, conclusion=${ci_conclusion}。請先在 GitHub Actions 檢查後重試。"
+          exit 2
+        else
+          echo "CI 執行中（status=${ci_run_status}，第 ${run_count} 次檢查）。"
+        fi
+
+        sleep "$CI_WAIT_INTERVAL_SECONDS"
+      done
+
+      if [[ -z "${ci_run_status-}" || "${ci_run_status}" != "completed" ]]; then
+        echo "等待 CI 完成逾時（$CI_WAIT_TIMEOUT_SECONDS 秒）。"
+        exit 2
+      fi
+
+      echo "確認 Release 物件建立中（標籤 ${tag}）。"
+      deadline=$((SECONDS + CI_WAIT_TIMEOUT_SECONDS))
+      while [[ $SECONDS -lt $deadline ]]; do
+        if gh release view "${tag}" --json id >/dev/null 2>&1; then
+          release_ready=1
+          break
+        fi
+        echo "Release 尚未建立，等待中（第 ${run_count} 次）..."
+        sleep "$CI_WAIT_INTERVAL_SECONDS"
+        run_count=$((run_count + 1))
+      done
+
+      if [[ "$release_ready" -ne 1 ]]; then
+        echo "等待 Release 建立逾時（$CI_WAIT_TIMEOUT_SECONDS 秒）。"
+        exit 2
+      fi
+
+      previous_tag_or_head="$previous_tag"
+      if [[ -z "$previous_tag_or_head" ]]; then
+        previous_tag_or_head="${VERSION_PREFIX}${version}^"
+      fi
+
+      release_body="$(awk 'BEGIN {in_unreleased=0}
+        /^## \[Unreleased\]/{in_unreleased=1; next}
+        in_unreleased && /^## \[/{in_unreleased=0}
+        in_unreleased {print}
+      ' "$PROJECT/CHANGELOG.md")"
+
+      if [[ -z "$release_body" ]]; then
+        release_body="- 尚未在 CHANGELOG.md 記錄 Unreleased 變更，請以對應 PR 記錄補充。"
+      fi
+
+      if [[ -n "$previous_tag" ]]; then
+        commit_summary="$(git -C "$PROJECT" log --no-color --pretty=format:"- %h %s" "$previous_tag_or_head..$tag" || true)"
+        commit_count="$(git -C "$PROJECT" rev-list --count "$previous_tag_or_head..$tag" || true)"
+      else
+        commit_summary="$(git -C "$PROJECT" log --no-color --pretty=format:"- %h %s" -n 20 || true)"
+        commit_count="$(git -C "$PROJECT" rev-list --count --max-count=20 "$previous_tag_or_head..$tag" || true)"
+      fi
+      release_files_list="$(git -C "$PROJECT" diff --name-only "$previous_tag_or_head..$tag" || true)"
+      if [[ -z "$release_files_list" ]]; then
+        release_files_list="- 無可追蹤變更檔案"
+      fi
+      release_url="$(gh release view "$tag" --json url --jq '.url' || true)"
+
+      release_notes_file="$(mktemp)"
+      {
+        echo "## better-rm ${version} 發佈說明"
+        echo ""
+        echo "### 版本資訊"
+        echo "- 版本：${version}"
+        echo "- 標籤：${tag}"
+        echo "- 發行分支：${branch}"
+        echo "- Commit：${sha}"
+        if [[ -n "$release_url" ]]; then
+          echo "- Release 連結：${release_url}"
+        fi
+        echo "- Commit 數：${commit_count:-0}"
+        echo "- 產生時間（UTC）：$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+        echo ""
+        echo "### 重點更新"
+        echo "$release_body"
+        echo ""
+        echo "### 變更檔案（版本內容）"
+        while IFS= read -r file; do
+          echo "- ${file}"
+        done <<< "$release_files_list"
+        echo ""
+        echo "### 本次發布相關檔案"
+        for file in "${RELEASE_FILES[@]}"; do
+          echo "- ${file}"
+        done
+        echo ""
+        echo "### Commit 摘要"
+        if [[ -n "$commit_summary" ]]; then
+          echo "$commit_summary"
+        else
+          echo "- 無可追蹤 commit 摘要"
+        fi
+      } > "$release_notes_file"
+
+      echo "更新 GitHub Release 內容：${tag}"
+      gh release edit "${tag}" --notes-file "$release_notes_file"
+      rm -f "$release_notes_file"
+
+      echo "Release Note 更新完成。"
     else
       echo "已設定 --no-push，已跳過推播。"
     fi
@@ -406,7 +559,7 @@ run_release() {
   fi
 
   echo "版本檢查通過，建議後續指令："
-  echo "  git -C \"$PROJECT\" add CHANGELOG.md better-rm test-better-rm.sh install.sh install-hooks.sh README.md"
+  echo "  git -C \"$PROJECT\" add ${RELEASE_FILES[*]}"
   echo "  git -C \"$PROJECT\" commit -m \"chore(release): bump to ${version}\""
   echo "  git -C \"$PROJECT\" tag -a ${tag} -m \"Release ${tag}\""
   if [[ "$PUSH" -eq 1 ]]; then
