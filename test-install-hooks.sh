@@ -162,7 +162,7 @@ echo "========================================"
 echo "install-hooks.sh tests"
 echo "========================================"
 
-CURRENT_HOOKS_VERSION="$(grep -m1 -E 'VERSION=\"[0-9]+\.[0-9]+\.[0-9]+' "$SCRIPT_DIR/install-hooks.sh" | sed -E 's/.*VERSION=\"([0-9]+\.[0-9]+\.[0-9]+)\".*/\\1/')"
+CURRENT_HOOKS_VERSION="$(awk -F'\"' '/^VERSION=/{print $2; exit}' "$SCRIPT_DIR/install-hooks.sh")"
 
 # CLI parsing
 assert_success "--version short flag works" bash -c "'$INSTALLER' -v | grep -q \"install-hooks.sh ${CURRENT_HOOKS_VERSION}\""
