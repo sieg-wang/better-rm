@@ -92,17 +92,33 @@ const settings = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const agent = process.argv[3] ?? 'claude';
 let count = 0;
 
+const hasRuntimePath = (command) => typeof command === 'string' && command.includes('hooks/protect-important-paths.js');
+
 if (agent === 'cursor') {
   for (const hook of settings?.hooks?.beforeShellExecution ?? []) {
-    if (typeof hook?.command === 'string'
-        && hook.command.includes('hooks/protect-important-paths.js')) count += 1;
+    if (typeof hook?.command === 'string' && hasRuntimePath(hook.command)) count += 1;
+  }
+} else if (agent === 'copilot') {
+  for (const entry of settings?.hooks?.preToolUse ?? []) {
+    if (entry?.type !== 'command' || entry?.matcher !== 'bash|powershell') continue;
+    if ((typeof entry?.bash === 'string' && hasRuntimePath(entry.bash))
+      || (typeof entry?.powershell === 'string' && hasRuntimePath(entry.powershell))) {
+      count += 1;
+    }
+  }
+} else if (agent === 'antigravity') {
+  const workspace = settings?.hooks?.['better-rm-protection'];
+  for (const entry of workspace?.PreToolUse ?? []) {
+    if (entry?.matcher !== 'run_command' || !Array.isArray(entry.hooks)) continue;
+    for (const hook of entry.hooks) {
+      if (hook?.type === 'command' && hasRuntimePath(hook.command)) count += 1;
+    }
   }
 } else {
   for (const entry of settings.hooks?.PreToolUse ?? []) {
     if (entry?.matcher !== 'Bash' || !Array.isArray(entry.hooks)) continue;
     for (const hook of entry.hooks) {
-      if (hook?.type === 'command' && typeof hook.command === 'string'
-          && hook.command.includes('hooks/protect-important-paths.js')) count += 1;
+      if (hook?.type === 'command' && hasRuntimePath(hook.command)) count += 1;
     }
   }
 }
@@ -118,10 +134,28 @@ file_mtime() {
     node -e 'process.stdout.write(String(require("fs").statSync(process.argv[1]).mtimeMs))' "$1"
 }
 
+file_hash() {
+    node -e 'process.stdout.write(require("crypto").createHash("sha256").update(require("fs").readFileSync(process.argv[1])).digest("hex"))' "$1"
+}
+
 backup_count() {
     local directory="$1"
     local name="$2"
     find "$directory" -maxdepth 1 -type f -name "$name.better-rm.bak.*" | wc -l | tr -d ' '
+}
+
+expected_settings_path() {
+    case "$1" in
+        claude) echo ".claude/settings.json" ;;
+        codex) echo ".codex/hooks.json" ;;
+        cursor) echo ".cursor/hooks.json" ;;
+        copilot) echo ".github/hooks/better-rm.json" ;;
+        antigravity) echo ".agents/hooks.json" ;;
+        qoder) echo ".qoder/settings.json" ;;
+        pi) echo ".pi/hooks.json" ;;
+        grok) echo ".grok/hooks/better-rm.json" ;;
+        *) echo "" ;;
+    esac
 }
 
 echo "========================================"
@@ -141,63 +175,95 @@ assert_failure "unknown option fails" "$INSTALLER" --wat
 assert_failure "unsupported agent fails" "$INSTALLER" --agent unknown
 assert_failure "duplicate --agent fails" "$INSTALLER" -a claude --agent claude
 
-# Project mode resolves the caller's Git root.
-PROJECT="$TMP_ROOT/project"
-make_repo "$PROJECT"
-mkdir -p "$PROJECT/src/nested"
-(
-    cd "$PROJECT/src/nested"
-    "$INSTALLER" -a claude >/dev/null
-)
-PROJECT_SETTINGS="$PROJECT/.claude/settings.json"
-assert_file "project settings are created at Git root" "$PROJECT_SETTINGS"
-assert_equal "project install contains one better-rm hook" "1" "$(hook_count "$PROJECT_SETTINGS")"
-assert_equal "new project settings use mode 644" "644" "$(file_mode "$PROJECT_SETTINGS")"
-assert_failure "project install fails outside Git" bash -c "cd '$TMP_ROOT' && '$INSTALLER' -a claude"
+# Matrix install in project mode for all supported agents.
+for agent in claude codex cursor copilot antigravity qoder pi grok; do
+    AGENT_PROJECT="$TMP_ROOT/matrix-${agent}-project"
+    make_repo "$AGENT_PROJECT"
+    mkdir -p "$AGENT_PROJECT/src/nested"
+    (
+        cd "$AGENT_PROJECT/src/nested"
+        "$INSTALLER" -a "$agent" >/dev/null
+    )
 
-PROJECT_COMMAND=$(node -e 'const s=require(process.argv[1]); process.stdout.write(s.hooks.PreToolUse[0].hooks[0].command)' "$PROJECT_SETTINGS")
-case "$PROJECT_COMMAND" in
-    *"$SCRIPT_DIR/hooks/protect-important-paths.js"*) pass "project hook uses installer checkout path" ;;
-    *) fail "project hook uses installer checkout path" ;;
-esac
+    AGENT_SETTINGS="$AGENT_PROJECT/$(expected_settings_path "$agent")"
+    assert_file "matrix project install creates ${agent} settings" "$AGENT_SETTINGS"
+    assert_equal "matrix ${agent} hook count is one" "1" "$(hook_count "$AGENT_SETTINGS" "$agent")"
+    assert_equal "matrix ${agent} settings mode is 644" "644" "$(file_mode "$AGENT_SETTINGS")"
 
-# Codex project install.
-CODEX_PROJECT="$TMP_ROOT/codex-project"
-make_repo "$CODEX_PROJECT"
-mkdir -p "$CODEX_PROJECT/src/nested"
-(
-    cd "$CODEX_PROJECT/src/nested"
-    "$INSTALLER" -a codex >/dev/null
-)
-CODEX_SETTINGS="$CODEX_PROJECT/.codex/hooks.json"
-assert_file "codex project settings are created at Git root" "$CODEX_SETTINGS"
-assert_equal "codex project install contains one better-rm hook" "1" "$(hook_count "$CODEX_SETTINGS")"
-assert_equal "codex project settings use mode 644" "644" "$(file_mode "$CODEX_SETTINGS")"
-CODEX_COMMAND=$(node -e 'const s=require(process.argv[1]); process.stdout.write(s.hooks.PreToolUse[0].hooks[0].command)' "$CODEX_SETTINGS")
-case "$CODEX_COMMAND" in
-    *"$SCRIPT_DIR/hooks/protect-important-paths.js"*) pass "codex hook uses installer checkout path" ;;
-    *) fail "codex hook uses installer checkout path" ;;
-esac
-assert_failure "codex global mode is unsupported" bash -c "cd '$TMP_ROOT' && '$INSTALLER' -a codex --global"
+    assert_contains "matrix ${agent} hook uses installer checkout path" "$(cat "$AGENT_SETTINGS")" "$SCRIPT_DIR/hooks/protect-important-paths.js"
 
-# Cursor project install.
-CURSOR_PROJECT="$TMP_ROOT/cursor-project"
-make_repo "$CURSOR_PROJECT"
-mkdir -p "$CURSOR_PROJECT/src/nested"
+    AGENT_HASH_BEFORE=$(file_hash "$AGENT_SETTINGS")
+    (
+        cd "$AGENT_PROJECT/src/nested"
+        "$INSTALLER" -a "$agent" >/dev/null
+    )
+    assert_equal "matrix ${agent} install is idempotent" "$AGENT_HASH_BEFORE" "$(file_hash "$AGENT_SETTINGS")"
+
+    # Non-Claude agents should reject --global
+    if [ "$agent" != "claude" ]; then
+        assert_failure "matrix ${agent} rejects global" bash -c "cd '$TMP_ROOT' && '$INSTALLER' -a '$agent' --global"
+    fi
+done
+
+# OpenCode has dedicated runtime + plugin install path checks.
+OPENCODE_PROJECT="$TMP_ROOT/opencode-project"
+make_repo "$OPENCODE_PROJECT"
+mkdir -p "$OPENCODE_PROJECT/src/nested"
 (
-    cd "$CURSOR_PROJECT/src/nested"
-    "$INSTALLER" -a cursor >/dev/null
+    cd "$OPENCODE_PROJECT/src/nested"
+    "$INSTALLER" -a opencode >/dev/null
 )
-CURSOR_SETTINGS="$CURSOR_PROJECT/.cursor/hooks.json"
-assert_file "cursor project settings are created at Git root" "$CURSOR_SETTINGS"
-assert_equal "cursor project install contains one better-rm hook" "1" "$(hook_count "$CURSOR_SETTINGS" cursor)"
-assert_equal "cursor project settings use mode 644" "644" "$(file_mode "$CURSOR_SETTINGS")"
-CURSOR_COMMAND=$(node -e 'const s=require(process.argv[1]); process.stdout.write(s.hooks.beforeShellExecution[0].command)' "$CURSOR_SETTINGS")
-case "$CURSOR_COMMAND" in
-    *"$SCRIPT_DIR/hooks/protect-important-paths.js"*) pass "cursor hook uses installer checkout path" ;;
-    *) fail "cursor hook uses installer checkout path" ;;
-esac
-assert_failure "cursor global mode is unsupported" bash -c "cd '$TMP_ROOT' && '$INSTALLER' -a cursor --global"
+OPENCODE_PLUGIN="$OPENCODE_PROJECT/.opencode/plugins/protect-important-paths.ts"
+OPENCODE_RUNTIME="$OPENCODE_PROJECT/hooks/protect-important-paths.js"
+assert_file "opencode plugin is created at project path" "$OPENCODE_PLUGIN"
+assert_file "opencode runtime hook is created at project path" "$OPENCODE_RUNTIME"
+OPENCODE_PLUGIN_HASH_BEFORE=$(file_hash "$OPENCODE_PLUGIN")
+OPENCODE_RUNTIME_HASH_BEFORE=$(file_hash "$OPENCODE_RUNTIME")
+
+assert_contains "opencode plugin references project-local runtime" "$(cat "$OPENCODE_PLUGIN")" "../../hooks/protect-important-paths"
+
+(
+    cd "$OPENCODE_PROJECT/src/nested"
+    "$INSTALLER" -a opencode >/dev/null
+)
+assert_equal "opencode plugin hash is idempotent" "$OPENCODE_PLUGIN_HASH_BEFORE" "$(file_hash "$OPENCODE_PLUGIN")"
+assert_equal "opencode runtime hash is idempotent" "$OPENCODE_RUNTIME_HASH_BEFORE" "$(file_hash "$OPENCODE_RUNTIME")"
+
+# OpenCode should also reject project-level global install flag.
+assert_failure "opencode rejects global" bash -c "cd '$TMP_ROOT' && '$INSTALLER' -a opencode --global"
+
+# OpenCode must reject dangling symbolic links before copying plugin or runtime files.
+OPENCODE_PLUGIN_SYMLINK_REPO="$TMP_ROOT/opencode-plugin-symlink-project"
+make_repo "$OPENCODE_PLUGIN_SYMLINK_REPO"
+mkdir -p "$OPENCODE_PLUGIN_SYMLINK_REPO/.opencode/plugins"
+OPENCODE_DANGLING_PLUGIN_TARGET="$TMP_ROOT/missing-opencode-plugin.ts"
+ln -s "$OPENCODE_DANGLING_PLUGIN_TARGET" "$OPENCODE_PLUGIN_SYMLINK_REPO/.opencode/plugins/protect-important-paths.ts"
+assert_failure "opencode rejects dangling plugin symlink" bash -c "cd '$OPENCODE_PLUGIN_SYMLINK_REPO' && '$INSTALLER' -a opencode"
+if [ -L "$OPENCODE_PLUGIN_SYMLINK_REPO/.opencode/plugins/protect-important-paths.ts" ] && [ ! -e "$OPENCODE_DANGLING_PLUGIN_TARGET" ]; then
+    pass "opencode dangling plugin symlink is not followed"
+else
+    fail "opencode dangling plugin symlink is not followed"
+fi
+if [ ! -e "$OPENCODE_PLUGIN_SYMLINK_REPO/hooks/protect-important-paths.js" ]; then
+    pass "opencode plugin symlink failure leaves runtime untouched"
+else
+    fail "opencode plugin symlink failure leaves runtime untouched"
+fi
+
+OPENCODE_RUNTIME_SYMLINK_REPO="$TMP_ROOT/opencode-runtime-symlink-project"
+make_repo "$OPENCODE_RUNTIME_SYMLINK_REPO"
+mkdir -p "$OPENCODE_RUNTIME_SYMLINK_REPO/.opencode/plugins" "$OPENCODE_RUNTIME_SYMLINK_REPO/hooks"
+printf 'existing plugin must remain unchanged\n' > "$OPENCODE_RUNTIME_SYMLINK_REPO/.opencode/plugins/protect-important-paths.ts"
+OPENCODE_STALE_PLUGIN_HASH=$(file_hash "$OPENCODE_RUNTIME_SYMLINK_REPO/.opencode/plugins/protect-important-paths.ts")
+OPENCODE_DANGLING_RUNTIME_TARGET="$TMP_ROOT/missing-opencode-runtime.js"
+ln -s "$OPENCODE_DANGLING_RUNTIME_TARGET" "$OPENCODE_RUNTIME_SYMLINK_REPO/hooks/protect-important-paths.js"
+assert_failure "opencode rejects dangling runtime symlink" bash -c "cd '$OPENCODE_RUNTIME_SYMLINK_REPO' && '$INSTALLER' -a opencode"
+assert_equal "opencode runtime symlink failure leaves plugin unchanged" "$OPENCODE_STALE_PLUGIN_HASH" "$(file_hash "$OPENCODE_RUNTIME_SYMLINK_REPO/.opencode/plugins/protect-important-paths.ts")"
+if [ -L "$OPENCODE_RUNTIME_SYMLINK_REPO/hooks/protect-important-paths.js" ] && [ ! -e "$OPENCODE_DANGLING_RUNTIME_TARGET" ]; then
+    pass "opencode dangling runtime symlink is not followed"
+else
+    fail "opencode dangling runtime symlink is not followed"
+fi
 
 # Global mode supports HOME and CLAUDE_CONFIG_DIR without a Git repository.
 GLOBAL_HOME="$TMP_ROOT/global-home"

@@ -312,37 +312,42 @@ export BETTER_RM_PROTECTED_DIRS="/srv/data:/workspace/secrets"
 hooks 執行時需要 `node` 可用。Codex 還會要求使用者透過 `/hooks` 審閱並信任
 專案 hook；其他代理也可能依各自的安全設定要求確認。
 
-### 自動安裝 Claude、Codex 與 Cursor hooks / Automatic Claude, Codex and Cursor hook installation
+### 自動安裝 Coding Agent hooks / Automatic Coding Agent hook installation
 
-目前 `install-hooks.sh` 支援 Claude Code、Codex 與 Cursor。使用 `-a` 或 `--agent` 指定
-Agent；預設會安裝到目前目錄所屬 Git 專案的對應設定檔：
+`install-hooks.sh` 目前已支援下列 Agent：`claude`、`codex`、`cursor`、`copilot`、`antigravity`、`qoder`、`pi`、`opencode`、`grok`。
+
+使用 `-a` 或 `--agent` 指定 Agent；預設會安裝到目前目錄所屬 Git 專案的對應設定檔：
 
 ```bash
 # 安裝到目前 Git 專案 / Install into the current Git project
 ~/.better-rm/install-hooks.sh -a claude
 ~/.better-rm/install-hooks.sh --agent codex
 ~/.better-rm/install-hooks.sh --agent cursor
+~/.better-rm/install-hooks.sh --agent copilot
+~/.better-rm/install-hooks.sh --agent antigravity
+~/.better-rm/install-hooks.sh --agent qoder
+~/.better-rm/install-hooks.sh --agent pi
+~/.better-rm/install-hooks.sh --agent opencode
+~/.better-rm/install-hooks.sh --agent grok
 
-# 安裝到 Claude Code 全域設定 / Install into Claude Code global settings
+# 安裝到 Claude Code 全域設定 / Install into Claude Code global settings（僅此支援 --global）
 ~/.better-rm/install-hooks.sh --agent claude --global
 ```
 
-專案模式可從 Git 儲存庫內的任何子目錄執行。Cursor 與 Codex 僅支援專案模式。Claude Code 的全域模式會寫入
+專案模式可從 Git 儲存庫內的任何子目錄執行。`--global` 目前僅 Claude Code 支援；其他 Agent 僅可在專案模式。
+Claude Code 的全域模式會寫入
 `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json`，且不要求目前目錄是 Git
-儲存庫。Codex 會寫入專案根目錄的 `.codex/hooks.json`，Cursor 會寫入 `.cursor/hooks.json`。安裝程式
-會保留其他設定與 hooks，只新增或更新 `PreToolUse`（Cursor 為 `beforeShellExecution`）下的
-better-rm hook；修改既有檔案前會建立時間戳備份，重複執行時不會加入重複項目或重寫已是最新狀態的檔案。
+儲存庫。其他 Agent 會寫入專案根目錄對應設定檔：`.claude/settings.json`（claude）、`.codex/hooks.json`（codex）、`.cursor/hooks.json`（cursor）、`.github/hooks/better-rm.json`（copilot）、`.agents/hooks.json`（antigravity）、`.qoder/settings.json`（qoder）、`.pi/hooks.json`（pi）、`.opencode/plugins/protect-important-paths.ts`（opencode）與`.grok/hooks/better-rm.json`（grok）。
+安裝程式會保留其他設定與 hooks，只新增或更新目標 hook；修改既有檔案前會建立時間戳備份，重複執行時不會加入重複項目或重寫已是最新狀態的檔案。
 
 自動安裝的 hook 會使用 `install-hooks.sh` 所在 checkout 中
-`hooks/protect-important-paths.js` 的絕對路徑。建議先透過 `install.sh` 將專案安裝
+`hooks/protect-important-paths.js` 的絕對路徑（指令式設定）。建議先透過 `install.sh` 將專案安裝
 到固定的 `~/.better-rm`；若之後移動或刪除該目錄，已安裝的 hook 也需要重新執行
 安裝程式。`install.sh` 與 `install-hooks.sh` 是分開的步驟，不會在安裝 `rm`
-別名時自動修改 Claude Code、Codex 或 Cursor 設定。變更設定後，可能需要重新啟動相應
-的 Agent 或開啟新的 session。
+別名時自動修改 Agent 設定。變更設定後，可能需要重新啟動相應 Agent 或開啟新的 session。
 
 下方手動設定範例仍適用於 hook 檔案已提交在目標專案中的情況；其中
-`git rev-parse --show-toplevel` 會從該專案載入 hook。其他 Coding Agent 目前仍請
-使用各自的專案設定檔，之後可再擴充到 `install-hooks.sh`。
+`git rev-parse --show-toplevel` 會從該專案載入 hook。對於 OpenCode，請參考下方 plugin 範例。
 
 ### 各個 Coding Agent 的安裝與設定說明 / Detailed Agent Configurations
 
@@ -517,6 +522,7 @@ Pi 支援兩種整合方式，您可以選擇其中一種：
 
 #### 8. OpenCode
 * **路徑**：`.opencode/plugins/protect-important-paths.ts`
+* **補充**：`install-hooks.sh -a opencode` 會一併安裝共用 runtime 到專案 `hooks/protect-important-paths.js`，供插件在 `../../hooks/protect-important-paths` 匯入。
 * **內容**：
   ```typescript
   import type { Plugin } from "@opencode-ai/plugin";
