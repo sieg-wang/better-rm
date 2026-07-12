@@ -14,11 +14,13 @@ DRY_RUN=0
 APPLY=0
 VERSION_PREFIX="v"
 SKIP_CHANGELOG=0
+AUTO_RELEASE=0
+PUSH=1
 
 show_help() {
   cat <<'EOF'
 Usage:
-  bump-and-release.sh            Prepare release for current version (default mode, no bump)
+  bump-and-release.sh            自動化完成發佈建議流程（release + 檔案提交/打標籤/推播）
   bump-and-release.sh bump [options] [major|minor|patch]
   bump-and-release.sh bump [options] --to <version>
   bump-and-release.sh release [options]
@@ -27,6 +29,8 @@ Options:
   -r, --repo <path>        Git repository root (default: current Git root)
   -n, --dry-run            Show planned actions without writing files
   -a, --apply              Enable potentially destructive actions
+  --auto                   Run full release flow automatically (add, commit, tag, push)
+  --no-push                Skip push step in auto release flow
   --to <version>           Explicit target version for bump mode (e.g. 1.5.0)
   --skip-changelog         Skip writing an Unreleased changelog entry
   --changelog-note <text>  Changelog entry text (default: "Prepare release <version>")
@@ -36,25 +40,35 @@ Options:
 Note:
   若未指定 bump 類型，預設使用 patch。
   目前版本直接從 better-rm 取得，避免手動輸入。
-  若不指定 mode，預設執行 release；若當前版本標籤已存在，將停止並要求先 bump。
+  不輸入 mode 時預設執行 release；若當前版本標籤已存在，將停止並要求先 bump。
+  不輸入其它參數時，會預設啟用 auto 模式，直接完成發佈流程（不再只是列出建議命令）。
 
 Examples:
-  bump-and-release.sh
+  bump-and-release.sh                     # 一鍵走完整發佈流程
+  bump-and-release.sh --no-push            # 一鍵走完但不推播
   bump-and-release.sh bump --repo ~/projects/better-rm minor
   bump-and-release.sh bump --repo ~/projects/better-rm
   bump-and-release.sh bump --repo ~/projects/better-rm --to 1.5.0
   bump-and-release.sh release --repo ~/projects/better-rm
+  bump-and-release.sh release --repo ~/projects/better-rm --auto --no-push
 EOF
 }
 
 parse_args() {
   if [[ $# -lt 1 ]]; then
     MODE="release"
+    AUTO_RELEASE=1
+    APPLY=1
     return
   fi
 
-  MODE="$1"
-  shift
+  if [[ "$1" == -* ]]; then
+    MODE="release"
+    APPLY=1
+  else
+    MODE="$1"
+    shift
+  fi
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -68,6 +82,14 @@ parse_args() {
         ;;
       -a|--apply)
         APPLY=1
+        shift
+        ;;
+      --auto)
+        AUTO_RELEASE=1
+        shift
+        ;;
+      --no-push)
+        PUSH=0
         shift
         ;;
       --skip-changelog)
@@ -320,6 +342,16 @@ run_release() {
   local version
   version="$(current_version)"
   local tag="${VERSION_PREFIX}${version}"
+  local -a release_files=(
+    "CHANGELOG.md"
+    "better-rm"
+    "test-better-rm.sh"
+    "install.sh"
+    "install-hooks.sh"
+    "README.md"
+  )
+  local changed
+  local push_cmd="git -C \"$PROJECT\" push origin HEAD --follow-tags"
 
   if release_tag_exists "$version"; then
     echo "目前版本 ${version} 已存在標籤 ${tag}，請先執行 bump 後再做 release。"
@@ -328,11 +360,58 @@ run_release() {
 
   run_release_checks
 
+  changed="$(git -C "$PROJECT" status --short -- "${release_files[@]}" || true)"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    if [[ -n "$changed" ]]; then
+      echo "DRY-RUN: 要新增並提交 release 檔案如下："
+      echo "$changed"
+      echo "DRY-RUN: git -C \"$PROJECT\" add ${release_files[*]}"
+      echo "DRY-RUN: git -C \"$PROJECT\" commit -m \"chore(release): bump to ${version}\""
+    else
+      echo "DRY-RUN: 目前版本檔案無待提交差異，將直接標記標籤。"
+    fi
+    echo "DRY-RUN: git -C \"$PROJECT\" tag -a \"${tag}\" -m \"Release ${tag}\""
+    if [[ "$PUSH" -eq 1 ]]; then
+      echo "DRY-RUN: ${push_cmd}"
+    else
+      echo "DRY-RUN: 已設定 --no-push，跳過推播。"
+    fi
+    return 0
+  fi
+
+  if [[ "$AUTO_RELEASE" -eq 1 ]]; then
+    if [[ -n "$changed" ]]; then
+      git -C "$PROJECT" add "${release_files[@]}"
+      if ! git -C "$PROJECT" diff --cached --quiet -- "${release_files[@]}"; then
+        echo "發現版本相關變更，將自動提交："
+        git -C "$PROJECT" commit -m "chore(release): bump to ${version}"
+      else
+        echo "未偵測到需提交的 release 變更。"
+      fi
+    else
+      echo "未偵測到 release 相關未提交變更，將直接進行打標籤。"
+    fi
+
+    git -C "$PROJECT" tag -a "${tag}" -m "Release ${tag}"
+    echo "已建立標籤：${tag}"
+    if [[ "$PUSH" -eq 1 ]]; then
+      echo "開始推播..."
+      $push_cmd
+    else
+      echo "已設定 --no-push，已跳過推播。"
+    fi
+    return 0
+  fi
+
   echo "版本檢查通過，建議後續指令："
   echo "  git -C \"$PROJECT\" add CHANGELOG.md better-rm test-better-rm.sh install.sh install-hooks.sh README.md"
   echo "  git -C \"$PROJECT\" commit -m \"chore(release): bump to ${version}\""
   echo "  git -C \"$PROJECT\" tag -a ${tag} -m \"Release ${tag}\""
-  echo "  git -C \"$PROJECT\" push origin HEAD --follow-tags"
+  if [[ "$PUSH" -eq 1 ]]; then
+    echo "  git -C \"$PROJECT\" push origin HEAD --follow-tags"
+  else
+    echo "  git -C \"$PROJECT\" push origin HEAD --follow-tags   # 已設定 --no-push，需手動改執行"
+  fi
   echo "如不直接提交，請先確認已在 git diff 中檢視版本同步情形。"
 }
 

@@ -28,10 +28,23 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
 ./.agents/skills/bump-and-release/scripts/bump-and-release.sh
 ```
 
-- 無參數時，預設會以 `release` 模式執行。
+- 無參數時，預設會以 `release` 模式執行，並進入 `auto`，直接完成 release 流程（預設會嘗試 `add`、`commit`、`tag`、`push`）。
 - 流程會先讀取目前 `better-rm` 版本並檢查 `refs/tags/<prefix><版本>` 是否已存在：
   - 若標籤已存在：直接停止，提醒先進行 bump。
   - 若標籤不存在：以目前版本進行 release 準備，不會再做版本位元調整。
+  - 若 release 相關檔案無變更，將直接建立標籤；若有變更，會自動提交後再標籤。
+- 預設會啟用 `--apply`，避免在本機工作目錄有未提交變更時中斷流程（這些變更若不在 release 檔案清單內，仍不會被提交到 release commit）。
+
+```bash
+./.agents/skills/bump-and-release/scripts/bump-and-release.sh --dry-run
+./.agents/skills/bump-and-release/scripts/bump-and-release.sh --no-push
+```
+
+可用參數：
+
+- `--auto`：明確指定自動執行 `release` 全流程。
+- `--no-push`：保留提交與打標籤，但不推播到遠端。
+- `--dry-run`：不實際寫入或執行，僅輸出預定動作。
 
 ### 1) 僅做版本更新與變更檔
 
@@ -59,12 +72,12 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
 ./.agents/skills/bump-and-release/scripts/bump-and-release.sh release --repo /path/to/better-rm
 ```
 
-- 先檢查 `git status` 是否乾淨與目前版本是否正確一致；`--apply` 允許在有未提交變更時仍繼續執行，但建議先清理乾淨。
+  先檢查 `git status` 是否乾淨與目前版本是否正確一致；若有未提交變更，`--apply` 允許繼續。`bump-and-release` 無參數啟動時會直接啟用類似自動流程，不再停在建議命令輸出。
 - 依序執行：
   - `./test-better-rm.sh`
   - `node ./test-hooks.js`
   - `./test-install-hooks.sh`
-- 列出推薦發佈命令（包含 `git commit`、`git tag`、`git push`），不會預設直接推播。
+- 若未指定 `--auto`，僅列出推薦發佈命令（包含 `git commit`、`git tag`、`git push`）。
 - 可搭配 `--dry-run` 僅檢查流程。
 
 ## 建議工作流程
