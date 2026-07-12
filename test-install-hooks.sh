@@ -162,9 +162,11 @@ echo "========================================"
 echo "install-hooks.sh tests"
 echo "========================================"
 
+CURRENT_HOOKS_VERSION="$(grep -m1 -E 'VERSION=\"[0-9]+\.[0-9]+\.[0-9]+' "$SCRIPT_DIR/install-hooks.sh" | sed -E 's/.*VERSION=\"([0-9]+\.[0-9]+\.[0-9]+)\".*/\\1/')"
+
 # CLI parsing
-assert_success "--version short flag works" bash -c "'$INSTALLER' -v | grep -q \"install-hooks.sh 1.4.0\""
-assert_success "--version long flag works" bash -c "'$INSTALLER' --version | grep -q \"install-hooks.sh 1.4.0\""
+assert_success "--version short flag works" bash -c "'$INSTALLER' -v | grep -q \"install-hooks.sh ${CURRENT_HOOKS_VERSION}\""
+assert_success "--version long flag works" bash -c "'$INSTALLER' --version | grep -q \"install-hooks.sh ${CURRENT_HOOKS_VERSION}\""
 assert_success "--help succeeds" "$INSTALLER" --help
 HELP_TEXT=$("$INSTALLER" --help)
 assert_contains "help shows supported agents" "$HELP_TEXT" "supported:"
