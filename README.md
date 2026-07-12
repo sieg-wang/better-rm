@@ -352,11 +352,13 @@ Claude Code 的全域模式會寫入
 儲存庫。其他 Agent 會寫入專案根目錄對應設定檔：`.claude/settings.json`（claude）、`.codex/hooks.json`（codex）、`.cursor/hooks.json`（cursor）、`.github/hooks/better-rm.json`（copilot）、`.agents/hooks.json`（antigravity）、`.qoder/settings.json`（qoder）、`.pi/hooks.json`（pi）、`.opencode/plugins/protect-important-paths.ts`（opencode）與`.grok/hooks/better-rm.json`（grok）。
 安裝程式會保留其他設定與 hooks，只新增或更新目標 hook；修改既有檔案前會建立時間戳備份，重複執行時不會加入重複項目或重寫已是最新狀態的檔案。
 
-自動安裝的 hook 會使用 `install-hooks.sh` 所在 checkout 中
-`hooks/protect-important-paths.js` 的絕對路徑（指令式設定）。建議先透過 `install.sh` 將專案安裝
-到固定的 `~/.better-rm`；若之後移動或刪除該目錄，已安裝的 hook 也需要重新執行
-安裝程式。`install.sh` 與 `install-hooks.sh` 是分開的步驟，不會在安裝 `rm`
-別名時自動修改 Agent 設定。變更設定後，可能需要重新啟動相應 Agent 或開啟新的 session。
+自動安裝的 hook 會放在設定檔同目錄，例如
+`.claude/settings.json` 對應 `.claude/protect-important-paths.js`，
+`.codex/hooks.json` 對應 `.codex/protect-important-paths.js`。  
+建議不再依賴 `install-hooks.sh` 執行路徑，已安裝的 hook 僅依賴各 Agent 的
+設定目錄中對應的 `protect-important-paths.js`，若移動或刪除該目錄需重跑安裝程式。
+`install.sh` 與 `install-hooks.sh` 是分開的步驟，不會在安裝 `rm` 別名時自動修改
+Agent 設定。變更設定後，可能需要重新啟動相應 Agent 或開啟新的 session。
 
 下方手動設定範例仍適用於 hook 檔案已提交在目標專案中的情況；其中
 `git rev-parse --show-toplevel` 會從該專案載入 hook。對於 OpenCode，請參考下方 plugin 範例。

@@ -207,26 +207,42 @@ parse_arguments() {
 # Resolve physical paths for the installer and shared hook
 resolve_source_paths() {
     SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-    HOOK_PATH="$SCRIPT_DIR/hooks/protect-important-paths.js"
+    HOOK_SOURCE_PATH="$SCRIPT_DIR/hooks/protect-important-paths.js"
 
-    if [ ! -f "$HOOK_PATH" ] || [ ! -r "$HOOK_PATH" ]; then
+    if [ ! -f "$HOOK_SOURCE_PATH" ] || [ ! -r "$HOOK_SOURCE_PATH" ]; then
         local release_dir
         release_dir="$(mktemp -d)"
         CLEANUP_DIRS="$CLEANUP_DIRS $release_dir"
-        SCRIPT_DIR="$release_dir"
-        HOOK_PATH="$SCRIPT_DIR/hooks/protect-important-paths.js"
+        HOOK_SOURCE_PATH="$release_dir/hooks/protect-important-paths.js"
         info "本機未找到共用 hook，改用最新 Release"
         info "Shared hook not found locally; downloading from latest release"
-        download_release_file "$RELEASE_HOOK_ASSET_NAME" "$HOOK_PATH"
+        download_release_file "$RELEASE_HOOK_ASSET_NAME" "$HOOK_SOURCE_PATH"
 
-        if [ ! -f "$HOOK_PATH" ] || [ ! -r "$HOOK_PATH" ]; then
-            error "下載共用 hook 失敗：$HOOK_PATH"
-            error "Failed to download shared hook: $HOOK_PATH"
+        if [ ! -f "$HOOK_SOURCE_PATH" ] || [ ! -r "$HOOK_SOURCE_PATH" ]; then
+            error "下載共用 hook 失敗：$HOOK_SOURCE_PATH"
+            error "Failed to download shared hook: $HOOK_SOURCE_PATH"
             exit 1
         fi
     fi
 
     trap cleanup_release_dirs EXIT
+}
+
+resolve_shared_hook_for_settings() {
+    local settings_dir
+    settings_dir="$(dirname -- "$SETTINGS_PATH")"
+    HOOK_PATH="$settings_dir/protect-important-paths.js"
+
+    if [ ! -f "$HOOK_PATH" ] || [ ! -r "$HOOK_PATH" ]; then
+        mkdir -p -- "$(dirname -- "$HOOK_PATH")"
+        cp "$HOOK_SOURCE_PATH" "$HOOK_PATH"
+    fi
+
+    if [ ! -f "$HOOK_PATH" ] || [ ! -r "$HOOK_PATH" ]; then
+        error "找不到共用 hook：$HOOK_PATH"
+        error "Failed to locate shared hook: $HOOK_PATH"
+        exit 1
+    fi
 }
 
 # 取得專案根目錄（所有支援的 JSON 設定預設放在專案 root）
@@ -367,8 +383,14 @@ resolve_opencode_plugin() {
     local project_root
     project_root="$(resolve_project_root)"
     PLUGIN_SOURCE_PATH="$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts"
+    if [ ! -f "$PLUGIN_SOURCE_PATH" ] || [ ! -r "$PLUGIN_SOURCE_PATH" ]; then
+        local plugin_release_dir
+        plugin_release_dir="$(mktemp -d)"
+        CLEANUP_DIRS="$CLEANUP_DIRS $plugin_release_dir"
+        PLUGIN_SOURCE_PATH="$plugin_release_dir/.opencode/plugins/protect-important-paths.ts"
+    fi
     PLUGIN_PATH="$project_root/.opencode/plugins/protect-important-paths.ts"
-    OPENCODE_RUNTIME_SOURCE_PATH="$SCRIPT_DIR/hooks/protect-important-paths.js"
+    OPENCODE_RUNTIME_SOURCE_PATH="$HOOK_SOURCE_PATH"
     OPENCODE_RUNTIME_PATH="$project_root/hooks/protect-important-paths.js"
 
     if [ ! -f "$PLUGIN_SOURCE_PATH" ] || [ ! -r "$PLUGIN_SOURCE_PATH" ]; then
@@ -450,13 +472,13 @@ function sameJson(left, right) {
 function isOwnedCommandHook(value) {
   return isObject(value)
     && typeof value.command === 'string'
-    && /(?:^|[\\/])hooks[\\/]protect-important-paths\.js(?:['"\s]|$)/.test(value.command);
+    && /(?:^|[\\/\"'\s])protect-important-paths\.js(?:['"\s]|$)/.test(value.command);
 }
 
 function isOwnedCursorHook(value) {
   return isObject(value)
     && typeof value.command === 'string'
-    && /(?:^|[\\/])hooks[\\/]protect-important-paths\.js(?:['"\s]|$)/.test(value.command);
+    && /(?:^|[\\/\"'\s])protect-important-paths\.js(?:['"\s]|$)/.test(value.command);
 }
 
 function isOwnedPreToolHook(value) {
@@ -862,6 +884,7 @@ install_claude_hooks() {
     fi
 
     resolve_claude_settings
+    resolve_shared_hook_for_settings
 
     info "Claude Code 設定檔：$SETTINGS_PATH"
     info "共用 hook：$HOOK_PATH"
@@ -872,9 +895,9 @@ install_claude_hooks() {
 
     report_json_result "Claude Code" "$result"
 
-    if [ "$GLOBAL_INSTALL" = true ] && [[ "$SCRIPT_DIR" != "$HOME/.better-rm"* ]]; then
-        warning "全域 hook 會參照目前 checkout；移動或刪除它將使 hook 失效"
-        warning "The global hook references this checkout; moving or deleting it will break the hook"
+    if [ "$GLOBAL_INSTALL" = true ]; then
+        warning "全域 hook 會使用目前使用者設定目錄中的共用 hook，搬移或刪除該設定目錄將使 hook 失效"
+        warning "Global hook uses runtime file under the current user config directory; moving or deleting it will break the hook"
     fi
 }
 
@@ -887,6 +910,7 @@ install_cursor_hooks() {
     fi
 
     resolve_cursor_settings
+    resolve_shared_hook_for_settings
 
     info "Cursor 設定檔：$SETTINGS_PATH"
     info "共用 hook：$HOOK_PATH"
@@ -907,6 +931,7 @@ install_codex_hooks() {
     fi
 
     resolve_codex_settings
+    resolve_shared_hook_for_settings
 
     info "Codex 設定檔：$SETTINGS_PATH"
     info "共用 hook：$HOOK_PATH"
@@ -927,6 +952,7 @@ install_copilot_hooks() {
     fi
 
     resolve_copilot_settings
+    resolve_shared_hook_for_settings
 
     info "GitHub Copilot 設定檔：$SETTINGS_PATH"
     info "共用 hook：$HOOK_PATH"
@@ -947,6 +973,7 @@ install_antigravity_hooks() {
     fi
 
     resolve_antigravity_settings
+    resolve_shared_hook_for_settings
 
     info "Antigravity 設定檔：$SETTINGS_PATH"
     info "共用 hook：$HOOK_PATH"
@@ -967,6 +994,7 @@ install_qoder_hooks() {
     fi
 
     resolve_qoder_settings
+    resolve_shared_hook_for_settings
 
     info "Qoder 設定檔：$SETTINGS_PATH"
     info "共用 hook：$HOOK_PATH"
@@ -987,6 +1015,7 @@ install_pi_hooks() {
     fi
 
     resolve_pi_settings
+    resolve_shared_hook_for_settings
 
     info "Pi 設定檔：$SETTINGS_PATH"
     info "共用 hook：$HOOK_PATH"
@@ -1007,6 +1036,7 @@ install_grok_hooks() {
     fi
 
     resolve_grok_settings
+    resolve_shared_hook_for_settings
 
     info "Grok Build 設定檔：$SETTINGS_PATH"
     info "共用 hook：$HOOK_PATH"

@@ -92,7 +92,7 @@ const settings = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const agent = process.argv[3] ?? 'claude';
 let count = 0;
 
-const hasRuntimePath = (command) => typeof command === 'string' && command.includes('hooks/protect-important-paths.js');
+const hasRuntimePath = (command) => typeof command === 'string' && command.includes('protect-important-paths.js');
 
 if (agent === 'cursor') {
   for (const hook of settings?.hooks?.beforeShellExecution ?? []) {
@@ -190,11 +190,12 @@ for agent in claude codex cursor copilot antigravity qoder pi grok; do
     )
 
     AGENT_SETTINGS="$AGENT_PROJECT/$(expected_settings_path "$agent")"
+    AGENT_SETTINGS_DIR="$(dirname "$AGENT_SETTINGS")"
     assert_file "matrix project install creates ${agent} settings" "$AGENT_SETTINGS"
     assert_equal "matrix ${agent} hook count is one" "1" "$(hook_count "$AGENT_SETTINGS" "$agent")"
     assert_equal "matrix ${agent} settings mode is 644" "644" "$(file_mode "$AGENT_SETTINGS")"
 
-    assert_contains "matrix ${agent} hook uses installer checkout path" "$(cat "$AGENT_SETTINGS")" "$SCRIPT_DIR/hooks/protect-important-paths.js"
+    assert_contains "matrix ${agent} hook is placed beside settings" "$(cat "$AGENT_SETTINGS")" "$AGENT_SETTINGS_DIR/protect-important-paths.js"
 
     AGENT_HASH_BEFORE=$(file_hash "$AGENT_SETTINGS")
     (
