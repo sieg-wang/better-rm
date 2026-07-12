@@ -28,7 +28,7 @@ NC='\033[0m' # No Color
 # 支援的 Coding Agent 清單（目前）
 # Supported coding agents list
 SUPPORTED_AGENTS=(claude codex cursor copilot antigravity qoder pi opencode grok)
-.4.1"
+VERSION="1.4.1"
 RELEASE_BASE_URL="https://github.com/doggy8088/better-rm/releases/latest/download"
 RELEASE_HOOK_ASSET_NAME="protect-important-paths.js"
 RELEASE_OPENCODE_PLUGIN_ASSET_NAME="opencode-protect-important-paths.ts"
@@ -227,9 +227,6 @@ resolve_source_paths() {
     fi
 
     trap cleanup_release_dirs EXIT
-}
-        exit 1
-    fi
 }
 
 # 取得專案根目錄（所有支援的 JSON 設定預設放在專案 root）
