@@ -42,6 +42,7 @@ Note:
   目前版本直接從 better-rm 取得，避免手動輸入。
   不輸入 mode 時預設執行 release；若當前版本標籤已存在，將停止並要求先 bump。
   不輸入其它參數時，會預設啟用 auto 模式，直接完成發佈流程（不再只是列出建議命令）。
+  release 僅會完成測試、標記與推播；實際 GitHub Release 建立由 `.github/workflows/ci-release.yml` 在 tags push 時完成。
 
 Examples:
   bump-and-release.sh                     # 一鍵走完整發佈流程
@@ -372,7 +373,7 @@ run_release() {
     fi
     echo "DRY-RUN: git -C \"$PROJECT\" tag -a \"${tag}\" -m \"Release ${tag}\""
     if [[ "$PUSH" -eq 1 ]]; then
-      echo "DRY-RUN: ${push_cmd[*]}"
+      echo "DRY-RUN: ${push_cmd[*]}   # 推播後由 CI 建立 GitHub Release"
     else
       echo "DRY-RUN: 已設定 --no-push，跳過推播。"
     fi
@@ -397,6 +398,7 @@ run_release() {
     if [[ "$PUSH" -eq 1 ]]; then
       echo "開始推播..."
       "${push_cmd[@]}"
+      echo "已完成推播。CI 發佈流程會基於標籤建立 GitHub Release。"
     else
       echo "已設定 --no-push，已跳過推播。"
     fi
@@ -408,7 +410,7 @@ run_release() {
   echo "  git -C \"$PROJECT\" commit -m \"chore(release): bump to ${version}\""
   echo "  git -C \"$PROJECT\" tag -a ${tag} -m \"Release ${tag}\""
   if [[ "$PUSH" -eq 1 ]]; then
-    echo "  git -C \"$PROJECT\" push origin HEAD --follow-tags"
+    echo "  git -C \"$PROJECT\" push origin HEAD --follow-tags   # 推播後由 CI 建立 GitHub Release"
   else
     echo "  git -C \"$PROJECT\" push origin HEAD --follow-tags   # 已設定 --no-push，需手動改執行"
   fi

@@ -12,7 +12,7 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
 - 要求「minor / patch / major」版本提升。
 - 針對新版本產生 `CHANGELOG` 下個版本項目。
 - 準備 release 前要跑完整測試並驗證版本一致性。
-- 需要列出發佈命令（提交、打標籤、推送）而不立即執行。
+- 需要列出發佈命令（提交、打標籤、推送）並讓 CI 建立 GitHub Release。
 
 ## 前置條件
 
@@ -33,6 +33,7 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
   - 若標籤已存在：直接停止，提醒先進行 bump。
   - 若標籤不存在：以目前版本進行 release 準備，不會再做版本位元調整。
   - 若 release 相關檔案無變更，將直接建立標籤；若有變更，會自動提交後再標籤。
+- 真正的 GitHub Release 建立並非由本技能直接執行，而是由 GitHub Actions 的 `ci-release.yml` 依 tag push 觸發。
 - 預設會啟用 `--apply`，避免在本機工作目錄有未提交變更時中斷流程（這些變更若不在 release 檔案清單內，仍不會被提交到 release commit）。
 
 ```bash
@@ -78,6 +79,7 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
   - `node ./test-hooks.js`
   - `./test-install-hooks.sh`
 - 若未指定 `--auto`，僅列出推薦發佈命令（包含 `git commit`、`git tag`、`git push`）。
+- `git push` 會觸發 CI 流程建立 GitHub Release；本腳本不負責直接呼叫 GitHub Release API。
 - 可搭配 `--dry-run` 僅檢查流程。
 
 ## 建議工作流程
