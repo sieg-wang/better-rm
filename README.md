@@ -316,6 +316,18 @@ hooks 執行時需要 `node` 可用。Codex 還會要求使用者透過 `/hooks`
 
 `install-hooks.sh` 目前已支援下列 Agent：`claude`、`codex`、`cursor`、`copilot`、`antigravity`、`qoder`、`pi`、`opencode`、`grok`。
 
+推薦用一行指令（自動抓取最新 Release）：
+
+```bash
+curl -sSL https://github.com/doggy8088/better-rm/releases/latest/download/install-hooks.sh | bash -s -- -a claude
+```
+
+如果有需要全域安裝 Claude 設定：
+
+```bash
+curl -sSL https://github.com/doggy8088/better-rm/releases/latest/download/install-hooks.sh | bash -s -- -a claude --global
+```
+
 使用 `-a` 或 `--agent` 指定 Agent；預設會安裝到目前目錄所屬 Git 專案的對應設定檔：
 
 ```bash

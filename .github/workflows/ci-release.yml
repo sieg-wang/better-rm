@@ -96,6 +96,11 @@ jobs:
           trap 'rm -f "$archive_manifest"; rm -rf "$extract_dir"' EXIT
 
           mkdir -p dist
+          cp install-hooks.sh dist/install-hooks.sh
+          cp hooks/protect-important-paths.js dist/protect-important-paths.js
+          cp .opencode/plugins/protect-important-paths.ts dist/opencode-protect-important-paths.ts
+          chmod +x dist/install-hooks.sh
+
           release_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
           git ls-tree -r --name-only "$release_commit" | LC_ALL=C sort > "$manifest_path"
           git archive --format=tar --prefix="$prefix" "$release_commit" | gzip -n > "$archive_path"
@@ -167,6 +172,9 @@ jobs:
           gh release create "$TAG" \
             "dist/$ARCHIVE_NAME" \
             "dist/$CHECKSUM_NAME" \
+            "dist/install-hooks.sh" \
+            "dist/protect-important-paths.js" \
+            "dist/opencode-protect-important-paths.ts" \
             dist/MANIFEST.txt \
             --title "better-rm $TAG" \
             "${release_flags[@]}"

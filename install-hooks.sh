@@ -13,6 +13,7 @@
 #   ./install-hooks.sh -a opencode
 #   ./install-hooks.sh -a grok
 #   ./install-hooks.sh -a claude --global
+#   curl -sSL https://github.com/doggy8088/better-rm/releases/latest/download/install-hooks.sh | bash -s -- -a claude
 #
 
 set -e  # 遇到錯誤時立即退出 / Exit on error
@@ -28,6 +29,10 @@ NC='\033[0m' # No Color
 # Supported coding agents list
 SUPPORTED_AGENTS=(claude codex cursor copilot antigravity qoder pi opencode grok)
 VERSION="1.4.0"
+RELEASE_BASE_URL="https://github.com/doggy8088/better-rm/releases/latest/download"
+RELEASE_HOOK_ASSET_NAME="protect-important-paths.js"
+RELEASE_OPENCODE_PLUGIN_ASSET_NAME="opencode-protect-important-paths.ts"
+CLEANUP_DIRS=""
 
 # 取得可用 Agent 列表字串
 # Return supported agents as a comma-separated string.
@@ -83,6 +88,39 @@ show_version() {
 # 檢查命令是否存在 (Check if command exists)
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+cleanup_release_dirs() {
+    local directory
+    for directory in $CLEANUP_DIRS; do
+        rm -rf -- "$directory"
+    done
+}
+
+download_release_file() {
+    local asset_name="$1"
+    local destination="$2"
+    local download_url="${RELEASE_BASE_URL}/${asset_name}"
+
+    mkdir -p -- "$(dirname -- "$destination")"
+
+    if command_exists curl; then
+        if ! curl -fsSL "$download_url" -o "$destination"; then
+            error "無法從 Release 下載：$download_url"
+            error "Failed to download from release: $download_url"
+            exit 1
+        fi
+    elif command_exists wget; then
+        if ! wget -qO "$destination" "$download_url"; then
+            error "無法從 Release 下載：$download_url"
+            error "Failed to download from release: $download_url"
+            exit 1
+        fi
+    else
+        error "找不到 curl 或 wget，無法下載最新檔案"
+        error "curl or wget is required to download latest release assets"
+        exit 1
+    fi
 }
 
 usage() {
@@ -172,8 +210,24 @@ resolve_source_paths() {
     HOOK_PATH="$SCRIPT_DIR/hooks/protect-important-paths.js"
 
     if [ ! -f "$HOOK_PATH" ] || [ ! -r "$HOOK_PATH" ]; then
-        error "找不到共用 hook：$HOOK_PATH"
-        error "Shared hook not found or unreadable: $HOOK_PATH"
+        local release_dir
+        release_dir="$(mktemp -d)"
+        CLEANUP_DIRS="$CLEANUP_DIRS $release_dir"
+        SCRIPT_DIR="$release_dir"
+        HOOK_PATH="$SCRIPT_DIR/hooks/protect-important-paths.js"
+        info "本機未找到共用 hook，改用最新 Release"
+        info "Shared hook not found locally; downloading from latest release"
+        download_release_file "$RELEASE_HOOK_ASSET_NAME" "$HOOK_PATH"
+
+        if [ ! -f "$HOOK_PATH" ] || [ ! -r "$HOOK_PATH" ]; then
+            error "下載共用 hook 失敗：$HOOK_PATH"
+            error "Failed to download shared hook: $HOOK_PATH"
+            exit 1
+        fi
+    fi
+
+    trap cleanup_release_dirs EXIT
+}
         exit 1
     fi
 }
@@ -321,9 +375,17 @@ resolve_opencode_plugin() {
     OPENCODE_RUNTIME_PATH="$project_root/hooks/protect-important-paths.js"
 
     if [ ! -f "$PLUGIN_SOURCE_PATH" ] || [ ! -r "$PLUGIN_SOURCE_PATH" ]; then
+        download_release_file "$RELEASE_OPENCODE_PLUGIN_ASSET_NAME" "$PLUGIN_SOURCE_PATH"
+    fi
+
+    if [ ! -f "$PLUGIN_SOURCE_PATH" ] || [ ! -r "$PLUGIN_SOURCE_PATH" ]; then
         error "找不到 OpenCode 外掛來源：$PLUGIN_SOURCE_PATH"
         error "OpenCode plugin source not found or unreadable: $PLUGIN_SOURCE_PATH"
         exit 1
+    fi
+
+    if [ ! -f "$OPENCODE_RUNTIME_SOURCE_PATH" ] || [ ! -r "$OPENCODE_RUNTIME_SOURCE_PATH" ]; then
+        download_release_file "$RELEASE_HOOK_ASSET_NAME" "$OPENCODE_RUNTIME_SOURCE_PATH"
     fi
 
     if [ ! -f "$OPENCODE_RUNTIME_SOURCE_PATH" ] || [ ! -r "$OPENCODE_RUNTIME_SOURCE_PATH" ]; then
