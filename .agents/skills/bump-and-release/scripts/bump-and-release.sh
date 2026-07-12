@@ -18,6 +18,7 @@ SKIP_CHANGELOG=0
 show_help() {
   cat <<'EOF'
 Usage:
+  bump-and-release.sh            Prepare release for current version (default mode, no bump)
   bump-and-release.sh bump [options] [major|minor|patch]
   bump-and-release.sh bump [options] --to <version>
   bump-and-release.sh release [options]
@@ -35,8 +36,10 @@ Options:
 Note:
   若未指定 bump 類型，預設使用 patch。
   目前版本直接從 better-rm 取得，避免手動輸入。
+  若不指定 mode，預設執行 release；若當前版本標籤已存在，將停止並要求先 bump。
 
 Examples:
+  bump-and-release.sh
   bump-and-release.sh bump --repo ~/projects/better-rm minor
   bump-and-release.sh bump --repo ~/projects/better-rm
   bump-and-release.sh bump --repo ~/projects/better-rm --to 1.5.0
@@ -46,8 +49,8 @@ EOF
 
 parse_args() {
   if [[ $# -lt 1 ]]; then
-    show_help
-    exit 2
+    MODE="release"
+    return
   fi
 
   MODE="$1"
@@ -304,11 +307,26 @@ run_release_checks() {
   )
 }
 
+release_tag_exists() {
+  local version="$1"
+  local tag="${VERSION_PREFIX}${version}"
+  if git -C "$PROJECT" show-ref --verify --quiet "refs/tags/${tag}"; then
+    return 0
+  fi
+  return 1
+}
+
 run_release() {
-  run_release_checks
   local version
   version="$(current_version)"
   local tag="${VERSION_PREFIX}${version}"
+
+  if release_tag_exists "$version"; then
+    echo "目前版本 ${version} 已存在標籤 ${tag}，請先執行 bump 後再做 release。"
+    exit 2
+  fi
+
+  run_release_checks
 
   echo "版本檢查通過，建議後續指令："
   echo "  git -C \"$PROJECT\" add CHANGELOG.md better-rm test-better-rm.sh install.sh install-hooks.sh README.md"

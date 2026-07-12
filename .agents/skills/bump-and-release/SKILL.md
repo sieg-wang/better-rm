@@ -22,6 +22,17 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
 
 ## 主要指令
 
+### 0) 直接準備發版（預設行為）
+
+```bash
+./.agents/skills/bump-and-release/scripts/bump-and-release.sh
+```
+
+- 無參數時，預設會以 `release` 模式執行。
+- 流程會先讀取目前 `better-rm` 版本並檢查 `refs/tags/<prefix><版本>` 是否已存在：
+  - 若標籤已存在：直接停止，提醒先進行 bump。
+  - 若標籤不存在：以目前版本進行 release 準備，不會再做版本位元調整。
+
 ### 1) 僅做版本更新與變更檔
 
 ```bash
