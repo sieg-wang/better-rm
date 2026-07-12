@@ -27,6 +27,7 @@ NC='\033[0m' # No Color
 # 支援的 Coding Agent 清單（目前）
 # Supported coding agents list
 SUPPORTED_AGENTS=(claude codex cursor copilot antigravity qoder pi opencode grok)
+VERSION="1.4.0"
 
 # 取得可用 Agent 列表字串
 # Return supported agents as a comma-separated string.
@@ -75,6 +76,10 @@ warning() {
     echo -e "${YELLOW}⚠${NC} $1"
 }
 
+show_version() {
+    echo "install-hooks.sh ${VERSION}"
+}
+
 # 檢查命令是否存在 (Check if command exists)
 command_exists() {
     command -v "$1" >/dev/null 2>&1
@@ -93,6 +98,7 @@ Usage:
 Options:
   -a, --agent <agent>  Coding agent to configure (supported: ${supported_agents})
                        要設定的 Coding Agent（可用：${supported_agents}）
+  -v, --version         Show installer version / 顯示安裝工具版本
   -g, --global         Install into the agent's global/user settings
                        安裝到 Agent 的全域／使用者設定（目前僅 Claude 支援）
   -h, --help           Show this help message
@@ -134,6 +140,10 @@ parse_arguments() {
             -g|--global)
                 GLOBAL_INSTALL=true
                 shift
+                ;;
+            -v|--version)
+                show_version
+                exit 0
                 ;;
             -h|--help)
                 usage

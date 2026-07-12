@@ -163,6 +163,8 @@ echo "install-hooks.sh tests"
 echo "========================================"
 
 # CLI parsing
+assert_success "--version short flag works" bash -c "'$INSTALLER' -v | grep -q \"install-hooks.sh 1.4.0\""
+assert_success "--version long flag works" bash -c "'$INSTALLER' --version | grep -q \"install-hooks.sh 1.4.0\""
 assert_success "--help succeeds" "$INSTALLER" --help
 HELP_TEXT=$("$INSTALLER" --help)
 assert_contains "help shows supported agents" "$HELP_TEXT" "supported:"
