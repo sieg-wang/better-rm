@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- 1.4.1: Prepare release 1.4.1
+
+
+### Added
 - Added `install-hooks.sh` with `-a`/`--agent` selection and Claude Code support.
 - Added project-level and `-g`/`--global` Claude Code hook installation with preserving JSON merges, backups, and idempotent updates.
 - Added isolated installer integration tests in `test-install-hooks.sh`.
