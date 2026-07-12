@@ -85,15 +85,25 @@ make_repo() {
 }
 
 hook_count() {
-    node - "$1" <<'NODE'
+    local agent="${2:-claude}"
+    node - "$1" "$agent" <<'NODE'
 const fs = require('fs');
 const settings = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const agent = process.argv[3] ?? 'claude';
 let count = 0;
-for (const entry of settings.hooks?.PreToolUse ?? []) {
-  if (entry?.matcher !== 'Bash' || !Array.isArray(entry.hooks)) continue;
-  for (const hook of entry.hooks) {
-    if (hook?.type === 'command' && typeof hook.command === 'string'
+
+if (agent === 'cursor') {
+  for (const hook of settings?.hooks?.beforeShellExecution ?? []) {
+    if (typeof hook?.command === 'string'
         && hook.command.includes('hooks/protect-important-paths.js')) count += 1;
+  }
+} else {
+  for (const entry of settings.hooks?.PreToolUse ?? []) {
+    if (entry?.matcher !== 'Bash' || !Array.isArray(entry.hooks)) continue;
+    for (const hook of entry.hooks) {
+      if (hook?.type === 'command' && typeof hook.command === 'string'
+          && hook.command.includes('hooks/protect-important-paths.js')) count += 1;
+    }
   }
 }
 process.stdout.write(String(count));
@@ -124,10 +134,11 @@ HELP_TEXT=$("$INSTALLER" --help)
 assert_contains "help shows supported agents" "$HELP_TEXT" "supported:"
 assert_contains "help shows claude as supported agent" "$HELP_TEXT" "claude"
 assert_contains "help shows codex as supported agent" "$HELP_TEXT" "codex"
+assert_contains "help shows cursor as supported agent" "$HELP_TEXT" "cursor"
 assert_failure "missing --agent fails" "$INSTALLER"
 assert_failure "missing --agent value fails" "$INSTALLER" --agent
 assert_failure "unknown option fails" "$INSTALLER" --wat
-assert_failure "unsupported agent fails" "$INSTALLER" --agent cursor
+assert_failure "unsupported agent fails" "$INSTALLER" --agent unknown
 assert_failure "duplicate --agent fails" "$INSTALLER" -a claude --agent claude
 
 # Project mode resolves the caller's Git root.
@@ -168,6 +179,25 @@ case "$CODEX_COMMAND" in
     *) fail "codex hook uses installer checkout path" ;;
 esac
 assert_failure "codex global mode is unsupported" bash -c "cd '$TMP_ROOT' && '$INSTALLER' -a codex --global"
+
+# Cursor project install.
+CURSOR_PROJECT="$TMP_ROOT/cursor-project"
+make_repo "$CURSOR_PROJECT"
+mkdir -p "$CURSOR_PROJECT/src/nested"
+(
+    cd "$CURSOR_PROJECT/src/nested"
+    "$INSTALLER" -a cursor >/dev/null
+)
+CURSOR_SETTINGS="$CURSOR_PROJECT/.cursor/hooks.json"
+assert_file "cursor project settings are created at Git root" "$CURSOR_SETTINGS"
+assert_equal "cursor project install contains one better-rm hook" "1" "$(hook_count "$CURSOR_SETTINGS" cursor)"
+assert_equal "cursor project settings use mode 644" "644" "$(file_mode "$CURSOR_SETTINGS")"
+CURSOR_COMMAND=$(node -e 'const s=require(process.argv[1]); process.stdout.write(s.hooks.beforeShellExecution[0].command)' "$CURSOR_SETTINGS")
+case "$CURSOR_COMMAND" in
+    *"$SCRIPT_DIR/hooks/protect-important-paths.js"*) pass "cursor hook uses installer checkout path" ;;
+    *) fail "cursor hook uses installer checkout path" ;;
+esac
+assert_failure "cursor global mode is unsupported" bash -c "cd '$TMP_ROOT' && '$INSTALLER' -a cursor --global"
 
 # Global mode supports HOME and CLAUDE_CONFIG_DIR without a Git repository.
 GLOBAL_HOME="$TMP_ROOT/global-home"

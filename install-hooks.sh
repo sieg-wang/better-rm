@@ -5,6 +5,7 @@
 # 用法 (Usage):
 #   ./install-hooks.sh -a claude
 #   ./install-hooks.sh -a codex
+#   ./install-hooks.sh -a cursor
 #   ./install-hooks.sh -a claude --global
 #
 
@@ -19,7 +20,7 @@ NC='\033[0m' # No Color
 
 # 支援的 Coding Agent 清單（目前）
 # Supported coding agents list
-SUPPORTED_AGENTS=(claude codex)
+SUPPORTED_AGENTS=(claude codex cursor)
 
 # 取得可用 Agent 列表字串
 # Return supported agents as a comma-separated string.
@@ -94,6 +95,7 @@ Options:
 Examples:
   ./install-hooks.sh -a claude
   ./install-hooks.sh -a codex
+  ./install-hooks.sh --agent cursor
   ./install-hooks.sh --agent claude --global
 EOF
 }
@@ -204,6 +206,19 @@ resolve_codex_settings() {
     SCOPE="project"
 }
 
+# 取得 Cursor 設定檔位置 (Resolve Cursor settings path)
+resolve_cursor_settings() {
+    if [ "$GLOBAL_INSTALL" = true ]; then
+        error "Cursor 不支援 --global，請移除該參數 / Cursor does not support --global; remove this flag"
+        exit 2
+    fi
+
+    local project_root
+    project_root="$(resolve_project_root)"
+    SETTINGS_PATH="$project_root/.cursor/hooks.json"
+    SCOPE="project"
+}
+
 # 以 Node.js 安全合併 JSON hook 設定
 # Safely merge JSON hook settings with Node.js
 merge_json_settings() {
@@ -216,6 +231,7 @@ const path = require('path');
 const settingsPath = process.argv[2];
 const hookPath = process.argv[3];
 const scope = process.argv[4];
+const hookTarget = process.env.HOOK_TARGET || 'claude';
 
 function fail(message) {
   console.error(message);
@@ -232,6 +248,12 @@ function shellQuote(value) {
 
 function isOwnedHook(value) {
   return isObject(value)
+    && typeof value.command === 'string'
+    && /(?:^|[\\/])hooks[\\/]protect-important-paths\.js(?:['"\s]|$)/.test(value.command);
+}
+
+function isOwnedClaudeHook(value) {
+  return isObject(value)
     && value.type === 'command'
     && typeof value.command === 'string'
     && /(?:^|[\\/])hooks[\\/]protect-important-paths\.js(?:['"\s]|$)/.test(value.command);
@@ -241,7 +263,12 @@ function sameJson(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-const desiredHook = {
+const cursorDesiredHook = {
+  command: `node ${shellQuote(hookPath)}`,
+  matcher: '.*'
+};
+
+const claudeDesiredHook = {
   type: 'command',
   command: `node ${shellQuote(hookPath)}`,
   timeout: 5,
@@ -279,64 +306,111 @@ if (original.trim() !== '') {
 if (!isObject(settings)) {
   fail(`Settings root must be a JSON object: ${settingsPath}`);
 }
-if (settings.hooks !== undefined && !isObject(settings.hooks)) {
-  fail('Settings path "hooks" must be a JSON object');
-}
-if (settings.hooks?.PreToolUse !== undefined && !Array.isArray(settings.hooks.PreToolUse)) {
-  fail('Settings path "hooks.PreToolUse" must be a JSON array');
-}
-
-if (settings.hooks === undefined) settings.hooks = {};
-if (settings.hooks.PreToolUse === undefined) settings.hooks.PreToolUse = [];
-
-const preToolUse = settings.hooks.PreToolUse;
-const bashEntries = [];
-for (const entry of preToolUse) {
-  if (isObject(entry) && entry.matcher === 'Bash') {
-    if (entry.hooks !== undefined && !Array.isArray(entry.hooks)) {
-      fail('A "hooks.PreToolUse" entry with matcher "Bash" must contain a hooks array');
-    }
-    if (entry.hooks === undefined) entry.hooks = [];
-    bashEntries.push(entry);
-  }
-}
-
-let firstOwned = null;
-let ownedCount = 0;
-for (const entry of bashEntries) {
-  for (let index = 0; index < entry.hooks.length; index += 1) {
-    if (isOwnedHook(entry.hooks[index])) {
-      ownedCount += 1;
-      if (firstOwned === null) firstOwned = { entry, index };
-    }
-  }
-}
-
 let changed = false;
-if (firstOwned !== null) {
-  if (!sameJson(firstOwned.entry.hooks[firstOwned.index], desiredHook)) {
-    firstOwned.entry.hooks[firstOwned.index] = desiredHook;
+if (hookTarget === 'cursor') {
+  if (settings.version === undefined) {
+    settings.version = 1;
+  }
+  if (settings.hooks === undefined) {
+    settings.hooks = {};
+  }
+  if (!isObject(settings.hooks)) {
+    fail('Settings path "hooks" must be a JSON object');
+  }
+  if (settings.hooks.beforeShellExecution !== undefined && !Array.isArray(settings.hooks.beforeShellExecution)) {
+    fail('Settings path "hooks.beforeShellExecution" must be a JSON array');
+  }
+  if (settings.hooks.beforeShellExecution === undefined) {
+    settings.hooks.beforeShellExecution = [];
+  }
+
+  const entries = settings.hooks.beforeShellExecution;
+  const ownedIndexes = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    if (isOwnedHook(entries[index])) {
+      ownedIndexes.push(index);
+    }
+  }
+
+  if (ownedIndexes.length > 0) {
+    const firstIndex = ownedIndexes[0];
+    if (!sameJson(entries[firstIndex], cursorDesiredHook)) {
+      entries[firstIndex] = cursorDesiredHook;
+      changed = true;
+    }
+
+    const filtered = [];
+    for (let index = 0; index < entries.length; index += 1) {
+      if (ownedIndexes.includes(index) && index !== firstIndex) {
+        changed = true;
+        continue;
+      }
+      filtered.push(entries[index]);
+    }
+    settings.hooks.beforeShellExecution = filtered;
+  } else {
+    entries.push(cursorDesiredHook);
     changed = true;
   }
-
-  let keptFirst = false;
-  for (const entry of bashEntries) {
-    entry.hooks = entry.hooks.filter((hook) => {
-      if (!isOwnedHook(hook)) return true;
-      if (!keptFirst) {
-        keptFirst = true;
-        return true;
-      }
-      changed = true;
-      return false;
-    });
-  }
-} else if (bashEntries.length > 0) {
-  bashEntries[0].hooks.push(desiredHook);
-  changed = true;
 } else {
-  preToolUse.push({ matcher: 'Bash', hooks: [desiredHook] });
-  changed = true;
+  if (settings.hooks !== undefined && !isObject(settings.hooks)) {
+    fail('Settings path "hooks" must be a JSON object');
+  }
+  if (settings.hooks?.PreToolUse !== undefined && !Array.isArray(settings.hooks.PreToolUse)) {
+    fail('Settings path "hooks.PreToolUse" must be a JSON array');
+  }
+
+  if (settings.hooks === undefined) settings.hooks = {};
+  if (settings.hooks.PreToolUse === undefined) settings.hooks.PreToolUse = [];
+
+  const preToolUse = settings.hooks.PreToolUse;
+  const bashEntries = [];
+  for (const entry of preToolUse) {
+    if (isObject(entry) && entry.matcher === 'Bash') {
+      if (entry.hooks !== undefined && !Array.isArray(entry.hooks)) {
+        fail('A "hooks.PreToolUse" entry with matcher "Bash" must contain a hooks array');
+      }
+      if (entry.hooks === undefined) entry.hooks = [];
+      bashEntries.push(entry);
+    }
+  }
+
+  let firstOwned = null;
+  for (const entry of bashEntries) {
+    for (let index = 0; index < entry.hooks.length; index += 1) {
+      if (isOwnedClaudeHook(entry.hooks[index])) {
+        if (firstOwned === null) {
+          firstOwned = { entry, index };
+        }
+      }
+    }
+  }
+
+  if (firstOwned !== null) {
+    if (!sameJson(firstOwned.entry.hooks[firstOwned.index], claudeDesiredHook)) {
+      firstOwned.entry.hooks[firstOwned.index] = claudeDesiredHook;
+      changed = true;
+    }
+
+    let keptFirst = false;
+    for (const entry of bashEntries) {
+      entry.hooks = entry.hooks.filter((hook) => {
+        if (!isOwnedClaudeHook(hook)) return true;
+        if (!keptFirst) {
+          keptFirst = true;
+          return true;
+        }
+        changed = true;
+        return false;
+      });
+    }
+  } else if (bashEntries.length > 0) {
+    bashEntries[0].hooks.push(claudeDesiredHook);
+    changed = true;
+  } else {
+    preToolUse.push({ matcher: 'Bash', hooks: [claudeDesiredHook] });
+    changed = true;
+  }
 }
 
 if (!changed && existed) {
@@ -424,6 +498,45 @@ install_claude_hooks() {
     fi
 }
 
+# 安裝 Cursor hook (Install Cursor hook)
+install_cursor_hooks() {
+    if ! command_exists node; then
+        error "找不到 node 命令，hooks 需要 Node.js"
+        error "node command not found; hooks require Node.js"
+        exit 1
+    fi
+
+    resolve_cursor_settings
+
+    info "Cursor 設定檔：$SETTINGS_PATH"
+    info "共用 hook：$HOOK_PATH"
+
+    local result
+    HOOK_TARGET=cursor
+    result=$(HOOK_TARGET="$HOOK_TARGET" merge_json_settings)
+
+    local action settings_path backup_path
+    IFS=$'\t' read -r action settings_path backup_path <<< "$result"
+    case "$action" in
+        created)
+            success "已建立 Cursor hook 設定：$settings_path"
+            success "Created Cursor hook settings: $settings_path"
+            ;;
+        updated)
+            success "已更新 Cursor hook 設定：$settings_path"
+            success "Updated Cursor hook settings: $settings_path"
+            info "備份檔案 / Backup: $backup_path"
+            ;;
+        unchanged)
+            info "Cursor hook 已是最新狀態 / Cursor hook is already up to date"
+            ;;
+        *)
+            error "無法辨識安裝結果 / Unknown installation result: $result"
+            exit 1
+            ;;
+    esac
+}
+
 # 安裝 Codex hook (Install Codex hook)
 install_codex_hooks() {
     if ! command_exists node; then
@@ -472,6 +585,9 @@ main() {
             ;;
         codex)
             install_codex_hooks
+            ;;
+        cursor)
+            install_cursor_hooks
             ;;
         *)
             local supported_agents
