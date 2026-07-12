@@ -351,7 +351,7 @@ run_release() {
     "README.md"
   )
   local changed
-  local push_cmd="git -C \"$PROJECT\" push origin HEAD --follow-tags"
+  local -a push_cmd=(git -C "$PROJECT" push origin HEAD --follow-tags)
 
   if release_tag_exists "$version"; then
     echo "目前版本 ${version} 已存在標籤 ${tag}，請先執行 bump 後再做 release。"
@@ -372,7 +372,7 @@ run_release() {
     fi
     echo "DRY-RUN: git -C \"$PROJECT\" tag -a \"${tag}\" -m \"Release ${tag}\""
     if [[ "$PUSH" -eq 1 ]]; then
-      echo "DRY-RUN: ${push_cmd}"
+      echo "DRY-RUN: ${push_cmd[*]}"
     else
       echo "DRY-RUN: 已設定 --no-push，跳過推播。"
     fi
@@ -396,7 +396,7 @@ run_release() {
     echo "已建立標籤：${tag}"
     if [[ "$PUSH" -eq 1 ]]; then
       echo "開始推播..."
-      $push_cmd
+      "${push_cmd[@]}"
     else
       echo "已設定 --no-push，已跳過推播。"
     fi
