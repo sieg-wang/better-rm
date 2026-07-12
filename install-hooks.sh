@@ -4,6 +4,7 @@
 #
 # 用法 (Usage):
 #   ./install-hooks.sh -a claude
+#   ./install-hooks.sh -a codex
 #   ./install-hooks.sh -a claude --global
 #
 
@@ -18,7 +19,7 @@ NC='\033[0m' # No Color
 
 # 支援的 Coding Agent 清單（目前）
 # Supported coding agents list
-SUPPORTED_AGENTS=(claude)
+SUPPORTED_AGENTS=(claude codex)
 
 # 取得可用 Agent 列表字串
 # Return supported agents as a comma-separated string.
@@ -86,12 +87,13 @@ Options:
   -a, --agent <agent>  Coding agent to configure (supported: ${supported_agents})
                        要設定的 Coding Agent（可用：${supported_agents}）
   -g, --global         Install into the agent's global/user settings
-                       安裝到 Agent 的全域／使用者設定
+                       安裝到 Agent 的全域／使用者設定（目前僅 Claude 支援）
   -h, --help           Show this help message
                        顯示此說明
 
 Examples:
   ./install-hooks.sh -a claude
+  ./install-hooks.sh -a codex
   ./install-hooks.sh --agent claude --global
 EOF
 }
@@ -152,6 +154,22 @@ resolve_source_paths() {
     fi
 }
 
+# 取得專案根目錄（所有支援的 JSON 設定預設放在專案 root）
+# Resolve project root for JSON-style agent settings
+resolve_project_root() {
+    if ! command_exists git; then
+        error "找不到 git 命令 / git command not found"
+        exit 1
+    fi
+
+    local project_root
+    if ! project_root=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null); then
+        error "目前目錄不在 Git 儲存庫中 / Current directory is not inside a Git repository"
+        exit 1
+    fi
+    printf '%s' "$project_root"
+}
+
 # 取得 Claude Code 設定檔位置 (Resolve Claude Code settings path)
 resolve_claude_settings() {
     if [ "$GLOBAL_INSTALL" = true ]; then
@@ -166,24 +184,29 @@ resolve_claude_settings() {
         SETTINGS_PATH="$config_dir/settings.json"
         SCOPE="global"
     else
-        if ! command_exists git; then
-            error "找不到 git 命令 / git command not found"
-            exit 1
-        fi
-
         local project_root
-        if ! project_root=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null); then
-            error "目前目錄不在 Git 儲存庫中 / Current directory is not inside a Git repository"
-            exit 1
-        fi
+        project_root="$(resolve_project_root)"
         SETTINGS_PATH="$project_root/.claude/settings.json"
         SCOPE="project"
     fi
 }
 
-# 以 Node.js 安全合併 Claude Code JSON 設定
-# Safely merge Claude Code JSON settings with Node.js
-merge_claude_settings() {
+# 取得 Codex 設定檔位置 (Resolve Codex settings path)
+resolve_codex_settings() {
+    if [ "$GLOBAL_INSTALL" = true ]; then
+        error "Codex 不支援 --global，請移除該參數 / Codex does not support --global; remove this flag"
+        exit 2
+    fi
+
+    local project_root
+    project_root="$(resolve_project_root)"
+    SETTINGS_PATH="$project_root/.codex/hooks.json"
+    SCOPE="project"
+}
+
+# 以 Node.js 安全合併 JSON hook 設定
+# Safely merge JSON hook settings with Node.js
+merge_json_settings() {
     node - "$SETTINGS_PATH" "$HOOK_PATH" "$SCOPE" <<'NODE'
 'use strict';
 
@@ -257,10 +280,10 @@ if (!isObject(settings)) {
   fail(`Settings root must be a JSON object: ${settingsPath}`);
 }
 if (settings.hooks !== undefined && !isObject(settings.hooks)) {
-  fail('Claude settings path "hooks" must be a JSON object');
+  fail('Settings path "hooks" must be a JSON object');
 }
 if (settings.hooks?.PreToolUse !== undefined && !Array.isArray(settings.hooks.PreToolUse)) {
-  fail('Claude settings path "hooks.PreToolUse" must be a JSON array');
+  fail('Settings path "hooks.PreToolUse" must be a JSON array');
 }
 
 if (settings.hooks === undefined) settings.hooks = {};
@@ -372,7 +395,7 @@ install_claude_hooks() {
     info "共用 hook：$HOOK_PATH"
 
     local result
-    result=$(merge_claude_settings)
+    result=$(merge_json_settings)
 
     local action settings_path backup_path
     IFS=$'\t' read -r action settings_path backup_path <<< "$result"
@@ -401,6 +424,44 @@ install_claude_hooks() {
     fi
 }
 
+# 安裝 Codex hook (Install Codex hook)
+install_codex_hooks() {
+    if ! command_exists node; then
+        error "找不到 node 命令，hooks 需要 Node.js"
+        error "node command not found; hooks require Node.js"
+        exit 1
+    fi
+
+    resolve_codex_settings
+
+    info "Codex 設定檔：$SETTINGS_PATH"
+    info "共用 hook：$HOOK_PATH"
+
+    local result
+    result=$(merge_json_settings)
+
+    local action settings_path backup_path
+    IFS=$'\t' read -r action settings_path backup_path <<< "$result"
+    case "$action" in
+        created)
+            success "已建立 Codex hook 設定：$settings_path"
+            success "Created Codex hook settings: $settings_path"
+            ;;
+        updated)
+            success "已更新 Codex hook 設定：$settings_path"
+            success "Updated Codex hook settings: $settings_path"
+            info "備份檔案 / Backup: $backup_path"
+            ;;
+        unchanged)
+            info "Codex hook 已是最新狀態 / Codex hook is already up to date"
+            ;;
+        *)
+            error "無法辨識安裝結果 / Unknown installation result: $result"
+            exit 1
+            ;;
+    esac
+}
+
 main() {
     parse_arguments "$@"
     resolve_source_paths
@@ -408,6 +469,9 @@ main() {
     case "$AGENT" in
         claude)
             install_claude_hooks
+            ;;
+        codex)
+            install_codex_hooks
             ;;
         *)
             local supported_agents

@@ -312,31 +312,32 @@ export BETTER_RM_PROTECTED_DIRS="/srv/data:/workspace/secrets"
 hooks 執行時需要 `node` 可用。Codex 還會要求使用者透過 `/hooks` 審閱並信任
 專案 hook；其他代理也可能依各自的安全設定要求確認。
 
-### 自動安裝 Claude Code hooks / Automatic Claude Code hook installation
+### 自動安裝 Claude 與 Codex hooks / Automatic Claude and Codex hook installation
 
-目前 `install-hooks.sh` 先支援 Claude Code。使用 `-a` 或 `--agent` 指定 Agent；
-預設會安裝到目前目錄所屬 Git 專案的 `.claude/settings.json`：
+目前 `install-hooks.sh` 支援 Claude Code 與 Codex。使用 `-a` 或 `--agent` 指定
+Agent；預設會安裝到目前目錄所屬 Git 專案的對應設定檔：
 
 ```bash
 # 安裝到目前 Git 專案 / Install into the current Git project
 ~/.better-rm/install-hooks.sh -a claude
+~/.better-rm/install-hooks.sh --agent codex
 
 # 安裝到 Claude Code 全域設定 / Install into Claude Code global settings
 ~/.better-rm/install-hooks.sh --agent claude --global
 ```
 
-專案模式可從 Git 儲存庫內的任何子目錄執行。全域模式會寫入
+專案模式可從 Git 儲存庫內的任何子目錄執行。Claude Code 的全域模式會寫入
 `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json`，且不要求目前目錄是 Git
-儲存庫。安裝程式會保留其他 Claude Code 設定與 hooks，只新增或更新
-better-rm 的 `PreToolUse` hook；修改既有檔案前會建立時間戳備份，重複執行時
-不會加入重複項目或重寫已是最新狀態的檔案。
+儲存庫。Codex 目前只支援專案模式，會寫入專案根目錄的 `.codex/hooks.json`。安裝程式
+會保留其他設定與 hooks，只新增或更新 `PreToolUse` 下的 better-rm hook；修改既有檔案前
+會建立時間戳備份，重複執行時不會加入重複項目或重寫已是最新狀態的檔案。
 
 自動安裝的 hook 會使用 `install-hooks.sh` 所在 checkout 中
 `hooks/protect-important-paths.js` 的絕對路徑。建議先透過 `install.sh` 將專案安裝
 到固定的 `~/.better-rm`；若之後移動或刪除該目錄，已安裝的 hook 也需要重新執行
-安裝程式。`install.sh` 與 `install-hooks.sh` 目前是分開的步驟，不會在安裝 `rm`
-別名時自動修改 Claude Code 設定。變更設定後，可能需要重新啟動 Claude Code 或
-開啟新的 session。
+安裝程式。`install.sh` 與 `install-hooks.sh` 是分開的步驟，不會在安裝 `rm`
+別名時自動修改 Claude Code 或 Codex 設定。變更設定後，可能需要重新啟動相應
+的 Agent 或開啟新的 session。
 
 下方手動設定範例仍適用於 hook 檔案已提交在目標專案中的情況；其中
 `git rev-parse --show-toplevel` 會從該專案載入 hook。其他 Coding Agent 目前仍請

@@ -123,10 +123,11 @@ assert_success "--help succeeds" "$INSTALLER" --help
 HELP_TEXT=$("$INSTALLER" --help)
 assert_contains "help shows supported agents" "$HELP_TEXT" "supported:"
 assert_contains "help shows claude as supported agent" "$HELP_TEXT" "claude"
+assert_contains "help shows codex as supported agent" "$HELP_TEXT" "codex"
 assert_failure "missing --agent fails" "$INSTALLER"
 assert_failure "missing --agent value fails" "$INSTALLER" --agent
 assert_failure "unknown option fails" "$INSTALLER" --wat
-assert_failure "unsupported agent fails" "$INSTALLER" --agent codex --global
+assert_failure "unsupported agent fails" "$INSTALLER" --agent cursor
 assert_failure "duplicate --agent fails" "$INSTALLER" -a claude --agent claude
 
 # Project mode resolves the caller's Git root.
@@ -148,6 +149,25 @@ case "$PROJECT_COMMAND" in
     *"$SCRIPT_DIR/hooks/protect-important-paths.js"*) pass "project hook uses installer checkout path" ;;
     *) fail "project hook uses installer checkout path" ;;
 esac
+
+# Codex project install.
+CODEX_PROJECT="$TMP_ROOT/codex-project"
+make_repo "$CODEX_PROJECT"
+mkdir -p "$CODEX_PROJECT/src/nested"
+(
+    cd "$CODEX_PROJECT/src/nested"
+    "$INSTALLER" -a codex >/dev/null
+)
+CODEX_SETTINGS="$CODEX_PROJECT/.codex/hooks.json"
+assert_file "codex project settings are created at Git root" "$CODEX_SETTINGS"
+assert_equal "codex project install contains one better-rm hook" "1" "$(hook_count "$CODEX_SETTINGS")"
+assert_equal "codex project settings use mode 644" "644" "$(file_mode "$CODEX_SETTINGS")"
+CODEX_COMMAND=$(node -e 'const s=require(process.argv[1]); process.stdout.write(s.hooks.PreToolUse[0].hooks[0].command)' "$CODEX_SETTINGS")
+case "$CODEX_COMMAND" in
+    *"$SCRIPT_DIR/hooks/protect-important-paths.js"*) pass "codex hook uses installer checkout path" ;;
+    *) fail "codex hook uses installer checkout path" ;;
+esac
+assert_failure "codex global mode is unsupported" bash -c "cd '$TMP_ROOT' && '$INSTALLER' -a codex --global"
 
 # Global mode supports HOME and CLAUDE_CONFIG_DIR without a Git repository.
 GLOBAL_HOME="$TMP_ROOT/global-home"
