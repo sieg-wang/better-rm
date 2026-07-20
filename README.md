@@ -12,7 +12,7 @@
 - ♻️ **垃圾桶機制**：將檔案移至垃圾桶而非永久刪除
 - 📁 **保留目錄結構**：在垃圾桶中維持原始的完整路徑結構，方便日後還原
 - 🔧 **完整相容**：支援所有常見的 `rm` 參數（`-r`, `-f`, `-i`, `-v` 等）
-- ⚙️ **可自訂**：透過環境變數自訂垃圾桶位置
+- ⚙️ **可自訂**：透過環境變數自訂垃圾桶與狀態資料位置
 - 🎨 **友善介面**：彩色輸出，清楚顯示操作狀態
 
 ## 安裝方式
@@ -219,12 +219,14 @@ TRASH_DIR=/tmp/my-trash rm file.txt
 
 ### 刪除日誌
 
-`better-rm` 會在垃圾桶目錄中維護一個 `.deletion_log` 檔案，記錄所有刪除操作：
+`better-rm` 會在狀態目錄中維護 `deletion.log`，記錄所有刪除操作。預設狀態目錄為 `~/.local/state/better-rm`；若設定了絕對路徑的 `XDG_STATE_HOME`，則使用 `$XDG_STATE_HOME/better-rm`：
 
 ```bash
 # 查看刪除日誌
-cat ~/.Trash/.deletion_log
+cat ~/.local/state/better-rm/deletion.log
 ```
+
+從舊版本升級時，`--restore` 仍會在新日誌找不到符合項目後讀取 `$TRASH_DIR/.deletion_log`。新刪除操作只會寫入新的狀態目錄，不會搬移或刪除舊日誌。
 
 日誌格式：
 ```
@@ -254,6 +256,20 @@ TRASH_DIR=/tmp/trash rm file.txt
 # 永久設定（在 ~/.bashrc 或 ~/.zshrc 中加入）
 export TRASH_DIR="$HOME/MyTrash"
 ```
+
+### 自訂狀態與日誌位置
+
+你可以透過 `BETTER_RM_STATE_DIR` 自訂狀態目錄。此設定的優先順序高於 `XDG_STATE_HOME`：
+
+```bash
+# 暫時設定（單次使用）
+BETTER_RM_STATE_DIR=/tmp/better-rm-state rm file.txt
+
+# 永久設定（在 ~/.bashrc 或 ~/.zshrc 中加入）
+export BETTER_RM_STATE_DIR="$HOME/.local/state/better-rm"
+```
+
+日誌包含原始路徑與垃圾桶路徑。新建立的狀態目錄使用 `0700` 權限，新建立的日誌使用 `0600` 權限。
 
 ## 受保護的目錄
 
@@ -655,7 +671,7 @@ rm --restore LICENSE
 
 #### 2. 手動還原
 由於被刪除的檔案在垃圾桶中仍保留了原始的完整路徑結構，您也可以使用系統原生的 `mv` 命令手動移回。
-請至 `~/.Trash/.deletion_log` 或垃圾桶中找到您的檔案，然後手動移動：
+請至 `~/.local/state/better-rm/deletion.log`、舊版的 `$TRASH_DIR/.deletion_log` 或垃圾桶中找到您的檔案，然後手動移動：
 
 ```bash
 # 手動還原範例

@@ -26,8 +26,15 @@ BETTER_RM="$SCRIPT_DIR/better-rm"
 # 測試用的垃圾桶目錄 (Test trash directory)
 TEST_TRASH_DIR="/tmp/better-rm-test-trash"
 
+# 測試用的狀態目錄 (Test state directory)
+TEST_STATE_DIR="/tmp/better-rm-test-state"
+
 # 測試用的工作目錄 (Test working directory)
 TEST_WORK_DIR="/tmp/better-rm-test-work"
+
+# 測試不可寫狀態目錄時使用的一般檔案
+# Regular file used to test an unavailable state directory
+TEST_STATE_BLOCKER="/tmp/better-rm-test-state-blocker"
 
 # 顯示測試標題 (Display test title)
 test_title() {
@@ -57,7 +64,7 @@ test_fail() {
 
 # 清理測試環境 (Clean up test environment)
 cleanup() {
-    rm -rf "$TEST_TRASH_DIR" "$TEST_WORK_DIR"
+    rm -rf "$TEST_TRASH_DIR" "$TEST_STATE_DIR" "$TEST_WORK_DIR" "$TEST_STATE_BLOCKER"
 }
 
 # 設置測試環境 (Setup test environment)
@@ -65,6 +72,7 @@ setup() {
     cleanup
     mkdir -p "$TEST_WORK_DIR"
     export TRASH_DIR="$TEST_TRASH_DIR"
+    export BETTER_RM_STATE_DIR="$TEST_STATE_DIR"
 }
 
 # 驗證檔案是否在垃圾桶中 (Verify file is in trash)
@@ -79,7 +87,7 @@ verify_in_trash() {
 
 # 驗證日誌記錄 (Verify log entry)
 verify_log_entry() {
-    local log_file="$TEST_TRASH_DIR/.deletion_log"
+    local log_file="$TEST_STATE_DIR/deletion.log"
     local pattern="$1"
     if [ -f "$log_file" ] && grep -q "$pattern" "$log_file"; then
         return 0
@@ -97,6 +105,7 @@ echo -e "${GREEN}Better-RM Comprehensive Test Suite${NC}"
 echo ""
 echo "測試腳本: $BETTER_RM"
 echo "垃圾桶目錄: $TEST_TRASH_DIR"
+echo "狀態目錄: $TEST_STATE_DIR"
 echo "工作目錄: $TEST_WORK_DIR"
 echo ""
 
@@ -282,10 +291,19 @@ cd "$TEST_WORK_DIR"
 test_item "日誌檔案自動創建"
 echo "test" > logtest.txt
 "$BETTER_RM" logtest.txt
-if [ -f "$TEST_TRASH_DIR/.deletion_log" ]; then
+if [ -f "$TEST_STATE_DIR/deletion.log" ] && [ ! -e "$TEST_TRASH_DIR/.deletion_log" ]; then
     test_pass "日誌檔案成功創建"
 else
     test_fail "日誌檔案未創建"
+fi
+
+test_item "狀態目錄與日誌使用限制性權限"
+state_mode=$(stat -c '%a' "$TEST_STATE_DIR" 2>/dev/null || stat -f '%Lp' "$TEST_STATE_DIR" 2>/dev/null)
+log_mode=$(stat -c '%a' "$TEST_STATE_DIR/deletion.log" 2>/dev/null || stat -f '%Lp' "$TEST_STATE_DIR/deletion.log" 2>/dev/null)
+if [ "$state_mode" = "700" ] && [ "$log_mode" = "600" ]; then
+    test_pass "狀態目錄與日誌權限正確"
+else
+    test_fail "狀態目錄或日誌權限不正確 (directory=$state_mode, log=$log_mode)"
 fi
 
 test_item "日誌記錄檔案刪除"
@@ -316,11 +334,25 @@ else
 fi
 
 test_item "日誌格式正確"
-log_file="$TEST_TRASH_DIR/.deletion_log"
+log_file="$TEST_STATE_DIR/deletion.log"
 if grep -E "^[0-9]{8}_[0-9]{6}_[0-9]+ \| .+ \| .+ \| .+ \| (file|directory|symlink)$" "$log_file" >/dev/null 2>&1; then
     test_pass "日誌格式正確"
 else
     test_fail "日誌格式不正確"
+fi
+
+test_item "無法建立日誌目錄時刪除仍成功且不洩漏 Shell 錯誤"
+printf 'blocker\n' > "$TEST_STATE_BLOCKER"
+echo "unavailable state test" > unavailable-state.txt
+log_failure_output=$(BETTER_RM_STATE_DIR="$TEST_STATE_BLOCKER/child" "$BETTER_RM" unavailable-state.txt 2>&1)
+log_failure_status=$?
+if [ $log_failure_status -eq 0 ] && [ ! -e unavailable-state.txt ] && \
+   verify_in_trash "unavailable-state.txt" && \
+   echo "$log_failure_output" | grep -q "無法建立日誌目錄" && \
+   ! echo "$log_failure_output" | grep -Eq "Permission denied|Operation not permitted|Not a directory"; then
+    test_pass "日誌失敗不影響刪除且輸出受控"
+else
+    test_fail "日誌失敗時的刪除結果或錯誤輸出不正確"
 fi
 
 # ============================================================================
@@ -476,12 +508,53 @@ echo "custom trash test" > customtest.txt
 
 TRASH_DIR="$custom_trash" "$BETTER_RM" customtest.txt
 
-if [ -d "$custom_trash" ] && find "$custom_trash" -name "customtest.txt__*" | grep -q .; then
+if [ -d "$custom_trash" ] && find "$custom_trash" -name "customtest.txt__*" | grep -q . && \
+   [ ! -e "$custom_trash/.deletion_log" ] && verify_log_entry "customtest.txt"; then
     test_pass "自訂垃圾桶目錄正常工作"
 else
     test_fail "自訂垃圾桶目錄失敗"
 fi
 rm -rf "$custom_trash"
+
+test_item "使用自訂 BETTER_RM_STATE_DIR"
+custom_state="/tmp/custom-better-rm-state-test"
+rm -rf "$custom_state"
+echo "custom state test" > customstatetest.txt
+BETTER_RM_STATE_DIR="$custom_state" "$BETTER_RM" customstatetest.txt
+if [ -f "$custom_state/deletion.log" ] && grep -q "customstatetest.txt" "$custom_state/deletion.log"; then
+    test_pass "自訂狀態目錄正常工作"
+else
+    test_fail "自訂狀態目錄失敗"
+fi
+rm -rf "$custom_state"
+
+test_item "使用 XDG_STATE_HOME"
+custom_xdg_state="/tmp/custom-xdg-state-test"
+rm -rf "$custom_xdg_state"
+echo "xdg state test" > xdgstatetest.txt
+BETTER_RM_STATE_DIR="" XDG_STATE_HOME="$custom_xdg_state" "$BETTER_RM" xdgstatetest.txt
+if [ -f "$custom_xdg_state/better-rm/deletion.log" ] && \
+   grep -q "xdgstatetest.txt" "$custom_xdg_state/better-rm/deletion.log"; then
+    test_pass "XDG 狀態目錄正常工作"
+else
+    test_fail "XDG 狀態目錄失敗"
+fi
+rm -rf "$custom_xdg_state"
+
+test_item "相對 XDG_STATE_HOME 回退預設狀態目錄"
+fallback_home="/tmp/better-rm-state-fallback-home"
+rm -rf "$fallback_home"
+mkdir -p "$fallback_home"
+echo "fallback state test" > fallbackstatetest.txt
+HOME="$fallback_home" BETTER_RM_STATE_DIR="" XDG_STATE_HOME="relative-state" \
+    "$BETTER_RM" fallbackstatetest.txt
+if [ -f "$fallback_home/.local/state/better-rm/deletion.log" ] && \
+   grep -q "fallbackstatetest.txt" "$fallback_home/.local/state/better-rm/deletion.log"; then
+    test_pass "相對 XDG_STATE_HOME 正確回退"
+else
+    test_fail "相對 XDG_STATE_HOME 未正確回退"
+fi
+rm -rf "$fallback_home"
 
 # ============================================================================
 # 測試 13: 還原功能 (Test 13: Restore Function)
@@ -547,6 +620,21 @@ if [ "$(cat test_restore.txt)" = "content v1" ]; then
     test_pass "-f 強制覆蓋同名檔案成功"
 else
     test_fail "-f 強制覆蓋同名檔案失敗"
+fi
+
+test_item "新日誌無符合項目時回退舊版垃圾桶日誌"
+setup
+cd "$TEST_WORK_DIR"
+echo "legacy content" > legacy_restore.txt
+"$BETTER_RM" legacy_restore.txt
+mv "$TEST_STATE_DIR/deletion.log" "$TEST_TRASH_DIR/.deletion_log"
+echo "current content" > current_log_only.txt
+"$BETTER_RM" current_log_only.txt
+"$BETTER_RM" --restore legacy_restore.txt
+if [ -f legacy_restore.txt ] && [ "$(cat legacy_restore.txt)" = "legacy content" ]; then
+    test_pass "舊版垃圾桶日誌回退還原成功"
+else
+    test_fail "舊版垃圾桶日誌回退還原失敗"
 fi
 
 # 清理測試產生的檔案

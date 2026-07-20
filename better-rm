@@ -8,6 +8,26 @@
 # Set trash directory (can be changed via TRASH_DIR environment variable)
 TRASH_DIR="${TRASH_DIR:-$HOME/.Trash}"
 
+# 解析 better-rm 狀態目錄
+# Resolve the better-rm state directory
+resolve_state_dir() {
+    if [ -n "${BETTER_RM_STATE_DIR:-}" ]; then
+        printf '%s\n' "$BETTER_RM_STATE_DIR"
+    elif [[ "${XDG_STATE_HOME:-}" = /* ]]; then
+        printf '%s/better-rm\n' "$XDG_STATE_HOME"
+    else
+        printf '%s/.local/state/better-rm\n' "$HOME"
+    fi
+}
+
+# 取得刪除日誌路徑
+# Get the deletion log path
+get_deletion_log_file() {
+    local state_dir
+    state_dir=$(resolve_state_dir)
+    printf '%s/deletion.log\n' "$state_dir"
+}
+
 # 受保護的目錄清單 - 禁止刪除這些重要目錄
 # Protected directories list - prevent deletion of these critical directories
 PROTECTED_DIRS=(
@@ -72,18 +92,34 @@ log_deletion() {
     local file_hash="$3"
     local timestamp="$4"
     local file_type="$5"
-    local log_file="$TRASH_DIR/.deletion_log"
+    local log_file
+    local log_dir
+    log_file=$(get_deletion_log_file)
+    log_dir="${log_file%/*}"
+
+    # 確保狀態目錄存在，並限制新目錄的存取權限
+    # Ensure the state directory exists with restrictive permissions
+    if [ ! -d "$log_dir" ]; then
+        if ! (umask 077; mkdir -p "$log_dir") 2>/dev/null; then
+            warn_msg "無法建立日誌目錄: $log_dir"
+            warn_msg "Failed to create log directory: $log_dir"
+            return 1
+        fi
+    fi
     
     # 確保日誌檔案存在
     # Ensure log file exists
     if [ ! -f "$log_file" ]; then
-        if ! {
-            echo "# Better-RM Deletion Log"
-            echo "# 更好的 RM 刪除日誌"
-            echo "# Format: TIMESTAMP | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE"
-            echo "# 格式：時間戳記 | 原始路徑 | 垃圾桶路徑 | 雜湊值 | 檔案類型"
-            echo "# =============================================================================="
-        } > "$log_file" 2>/dev/null; then
+        if ! (
+            umask 077
+            {
+                echo "# Better-RM Deletion Log"
+                echo "# 更好的 RM 刪除日誌"
+                echo "# Format: TIMESTAMP | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE"
+                echo "# 格式：時間戳記 | 原始路徑 | 垃圾桶路徑 | 雜湊值 | 檔案類型"
+                echo "# =============================================================================="
+            } > "$log_file"
+        ) 2>/dev/null; then
             # 日誌檔案創建失敗，顯示警告但不中斷操作
             # Log file creation failed, show warning but don't interrupt operation
             warn_msg "無法創建刪除日誌: $log_file"
@@ -94,7 +130,10 @@ log_deletion() {
     
     # 記錄刪除操作
     # Log the deletion operation
-    if ! echo "$timestamp | $original_path | $trash_path | $file_hash | $file_type" >> "$log_file" 2>/dev/null; then
+    if ! {
+        printf '%s | %s | %s | %s | %s\n' \
+            "$timestamp" "$original_path" "$trash_path" "$file_hash" "$file_type" >> "$log_file"
+    } 2>/dev/null; then
         # 記錄失敗，顯示警告但不中斷操作
         # Logging failed, show warning but don't interrupt operation
         warn_msg "無法寫入刪除日誌"
@@ -260,6 +299,8 @@ A safer alternative to the rm command
 
 環境變數 (Environment Variables):
   TRASH_DIR              垃圾桶目錄位置 (預設: ~/.Trash)
+  BETTER_RM_STATE_DIR    狀態與日誌目錄 (預設: ~/.local/state/better-rm)
+  XDG_STATE_HOME         未設定 BETTER_RM_STATE_DIR 時使用的絕對狀態根目錄
 
 說明 (Description):
   此命令會將檔案移至垃圾桶而非永久刪除。
@@ -432,8 +473,20 @@ restore_file() {
     local force="$2"
     local verbose="$3"
     
-    local log_file="$TRASH_DIR/.deletion_log"
-    if [ ! -f "$log_file" ]; then
+    local primary_log
+    local legacy_log="$TRASH_DIR/.deletion_log"
+    local log_file
+    local log_files=()
+    primary_log=$(get_deletion_log_file)
+
+    if [ -f "$primary_log" ]; then
+        log_files+=("$primary_log")
+    fi
+    if [ -f "$legacy_log" ]; then
+        log_files+=("$legacy_log")
+    fi
+
+    if [ ${#log_files[@]} -eq 0 ]; then
         error_msg "找不到刪除日誌，無法還原檔案"
         error_msg "Deletion log not found, cannot restore file"
         return 1
@@ -441,61 +494,68 @@ restore_file() {
     
     # 從日誌尾部開始尋找符合檔名/路徑的刪除記錄
     # Search from the end of the log for a matching deletion record
-    local matched_line=""
     local trash_path=""
     local original_path=""
     local file_hash=""
     local timestamp=""
     local file_type=""
     
-    # 讀取日誌的所有行
+    # 依序讀取新日誌與舊版垃圾桶日誌
+    # Read the new log first, then the legacy trash log
     local IFS=$'\n'
     local lines=()
-    while read -r line || [[ -n "$line" ]]; do
-        if [[ -n "$line" && ! "$line" =~ ^# ]]; then
-            lines+=("$line")
-        fi
-    done < "$log_file"
-    
     local found=0
     local i
-    for ((i=${#lines[@]}-1; i>=0; i--)); do
-        local line="${lines[i]}"
-        # 解析日誌行：TIMESTAMP | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE
-        local parts=()
-        IFS='|' read -r -a parts <<< "$line"
-        
-        timestamp=$(trim "${parts[0]}")
-        original_path=$(trim "${parts[1]}")
-        trash_path=$(trim "${parts[2]}")
-        file_hash=$(trim "${parts[3]}")
-        file_type=$(trim "${parts[4]}")
-        
-        # 檢查 trash_path 是否真的存在於磁碟上
-        if [ ! -e "$trash_path" ] && [ ! -L "$trash_path" ]; then
+    for log_file in "${log_files[@]}"; do
+        lines=()
+        if ! {
+            while read -r line || [[ -n "$line" ]]; do
+                if [[ -n "$line" && ! "$line" =~ ^# ]]; then
+                    lines+=("$line")
+                fi
+            done < "$log_file"
+        } 2>/dev/null; then
             continue
         fi
-        
-        # 比對規則：
-        # 1. 如果 target_name 是絕對路徑，則精確比對 original_path
-        # 2. 如果 target_name 是相對路徑或僅檔名，則檢查 original_path 是否以 "/target_name" 結尾，或是 original_path 是否等於 "/target_name"
-        local match=0
-        if [[ "$target_name" = /* ]]; then
-            if [ "$original_path" = "$target_name" ]; then
-                match=1
+
+        for ((i=${#lines[@]}-1; i>=0; i--)); do
+            local line="${lines[i]}"
+            # 解析日誌行：TIMESTAMP | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE
+            local parts=()
+            IFS='|' read -r -a parts <<< "$line"
+
+            timestamp=$(trim "${parts[0]}")
+            original_path=$(trim "${parts[1]}")
+            trash_path=$(trim "${parts[2]}")
+            file_hash=$(trim "${parts[3]}")
+            file_type=$(trim "${parts[4]}")
+
+            # 檢查 trash_path 是否真的存在於磁碟上
+            if [ ! -e "$trash_path" ] && [ ! -L "$trash_path" ]; then
+                continue
             fi
-        else
-            # 移除 target_name 開頭的 ./（如果有的話）
-            local clean_target="${target_name#./}"
-            if [ "$original_path" = "/$clean_target" ] || [[ "$original_path" = */"$clean_target" ]]; then
-                match=1
+
+            # 比對規則：
+            # 1. 如果 target_name 是絕對路徑，則精確比對 original_path
+            # 2. 如果 target_name 是相對路徑或僅檔名，則檢查 original_path 是否以 "/target_name" 結尾，或是 original_path 是否等於 "/target_name"
+            local match=0
+            if [[ "$target_name" = /* ]]; then
+                if [ "$original_path" = "$target_name" ]; then
+                    match=1
+                fi
+            else
+                # 移除 target_name 開頭的 ./（如果有的話）
+                local clean_target="${target_name#./}"
+                if [ "$original_path" = "/$clean_target" ] || [[ "$original_path" = */"$clean_target" ]]; then
+                    match=1
+                fi
             fi
-        fi
-        
-        if [ $match -eq 1 ]; then
-            found=1
-            break
-        fi
+
+            if [ $match -eq 1 ]; then
+                found=1
+                break 2
+            fi
+        done
     done
     
     if [ $found -eq 0 ]; then

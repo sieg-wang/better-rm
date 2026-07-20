@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Protected `/mnt` and its immediate mount roots by default to prevent deleting Windows drives from WSL ([#9](https://github.com/doggy8088/better-rm/issues/9)).
+- Store deletion history outside `TRASH_DIR` to avoid macOS log write failures, while retaining legacy log fallback for restore operations ([#10](https://github.com/doggy8088/better-rm/issues/10)).
+
+### Changed
+- Added `BETTER_RM_STATE_DIR` and XDG state-directory support for `deletion.log`.
+- Restricted newly created state directories and deletion logs to user-only access.
 
 ### Added
 - 1.4.3: Prepare release 1.4.3

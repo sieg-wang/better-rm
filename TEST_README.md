@@ -53,10 +53,12 @@ podman run -v $(pwd):/app:z ubuntu:latest bash /app/test-better-rm.sh
 
 ### 測試 7: 刪除日誌功能
 - 日誌檔案自動創建
+- 狀態目錄與日誌檔案權限
 - 日誌記錄檔案刪除
 - 日誌記錄目錄刪除
 - 日誌記錄符號連結
 - 日誌格式正確
+- 日誌目錄不可用時仍完成刪除且不洩漏 Shell 錯誤
 
 ### 測試 8: 命令參數選項
 - 詳細模式 (-v)
@@ -76,6 +78,15 @@ podman run -v $(pwd):/app:z ubuntu:latest bash /app/test-better-rm.sh
 
 ### 測試 12: 自訂垃圾桶目錄
 - 使用自訂 TRASH_DIR 環境變數
+- 使用自訂 BETTER_RM_STATE_DIR 環境變數
+- 使用 XDG_STATE_HOME 與無效相對路徑回退
+
+### 測試 13: 還原功能
+- 基本還原
+- 已移出垃圾桶項目的再次還原
+- 同名檔案覆蓋確認
+- `-f` 強制覆蓋
+- 新日誌沒有符合項目時回退舊版垃圾桶日誌
 
 ## 測試結果 (Test Results)
 
@@ -96,6 +107,7 @@ podman run -v $(pwd):/app:z ubuntu:latest bash /app/test-better-rm.sh
 
 測試腳本會使用以下臨時目錄：
 - `/tmp/better-rm-test-trash` - 測試用垃圾桶目錄
+- `/tmp/better-rm-test-state` - 測試用狀態與日誌目錄
 - `/tmp/better-rm-test-work` - 測試工作目錄
 
 測試完成後會自動清理。
