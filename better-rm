@@ -331,7 +331,17 @@ show_version() {
 move_to_trash() {
     local source="$1"
     local verbose="$2"
-    
+
+    # 無論路徑是否存在或是否使用強制模式，都先檢查受保護路徑
+    # Always check protected paths first, even when the path is missing or force mode is enabled
+    if is_protected "$source"; then
+        error_msg "拒絕刪除受保護的目錄: '$source'"
+        error_msg "Refused to remove protected directory: '$source'"
+        error_msg "這是一個重要的系統目錄或專案目錄！"
+        error_msg "This is a critical system or project directory!"
+        return 1
+    fi
+
     # 檢查檔案或目錄是否存在
     # Check if file or directory exists
     if [ ! -e "$source" ] && [ ! -L "$source" ]; then
@@ -341,16 +351,6 @@ move_to_trash() {
             return 1
         fi
         return 0  # 在強制模式下，忽略不存在的檔案
-    fi
-    
-    # 檢查是否為受保護的目錄
-    # Check if it's a protected directory
-    if is_protected "$source"; then
-        error_msg "拒絕刪除受保護的目錄: '$source'"
-        error_msg "Refused to remove protected directory: '$source'"
-        error_msg "這是一個重要的系統目錄或專案目錄！"
-        error_msg "This is a critical system or project directory!"
-        return 1
     fi
     
     # 取得絕對路徑
