@@ -230,7 +230,8 @@ replace_version() {
       perl -0pi -e "s/better-rm ${old_version}/better-rm ${new_version}/g" "$file"
       ;;
     *install-hooks.sh)
-      perl -0pi -e "s/(VERSION=\\\")${old_version}(\\\")/\$1${new_version}\$2/" "$file"
+      OLD_VERSION="$old_version" NEW_VERSION="$new_version" \
+        perl -0pi -e 's/(VERSION=")\Q$ENV{OLD_VERSION}\E(")/$1$ENV{NEW_VERSION}$2/' "$file"
       ;;
     *)
       perl -0pi -e "s/${old_version}/${new_version}/g" "$file"
