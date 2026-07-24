@@ -473,6 +473,351 @@ else
     test_fail "快速連續刪除失敗"
 fi
 
+test_item "相同路徑、內容與時間戳記不覆蓋既有垃圾桶項目"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+fixed_bin="$TEST_WORK_DIR/fixed-bin"
+mkdir -p "$fixed_bin"
+cat > "$fixed_bin/date" <<'EOF'
+#!/bin/sh
+printf '%s\n' '20260724_120000_000000000'
+EOF
+chmod +x "$fixed_bin/date"
+
+printf '%s\n' "same content" > collision.txt
+PATH="$fixed_bin:$PATH" "$BETTER_RM" collision.txt
+printf '%s\n' "same content" > collision.txt
+PATH="$fixed_bin:$PATH" "$BETTER_RM" collision.txt
+
+collision_entries=$(find "$TEST_TRASH_DIR" -name "collision.txt__*" -type f 2>/dev/null | wc -l | tr -d ' ')
+if [ ! -e collision.txt ] && [ "$collision_entries" -eq 2 ]; then
+    test_pass "碰撞時保留兩份可恢復項目"
+else
+    test_fail "碰撞覆蓋了既有垃圾桶項目（找到 $collision_entries，預期 2）"
+fi
+
+test_item "保留後才出現的垃圾桶項目不會被覆蓋"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+race_bin="$TEST_WORK_DIR/race-bin"
+mkdir -p "$race_bin"
+cat > "$race_bin/date" <<'EOF'
+#!/bin/sh
+printf '%s\n' '20260724_120000_000000000'
+EOF
+cat > "$race_bin/mv" <<'EOF'
+#!/bin/sh
+target=""
+for arg in "$@"; do
+    target="$arg"
+done
+if [ ! -e "$BETTER_RM_RACE_FLAG" ]; then
+    : > "$BETTER_RM_RACE_FLAG"
+    printf '%s\n' "OLDER RECOVERY ENTRY" > "$target"
+fi
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$race_bin/date" "$race_bin/mv"
+
+printf '%s\n' "NEW SOURCE ENTRY" > late-collision.txt
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_RACE_FLAG="$TEST_WORK_DIR/race-injected" \
+PATH="$race_bin:$PATH" \
+    "$BETTER_RM" late-collision.txt
+
+late_entries=$(find "$TEST_TRASH_DIR" -name "late-collision.txt__*" -type f 2>/dev/null | wc -l | tr -d ' ')
+older_entries=$(find "$TEST_TRASH_DIR" -name "late-collision.txt__*" -type f \
+    -exec grep -lFx "OLDER RECOVERY ENTRY" {} + 2>/dev/null | wc -l | tr -d ' ')
+new_entries=$(find "$TEST_TRASH_DIR" -name "late-collision.txt__*" -type f \
+    -exec grep -lFx "NEW SOURCE ENTRY" {} + 2>/dev/null | wc -l | tr -d ' ')
+if [ ! -e late-collision.txt ] && [ "$late_entries" -eq 2 ] && \
+   [ "$older_entries" -eq 1 ] && [ "$new_entries" -eq 1 ]; then
+    test_pass "晚到的垃圾桶項目與新來源都保留"
+else
+    test_fail "晚到項目被覆蓋或來源未安全轉移"
+fi
+
+test_item "晚到的同名目錄不會吞入來源，且 suffixed recovery 可還原"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+directory_race_bin="$TEST_WORK_DIR/directory-race-bin"
+mkdir -p "$directory_race_bin"
+cat > "$directory_race_bin/date" <<'EOF'
+#!/bin/sh
+printf '%s\n' '20260724_120000_000000000'
+EOF
+cat > "$directory_race_bin/mv" <<'EOF'
+#!/bin/sh
+target=""
+for arg in "$@"; do
+    target="$arg"
+done
+if [ ! -e "$BETTER_RM_RACE_FLAG" ]; then
+    : > "$BETTER_RM_RACE_FLAG"
+    mkdir -p "$target"
+    printf '%s\n' "OLDER DIRECTORY ENTRY" > "$target/writer-marker.txt"
+fi
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$directory_race_bin/date" "$directory_race_bin/mv"
+
+printf '%s\n' "NEW SOURCE ENTRY" > late-directory.txt
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_RACE_FLAG="$TEST_WORK_DIR/directory-race-injected" \
+PATH="$directory_race_bin:$PATH" \
+    "$BETTER_RM" late-directory.txt
+
+old_directory_entries=$(find "$TEST_TRASH_DIR" -type f -name writer-marker.txt \
+    -exec grep -lFx "OLDER DIRECTORY ENTRY" {} + 2>/dev/null | wc -l | tr -d ' ')
+new_directory_race_entries=$(find "$TEST_TRASH_DIR" -type f -name "late-directory.txt__*" \
+    -exec grep -lFx "NEW SOURCE ENTRY" {} + 2>/dev/null | wc -l | tr -d ' ')
+nested_source_entries=$(find "$TEST_TRASH_DIR" -type f -name late-directory.txt \
+    -path "*/late-directory.txt__*/*" 2>/dev/null | wc -l | tr -d ' ')
+logged_directory_race_target=$(tail -n 1 "$TEST_STATE_DIR/deletion.log" |
+    awk -F ' \\| ' '{print $3}')
+
+collision_safe=false
+if [ ! -e late-directory.txt ] && [ "$old_directory_entries" -eq 1 ] && \
+   [ "$new_directory_race_entries" -eq 1 ] && [ "$nested_source_entries" -eq 0 ] && \
+   [ -f "$logged_directory_race_target" ] && \
+   grep -qFx "NEW SOURCE ENTRY" "$logged_directory_race_target"; then
+    collision_safe=true
+fi
+
+restore_safe=false
+if [ "$collision_safe" = true ] &&
+   "$BETTER_RM" --restore late-directory.txt >/dev/null 2>&1 &&
+   [ -f late-directory.txt ] &&
+   grep -qFx "NEW SOURCE ENTRY" late-directory.txt; then
+    old_directory_entries_after_restore=$(find "$TEST_TRASH_DIR" -type f -name writer-marker.txt \
+        -exec grep -lFx "OLDER DIRECTORY ENTRY" {} + 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$old_directory_entries_after_restore" -eq 1 ]; then
+        restore_safe=true
+    fi
+fi
+
+if [ "$collision_safe" = true ] && [ "$restore_safe" = true ]; then
+    test_pass "晚到目錄保留，來源移至獨立 recovery path 並可由新日誌還原"
+else
+    test_fail "晚到目錄吞入來源、日誌錯指，或 suffixed recovery 無法還原"
+fi
+
+test_item "rollback 路徑遭同名目錄佔用時保留原始 inode 並 fail closed"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+rollback_race_bin="$TEST_WORK_DIR/rollback-race-bin"
+mkdir -p "$rollback_race_bin"
+cat > "$rollback_race_bin/date" <<'EOF'
+#!/bin/sh
+printf '%s\n' '20260724_120000_000000000'
+EOF
+cat > "$rollback_race_bin/mv" <<'EOF'
+#!/bin/sh
+count=0
+if [ -f "$BETTER_RM_RACE_FLAG" ]; then
+    count=$(sed -n '1p' "$BETTER_RM_RACE_FLAG")
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$BETTER_RM_RACE_FLAG"
+
+while [ "$#" -gt 0 ] && [ "${1#-}" != "$1" ]; do
+    shift
+done
+source_arg="$1"
+target_arg="$2"
+
+case "$count" in
+    1)
+        mkdir -p "$target_arg"
+        printf '%s\n' "OLDER DIRECTORY ENTRY" > "$target_arg/writer-marker.txt"
+        exec "$BETTER_RM_REAL_MV" "$source_arg" \
+            "$target_arg/$(basename "$source_arg")"
+        ;;
+    2)
+        mkdir -p "$target_arg"
+        printf '%s\n' "ATTACKER SOURCE DIRECTORY" > "$target_arg/attacker-marker.txt"
+        exec "$BETTER_RM_REAL_MV" "$source_arg" \
+            "$target_arg/$(basename "$source_arg")"
+        ;;
+    *)
+        exec "$BETTER_RM_REAL_MV" "$source_arg" "$target_arg"
+        ;;
+esac
+EOF
+chmod +x "$rollback_race_bin/date" "$rollback_race_bin/mv"
+
+printf '%s\n' "ORIGINAL ROLLBACK SOURCE" > rollback-race.txt
+rollback_race_status=0
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_RACE_FLAG="$TEST_WORK_DIR/rollback-race-count" \
+PATH="$rollback_race_bin:$PATH" \
+    "$BETTER_RM" rollback-race.txt >"$TEST_WORK_DIR/rollback-race.out" 2>&1 ||
+    rollback_race_status=$?
+
+rollback_recovery_path="$TEST_WORK_DIR/rollback-race.txt/rollback-race.txt"
+if [ "$rollback_race_status" -ne 0 ] && \
+   [ -f "$rollback_recovery_path" ] && \
+   grep -qFx "ORIGINAL ROLLBACK SOURCE" "$rollback_recovery_path" && \
+   [ -f "$TEST_WORK_DIR/rollback-race.txt/attacker-marker.txt" ] && \
+   [ ! -s "$TEST_STATE_DIR/deletion.log" ]; then
+    test_pass "rollback 身分不符時停止、保留精確 recovery path 且不寫入誤導日誌"
+else
+    test_fail "rollback 身分不符仍移走攻擊者目錄、遺失原始 inode 或寫入誤導日誌"
+fi
+
+test_item "晚到的 symlink-to-directory 不會把來源移出垃圾桶命名空間"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+symlink_race_bin="$TEST_WORK_DIR/symlink-race-bin"
+mkdir -p "$symlink_race_bin"
+cat > "$symlink_race_bin/date" <<'EOF'
+#!/bin/sh
+printf '%s\n' '20260724_120000_000000000'
+EOF
+cat > "$symlink_race_bin/mv" <<'EOF'
+#!/bin/sh
+target=""
+for arg in "$@"; do
+    target="$arg"
+done
+if [ ! -e "$BETTER_RM_RACE_FLAG" ]; then
+    : > "$BETTER_RM_RACE_FLAG"
+    mkdir -p "$BETTER_RM_SYMLINK_DIR"
+    ln -s "$BETTER_RM_SYMLINK_DIR" "$target"
+fi
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$symlink_race_bin/date" "$symlink_race_bin/mv"
+
+printf '%s\n' "NEW SYMLINK-RACE SOURCE" > late-symlink.txt
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_RACE_FLAG="$TEST_WORK_DIR/symlink-race-injected" \
+BETTER_RM_SYMLINK_DIR="$TEST_WORK_DIR/attacker-directory" \
+PATH="$symlink_race_bin:$PATH" \
+    "$BETTER_RM" late-symlink.txt
+
+symlink_race_links=$(find "$TEST_TRASH_DIR" -type l -name "late-symlink.txt__*" \
+    2>/dev/null | wc -l | tr -d ' ')
+symlink_race_entries=$(find "$TEST_TRASH_DIR" -type f -name "late-symlink.txt__*" \
+    -exec grep -lFx "NEW SYMLINK-RACE SOURCE" {} + 2>/dev/null | wc -l | tr -d ' ')
+logged_symlink_race_target=$(tail -n 1 "$TEST_STATE_DIR/deletion.log" |
+    awk -F ' \\| ' '{print $3}')
+if [ ! -e late-symlink.txt ] && [ "$symlink_race_links" -eq 1 ] && \
+   [ "$symlink_race_entries" -eq 1 ] && \
+   [ ! -e "$TEST_WORK_DIR/attacker-directory/late-symlink.txt" ] && \
+   [ -f "$logged_symlink_race_target" ] && \
+   grep -qFx "NEW SYMLINK-RACE SOURCE" "$logged_symlink_race_target"; then
+    test_pass "symlink race 未被跟隨，來源改存於獨立且正確記錄的 recovery path"
+else
+    test_fail "symlink race 將來源移入攻擊者目錄或記錄了錯誤 recovery path"
+fi
+
+test_item "實際目錄來源在晚到目錄競態下以 inode 身分安全復原"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+directory_source_race_bin="$TEST_WORK_DIR/directory-source-race-bin"
+mkdir -p "$directory_source_race_bin"
+cat > "$directory_source_race_bin/date" <<'EOF'
+#!/bin/sh
+printf '%s\n' '20260724_120000_000000000'
+EOF
+cat > "$directory_source_race_bin/mv" <<'EOF'
+#!/bin/sh
+target=""
+for arg in "$@"; do
+    target="$arg"
+done
+if [ ! -e "$BETTER_RM_RACE_FLAG" ]; then
+    : > "$BETTER_RM_RACE_FLAG"
+    mkdir -p "$target"
+    printf '%s\n' "OLDER DIRECTORY ENTRY" > "$target/writer-marker.txt"
+fi
+# Linux 的 -T 已於其他案例驗證；此 mock 去除它來模擬 BSD 目錄容器語意。
+# Linux -T is covered elsewhere; strip it here to emulate BSD directory-container semantics.
+if [ "$1" = "-n" ] && [ "$2" = "-T" ]; then
+    shift 2
+    exec "$BETTER_RM_REAL_MV" -n "$@"
+fi
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$directory_source_race_bin/date" "$directory_source_race_bin/mv"
+
+mkdir late-directory-source
+printf '%s\n' "NEW DIRECTORY SOURCE" > late-directory-source/payload.txt
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_RACE_FLAG="$TEST_WORK_DIR/directory-source-race-injected" \
+PATH="$directory_source_race_bin:$PATH" \
+    "$BETTER_RM" -r late-directory-source
+
+old_directory_source_entries=$(find "$TEST_TRASH_DIR" -type f -name writer-marker.txt \
+    -exec grep -lFx "OLDER DIRECTORY ENTRY" {} + 2>/dev/null | wc -l | tr -d ' ')
+new_directory_source_entries=$(find "$TEST_TRASH_DIR" -type f -name payload.txt \
+    -path "*late-directory-source__*/*" -exec grep -lFx "NEW DIRECTORY SOURCE" {} + \
+    2>/dev/null | wc -l | tr -d ' ')
+nested_directory_source_entries=$(find "$TEST_TRASH_DIR" -type f -name payload.txt \
+    -path "*late-directory-source__*/late-directory-source/*" 2>/dev/null | wc -l | tr -d ' ')
+if [ ! -e late-directory-source ] && [ "$old_directory_source_entries" -eq 1 ] && \
+   [ "$new_directory_source_entries" -eq 1 ] && [ "$nested_directory_source_entries" -eq 0 ]; then
+    test_pass "實際目錄來源以 inode 辨識容器競態並移至獨立 recovery path"
+else
+    test_fail "實際目錄來源未安全辨識容器競態或仍被巢狀存放"
+fi
+
+test_item "目錄 inode 無法取得時在 late-container move 前 fail closed"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+identity_failure_bin="$TEST_WORK_DIR/identity-failure-bin"
+mkdir -p "$identity_failure_bin"
+cat > "$identity_failure_bin/stat" <<'EOF'
+#!/bin/sh
+last_arg=""
+for arg in "$@"; do
+    last_arg="$arg"
+done
+if [ "$last_arg" = "$BETTER_RM_STAT_FAIL_PATH" ]; then
+    exit 1
+fi
+exec "$BETTER_RM_REAL_STAT" "$@"
+EOF
+cat > "$identity_failure_bin/mv" <<'EOF'
+#!/bin/sh
+while [ "$#" -gt 0 ] && [ "${1#-}" != "$1" ]; do
+    shift
+done
+source_arg="$1"
+target_arg="$2"
+printf '%s\n' "move invoked" > "$BETTER_RM_MOVE_FLAG"
+mkdir -p "$target_arg"
+printf '%s\n' "LATE CONTAINER" > "$target_arg/writer-marker.txt"
+exec "$BETTER_RM_REAL_MV" "$source_arg" \
+    "$target_arg/$(basename "$source_arg")"
+EOF
+chmod +x "$identity_failure_bin/stat" "$identity_failure_bin/mv"
+
+mkdir -p late-identity-directory/late-identity-directory
+printf '%s\n' "ORIGINAL DIRECTORY" > late-identity-directory/payload.txt
+printf '%s\n' "ORIGINAL SAME-NAME CHILD" \
+    > late-identity-directory/late-identity-directory/child.txt
+identity_failure_status=0
+BETTER_RM_REAL_STAT="$(command -v stat)" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_STAT_FAIL_PATH="late-identity-directory" \
+BETTER_RM_MOVE_FLAG="$TEST_WORK_DIR/identity-failure-move-invoked" \
+PATH="$identity_failure_bin:$PATH" \
+    "$BETTER_RM" -r late-identity-directory \
+    >"$TEST_WORK_DIR/identity-failure.out" 2>&1 ||
+    identity_failure_status=$?
+
+if [ "$identity_failure_status" -ne 0 ] && \
+   [ -f late-identity-directory/payload.txt ] && \
+   [ -f late-identity-directory/late-identity-directory/child.txt ] && \
+   [ ! -e "$TEST_WORK_DIR/identity-failure-move-invoked" ] && \
+   [ ! -s "$TEST_STATE_DIR/deletion.log" ]; then
+    test_pass "目錄身分不可驗證時保留完整來源、未移動且未寫入日誌"
+else
+    test_fail "目錄身分不可驗證時仍進入 move、遺失來源或寫入誤導日誌"
+fi
+
 # ============================================================================
 # 測試 11: 路徑結構保留 (Test 11: Path Structure Preservation)
 # ============================================================================

@@ -419,40 +419,190 @@ move_to_trash() {
     
     # 生成刪除時間戳記（包含奈秒以避免碰撞）
     # Generate deletion timestamp (with nanoseconds to avoid collisions)
-    local timestamp=$(date +%Y%m%d_%H%M%S_%N)
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S_%N)
     
     # 目標路徑，加上時間戳記和 hash
     # Target path with timestamp and hash
     local target="$TRASH_DIR$abs_path"
     target="${target}__${timestamp}__${file_hash}"
-    
+    local base_target="$target"
+    local reservation=""
+    local attempt=0
+    local moved=0
+    local source_basename
+    local source_identity
+    local source_had_same_name_child=0
+    source_basename=$(basename "$source")
+    source_identity=$(stat -c '%d:%i' "$source" 2>/dev/null ||
+        stat -f '%d:%i' "$source" 2>/dev/null || true)
+
     # 判斷檔案類型（在移動之前）
     # Determine file type (before moving)
     local file_type="unknown"
     if [ -d "$source" ] && [ ! -L "$source" ]; then
         file_type="directory"
+        if [ -e "$source/$source_basename" ] || [ -L "$source/$source_basename" ]; then
+            source_had_same_name_child=1
+        fi
     elif [ -L "$source" ]; then
         file_type="symlink"
     elif [ -f "$source" ]; then
         file_type="file"
     fi
-    
-    # 移動檔案到垃圾桶
-    # Move file to trash
-    if mv "$source" "$target" 2>/dev/null; then
-        # 記錄刪除操作到日誌
-        # Log the deletion operation
-        log_deletion "$abs_path" "$target" "$file_hash" "$timestamp" "$file_type"
-        
-        if [ "$verbose" = "1" ]; then
-            success_msg "已移除 '$source' (moved to trash: $target)"
-        fi
-        return 0
-    else
-        error_msg "無法移除 '$source'"
-        error_msg "Failed to remove '$source'"
+    if [ "$file_type" = "directory" ] && [ -z "$source_identity" ]; then
+        error_msg "無法確認目錄 '$source' 的 inode 身分；未移動"
+        error_msg "Could not verify directory inode identity for '$source'; not moved"
         return 1
     fi
+
+    # 時間戳記/hash 組合不保證唯一；保留同層 lock 目錄，並以不覆寫模式移動。
+    # The timestamp/hash pair is not unique; reserve a sibling lock directory
+    # and move without clobbering. A late writer leaves the source in place.
+    # BSD 的 -h 防止將目標 symlink 視為目錄；GNU 的 -T 禁止目錄目標語意。
+    # BSD -h does not follow a destination symlink; GNU -T disables directory-target semantics.
+    move_without_clobber() {
+        case "$(uname -s)" in
+            Darwin|FreeBSD|NetBSD|OpenBSD|DragonFly)
+                mv -n -h "$@"
+                ;;
+            *)
+                mv -n -T -- "$@"
+                ;;
+        esac
+    }
+
+    while [ "$attempt" -lt 1000 ]; do
+        if [ "$attempt" -eq 0 ]; then
+            target="$base_target"
+        else
+            target="${base_target}__${attempt}_$$"
+        fi
+        reservation="${target}.reserve"
+        if mkdir "$reservation" 2>/dev/null; then
+            if [ -e "$target" ] || [ -L "$target" ]; then
+                rmdir "$reservation" 2>/dev/null || true
+                reservation=""
+                attempt=$((attempt + 1))
+                continue
+            fi
+            if move_without_clobber "$source" "$target" 2>/dev/null; then
+                if [ -e "$source" ] || [ -L "$source" ]; then
+                    rmdir "$reservation" 2>/dev/null || true
+                    reservation=""
+                    attempt=$((attempt + 1))
+                    continue
+                fi
+                # BSD mv 仍可能把實際目錄視為容器；若晚到的 writer 建立 target，
+                # 真實目的地會是 target/basename(source)，須回復來源後改用 suffix。
+                # BSD mv can still treat a real directory as a container. If a
+                # late writer created target, roll target/basename(source) back
+                # and retry a suffixed candidate. Never log the container path.
+                # 目錄以 inode 身分辨識直接 rename 與來源原有的同名子項目。
+                # For directories, inode identity distinguishes a direct rename
+                # from a same-named child that was already in the source tree.
+                local nested_target="$target/$source_basename"
+                local target_identity=""
+                local nested_identity=""
+                local used_container=0
+                if [ -d "$target" ] && [ ! -L "$target" ] &&
+                   { [ -e "$nested_target" ] || [ -L "$nested_target" ]; }; then
+                    target_identity=$(stat -c '%d:%i' "$target" 2>/dev/null ||
+                        stat -f '%d:%i' "$target" 2>/dev/null || true)
+                    nested_identity=$(stat -c '%d:%i' "$nested_target" 2>/dev/null ||
+                        stat -f '%d:%i' "$nested_target" 2>/dev/null || true)
+                    if [ "$file_type" != "directory" ]; then
+                        used_container=1
+                    elif [ -n "$source_identity" ] &&
+                         [ "$nested_identity" = "$source_identity" ]; then
+                        used_container=1
+                    elif [ "$target_identity" != "$source_identity" ] &&
+                         [ "$source_had_same_name_child" -eq 0 ]; then
+                        used_container=1
+                    fi
+                fi
+                if [ "$used_container" -eq 1 ]; then
+                    if move_without_clobber "$nested_target" "$source" 2>/dev/null; then
+                        local rollback_identity=""
+                        local rollback_recovery_path="$source/$source_basename"
+                        local rollback_recovery_identity=""
+                        rollback_identity=$(stat -c '%d:%i' "$source" 2>/dev/null ||
+                            stat -f '%d:%i' "$source" 2>/dev/null || true)
+                        if [ -n "$source_identity" ] &&
+                           [ "$rollback_identity" = "$source_identity" ] &&
+                           { [ ! -e "$nested_target" ] && [ ! -L "$nested_target" ]; }; then
+                            rmdir "$reservation" 2>/dev/null || true
+                            reservation=""
+                            attempt=$((attempt + 1))
+                            continue
+                        fi
+                        rollback_recovery_identity=$(
+                            stat -c '%d:%i' "$rollback_recovery_path" 2>/dev/null ||
+                            stat -f '%d:%i' "$rollback_recovery_path" 2>/dev/null ||
+                            true
+                        )
+                        if [ -n "$source_identity" ] &&
+                           [ "$rollback_recovery_identity" = "$source_identity" ]; then
+                            rmdir "$reservation" 2>/dev/null || true
+                            error_msg "rollback 後來源身分不符；原始項目保留於 '$rollback_recovery_path'"
+                            error_msg "Rollback identity mismatch; original item preserved at '$rollback_recovery_path'"
+                            return 1
+                        fi
+                    fi
+                    # 並發 writer 也可能佔用原始路徑、使 rollback 失敗；此時只記錄
+                    # 實際可還原路徑，絕不可把攻擊者目錄當作垃圾桶項目。
+                    # A concurrent writer may occupy the source path and block
+                    # rollback. Record only the actual recoverable path, never
+                    # the attacker-controlled directory container.
+                    if [ -e "$nested_target" ] || [ -L "$nested_target" ]; then
+                        local remaining_nested_identity=""
+                        remaining_nested_identity=$(stat -c '%d:%i' "$nested_target" 2>/dev/null ||
+                            stat -f '%d:%i' "$nested_target" 2>/dev/null || true)
+                        if [ -n "$source_identity" ] &&
+                           [ "$remaining_nested_identity" = "$source_identity" ]; then
+                            target="$nested_target"
+                            moved=1
+                            break
+                        fi
+                    fi
+                    rmdir "$reservation" 2>/dev/null || true
+                    error_msg "無法確認 '$source' 的垃圾桶位置"
+                    error_msg "Could not verify the trash destination for '$source'"
+                    return 1
+                fi
+                moved=1
+                break
+            fi
+            if { [ -e "$target" ] || [ -L "$target" ]; } &&
+               { [ -e "$source" ] || [ -L "$source" ]; }; then
+                rmdir "$reservation" 2>/dev/null || true
+                reservation=""
+                attempt=$((attempt + 1))
+                continue
+            fi
+            rmdir "$reservation" 2>/dev/null || true
+            error_msg "無法移除 '$source'"
+            error_msg "Failed to remove '$source'"
+            return 1
+        fi
+        reservation=""
+        attempt=$((attempt + 1))
+    done
+    if [ "$moved" -ne 1 ]; then
+        error_msg "無法保留唯一的垃圾桶路徑: $base_target"
+        error_msg "Failed to reserve a unique trash path: $base_target"
+        return 1
+    fi
+
+    rmdir "$reservation" 2>/dev/null || true
+    # 記錄刪除操作到日誌
+    # Log the deletion operation
+    log_deletion "$abs_path" "$target" "$file_hash" "$timestamp" "$file_type"
+
+    if [ "$verbose" = "1" ]; then
+        success_msg "已移除 '$source' (moved to trash: $target)"
+    fi
+    return 0
 }
 
 # 移除字串前後空白
