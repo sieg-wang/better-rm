@@ -655,10 +655,15 @@ PATH="$rollback_race_bin:$PATH" \
     rollback_race_status=$?
 
 rollback_recovery_path="$TEST_WORK_DIR/rollback-race.txt/rollback-race.txt"
+# 斷言走的是「rollback 身分不符」這條 fail-closed 分支（而非通用的
+# 「無法確認垃圾桶位置」分支），以固定 better-rm:544 的相等判斷。
+# Pin the dedicated inode-preservation branch by asserting its distinctive
+# message, so inverting the identity guard at better-rm:544 is caught.
 if [ "$rollback_race_status" -ne 0 ] && \
    [ -f "$rollback_recovery_path" ] && \
    grep -qFx "ORIGINAL ROLLBACK SOURCE" "$rollback_recovery_path" && \
    [ -f "$TEST_WORK_DIR/rollback-race.txt/attacker-marker.txt" ] && \
+   grep -q "Rollback identity mismatch" "$TEST_WORK_DIR/rollback-race.out" && \
    [ ! -s "$TEST_STATE_DIR/deletion.log" ]; then
     test_pass "rollback 身分不符時停止、保留精確 recovery path 且不寫入誤導日誌"
 else
@@ -984,6 +989,60 @@ fi
 
 # 清理測試產生的檔案
 rm -f test_restore.txt
+
+# ============================================================================
+# 測試 14: 保留鎖目錄的清理與互斥 (Test 14: Reservation lock cleanup & mutex)
+# ============================================================================
+test_title "測試 14: 保留鎖目錄的清理與碰撞互斥"
+
+setup
+cd "$TEST_WORK_DIR" || exit 1
+
+test_item "成功刪除後不留下 .reserve 保留鎖目錄"
+printf '%s\n' "reserve cleanup content" > reserve-cleanup.txt
+"$BETTER_RM" reserve-cleanup.txt
+leftover_reserve=$(find "$TEST_TRASH_DIR" -type d -name '*.reserve' 2>/dev/null | wc -l | tr -d ' ')
+if [ ! -e reserve-cleanup.txt ] && [ "$leftover_reserve" -eq 0 ]; then
+    test_pass "成功路徑清除了保留鎖目錄"
+else
+    test_fail "成功刪除後殘留 .reserve 保留鎖目錄（找到 $leftover_reserve）"
+fi
+
+test_item "保留鎖被並發持有時改用 suffixed 目標（mkdir 互斥）"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+reserve_mutex_bin="$TEST_WORK_DIR/reserve-mutex-bin"
+mkdir -p "$reserve_mutex_bin"
+cat > "$reserve_mutex_bin/date" <<'EOF'
+#!/bin/sh
+printf '%s\n' '20260724_120000_000000000'
+EOF
+cat > "$reserve_mutex_bin/md5sum" <<'EOF'
+#!/bin/sh
+printf '%s  -\n' 'deadbeefdeadbeefdeadbeefdeadbeef'
+EOF
+chmod +x "$reserve_mutex_bin/date" "$reserve_mutex_bin/md5sum"
+
+printf '%s\n' "mutex content" > reserve-mutex.txt
+# 以 better-rm 相同方式解析絕對路徑，重建其固定的 base_target。
+# Resolve the absolute path exactly as better-rm does to rebuild its fixed base_target.
+mutex_abs_src=$(readlink -f reserve-mutex.txt 2>/dev/null || realpath reserve-mutex.txt 2>/dev/null)
+mutex_base_target="$TEST_TRASH_DIR$mutex_abs_src"'__20260724_120000_000000000__deadbeefdeadbeefdeadbeefdeadbeef'
+mkdir -p "$(dirname "$mutex_base_target")"
+# 模擬另一個 better-rm 已保留 attempt-0 的鎖目錄，但尚未建立目標檔。
+# Simulate a concurrent better-rm holding the attempt-0 reservation but not yet the target.
+mkdir "$mutex_base_target.reserve"
+
+PATH="$reserve_mutex_bin:$PATH" "$BETTER_RM" reserve-mutex.txt
+
+mutex_suffixed=$(find "$TEST_TRASH_DIR" -type f \
+    -name 'reserve-mutex.txt__20260724_120000_000000000__deadbeef*__*_*' 2>/dev/null |
+    wc -l | tr -d ' ')
+if [ ! -e reserve-mutex.txt ] && [ ! -f "$mutex_base_target" ] && [ "$mutex_suffixed" -eq 1 ]; then
+    test_pass "保留鎖互斥使刪除改用 suffixed 目標，未佔用被保留的 base_target"
+else
+    test_fail "保留鎖互斥失效：寫入了被保留的 base_target 或未產生 suffixed 項目（suffixed=$mutex_suffixed）"
+fi
 
 # ============================================================================
 # 測試結果統計 (Test Results Summary)

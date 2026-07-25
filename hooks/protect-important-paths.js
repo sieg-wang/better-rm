@@ -229,7 +229,12 @@ function expandHome(value, home) {
 }
 
 function normalizedTarget(value, cwd, home) {
-  const expanded = expandHome(value.replace(/[\\/]+$/, '') || '/', home);
+  // Real shells truncate an argument at the first NUL byte, so an ANSI-C
+  // ($'...') escape that mints a NUL (backslash x00, backslash 0, etc.) must be
+  // truncated here too; otherwise the guard compares '/etc\0' (never a match)
+  // while the shell actually runs rm on '/etc'.
+  const truncated = String(value).split('\0')[0];
+  const expanded = expandHome(truncated.replace(/[\\/]+$/, '') || '/', home);
   if (/[*?\[\]{}]/.test(expanded)) return expanded;
   return path.resolve(cwd, expanded);
 }
@@ -276,6 +281,11 @@ function commandTargets(command, depth = 0) {
   const words = shellWords(command);
   const targets = [];
   const separators = new Set([';', '&', '|', '(', ')', '<', '>', '\n']);
+  // Redirections (`<`, `>`) stay within a simple command; they are not command
+  // terminators. The rm/rmdir argument scan must skip a redirection and its
+  // operand and keep collecting targets, or a leading `>/dev/null` hides them.
+  const redirectors = new Set(['<', '>']);
+  const terminators = new Set([';', '&', '|', '(', ')', '\n']);
   const controlWords = new Set([
     'if', 'then', 'elif', 'else', 'fi',
     'for', 'while', 'until', 'select', 'do', 'done',
@@ -496,10 +506,19 @@ function commandTargets(command, depth = 0) {
       break;
     }
 
-    i += 1;
+    // Only advance past a real executable. When the unwrap loop above consumed
+    // wrapper layers and stopped AT a separator (executable === ''), advancing
+    // here would swallow that separator and hide the command that follows it.
+    if (executable) i += 1;
     if (['rm', 'rmdir'].includes(executable)) {
-      for (; i < words.length && !separators.has(words[i]); i += 1) {
+      for (; i < words.length && !terminators.has(words[i]); i += 1) {
         const candidate = words[i];
+        if (redirectors.has(candidate)) {
+          // Skip the redirection and its filename operand (not an rm target),
+          // but never skip a command terminator that follows a bare redirect.
+          if (i + 1 < words.length && !terminators.has(words[i + 1])) i += 1;
+          continue;
+        }
         if (candidate === '--') continue;
         if (!candidate.startsWith('-') || candidate === '-') targets.push(candidate);
       }
@@ -638,7 +657,9 @@ async function main() {
     if (result) process.stdout.write(JSON.stringify(result));
   } catch (error) {
     console.error(`Hook 輸入無效，已拒絕工具呼叫 / Invalid hook input; tool call denied: ${error.message}`);
-    process.exit(1);
+    // Exit 2 so Claude Code PreToolUse treats this as a BLOCKING error and fails
+    // closed; exit 1 is a non-blocking error there and would let the tool run.
+    process.exit(2);
   }
 }
 

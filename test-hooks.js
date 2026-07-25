@@ -99,6 +99,28 @@ const blocked = [
   "eval 'rm -rf /var'",
   'echo "$(rm -rf /boot)"',
   "printf '%s' \"`rm -rf /usr`\"",
+  // A wrapper that ends exactly on a command separator must not swallow it and
+  // hide the following rm (regression: unconditional i += 1 after unwrap).
+  'sudo -k; rm -rf /etc',
+  'sudo -v; rm -rf /etc',
+  'sudo -k | rm -rf /etc',
+  'nice -n 10\nrm -rf /etc',
+  'timeout 5\nrm -rf /etc',
+  'env\nrm -rf /etc',
+  // A redirection placed before the target must not truncate rm's target scan.
+  'rm >/dev/null /etc',
+  'rm 2>/dev/null -rf /etc',
+  'rm >out -rf /etc',
+  // ANSI-C escapes that mint a NUL: real shells truncate the arg at the NUL,
+  // so the guard must compare the pre-NUL path (/etc), not '/etc\0'.
+  "bash -c $'rm -rf /etc\\x00'",
+  "bash -c $'rm -rf /etc\\0'",
+  "bash -c $'rm -rf /etc\\000'",
+  "bash -c $'rm -rf /etc\\c@'",
+  "rm -rf $'/etc\\x00'",
+  // \u and \U ANSI-C unicode escapes must decode to the protected path.
+  "bash -c $'rm -rf \\u002fetc'",
+  "bash -c $'rm -rf \\U0000002fboot'",
 ];
 
 const allowed = [
@@ -163,7 +185,19 @@ const allowed = [
   "bash -c '/usr/bin/time -ho /tmp/timing rm -rf build'",
   "cat <(printf safe)",
   "echo 'cat <(rm -rf /usr)'",
+  // Redirections trailing an unprotected target stay allowed.
+  'rm -rf build >/dev/null',
+  'rm -rf build 2>/dev/null',
 ];
+
+// Finding: a shell carrier nested past the recursion depth cap (8) must fail
+// closed — commandTargets yields '/', so evaluate denies — even though the
+// innermost command targets only an unprotected path.
+let deeplyNestedCarrier = 'rm -rf build';
+for (let depthLevel = 0; depthLevel < 10; depthLevel += 1) {
+  deeplyNestedCarrier = `bash -c ${JSON.stringify(deeplyNestedCarrier)}`;
+}
+blocked.push(deeplyNestedCarrier);
 
 for (const command of blocked) {
   const result = evaluate(claude(command), env);
@@ -251,4 +285,15 @@ for (const command of allowed) {
   assert.equal(evaluate(grok(command), env).decision, 'allow', command);
 }
 
-console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2}`);
+// The parse/error path must fail CLOSED. Claude Code PreToolUse treats only
+// exit code 2 as a blocking error; exit 1 is non-blocking and lets the tool
+// run despite the "tool call denied" message.
+const { spawnSync } = require('child_process');
+let errorPathChecks = 0;
+for (const badInput of ['not-json{', '', '{"tool_input":']) {
+  const child = spawnSync('node', [`${__dirname}/hooks/protect-important-paths.js`], { input: badInput });
+  assert.equal(child.status, 2, `malformed hook input must exit 2 (blocking), got ${child.status}`);
+  errorPathChecks += 1;
+}
+
+console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks}`);
