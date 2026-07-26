@@ -412,7 +412,13 @@ move_to_trash() (
     # 取得絕對路徑
     # Get absolute path
     local abs_path
-    if [ -e "$source" ] || [ -L "$source" ]; then
+    if [ -L "$source" ]; then
+        # 垃圾桶記錄必須保存 link 本身的名稱，不能解析成 target；否則
+        # `--restore <link-name>` 找不到紀錄，並可能以 target 名稱還原。
+        # Preserve the link entry's own name in the trash log. Resolving the
+        # final symlink here makes `--restore <link-name>` lose that identity.
+        abs_path="$(pwd -P)/$source_basename"
+    elif [ -e "$source" ]; then
         abs_path=$(readlink -f "$source" 2>/dev/null)
         if [ -z "$abs_path" ]; then
             abs_path=$(realpath "$source" 2>/dev/null)

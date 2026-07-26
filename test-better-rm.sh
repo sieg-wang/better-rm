@@ -238,6 +238,29 @@ else
     test_fail "符號連結刪除失敗"
 fi
 
+test_item "以原始 link 名還原符號連結"
+setup
+cd "$TEST_WORK_DIR"
+echo "restore target content" > restore-target.txt
+ln -s restore-target.txt restore-link.txt
+target_identity_before=$(stat -c '%d:%i' restore-target.txt 2>/dev/null ||
+    stat -f '%d:%i' restore-target.txt 2>/dev/null)
+"$BETTER_RM" restore-link.txt
+if "$BETTER_RM" --restore restore-link.txt >/dev/null 2>&1 &&
+   [ -L restore-link.txt ] &&
+   [ "$(readlink restore-link.txt)" = "restore-target.txt" ] &&
+   [ "$(cat restore-target.txt)" = "restore target content" ]; then
+    target_identity_after=$(stat -c '%d:%i' restore-target.txt 2>/dev/null ||
+        stat -f '%d:%i' restore-target.txt 2>/dev/null)
+    if [ "$target_identity_after" = "$target_identity_before" ]; then
+        test_pass "符號連結以原名還原且 target 身分不變"
+    else
+        test_fail "還原符號連結時 target 身分遭到改變"
+    fi
+else
+    test_fail "無法以原始 link 名還原符號連結"
+fi
+
 # ============================================================================
 # 測試 6: 時間戳記與 Hash (Test 6: Timestamp and Hash)
 # ============================================================================
