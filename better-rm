@@ -328,9 +328,19 @@ show_version() {
 
 # 移動檔案至垃圾桶
 # Move file to trash
-move_to_trash() {
+move_to_trash() (
     local source="$1"
+    local source_label="$1"
     local verbose="$2"
+    local invocation_cwd="$PWD"
+    local trash_root="$TRASH_DIR"
+    if [[ "$trash_root" != /* ]]; then
+        trash_root="$invocation_cwd/$trash_root"
+    fi
+    if [ -n "${BETTER_RM_STATE_DIR:-}" ] &&
+       [[ "$BETTER_RM_STATE_DIR" != /* ]]; then
+        BETTER_RM_STATE_DIR="$invocation_cwd/$BETTER_RM_STATE_DIR"
+    fi
 
     # 無論路徑是否存在或是否使用強制模式，都先檢查受保護路徑
     # Always check protected paths first, even when the path is missing or force mode is enabled
@@ -351,6 +361,52 @@ move_to_trash() {
             return 1
         fi
         return 0  # 在強制模式下，忽略不存在的檔案
+    fi
+
+    # 在任何昂貴的 hash 或垃圾桶準備前記住來源 inode，接著把此函式的
+    # subshell cwd 固定在來源 parent。即使 parent 路徑之後被改名並以
+    # symlink 取代，所有後續 ./basename 操作仍解析到原始 parent。
+    # Capture the source inode before expensive work, then pin this function's
+    # subshell cwd to the source parent. Replacing that parent path later cannot
+    # redirect subsequent ./basename operations to an attacker-controlled tree.
+    local source_identity
+    local source_basename
+    local source_parent
+    local pinned_identity
+    source_identity=$(stat -c '%d:%i' "$source" 2>/dev/null ||
+        stat -f '%d:%i' "$source" 2>/dev/null || true)
+    if [ -z "$source_identity" ]; then
+        error_msg "無法確認 '$source_label' 的 inode 身分；未移動"
+        error_msg "Could not verify source inode identity for '$source_label'; not moved"
+        return 1
+    fi
+    source_basename=$(basename "$source")
+    source_parent=$(dirname "$source")
+    if ! cd "$source_parent" 2>/dev/null; then
+        error_msg "無法固定來源 parent '$source_parent'；未移動"
+        error_msg "Could not pin source parent '$source_parent'; not moved"
+        return 1
+    fi
+    source="./$source_basename"
+    pinned_identity=$(stat -c '%d:%i' "$source" 2>/dev/null ||
+        stat -f '%d:%i' "$source" 2>/dev/null || true)
+    if [ "$pinned_identity" != "$source_identity" ]; then
+        error_msg "來源 '$source_label' 在固定 parent 前已變更；未移動"
+        error_msg "Source '$source_label' changed before its parent was pinned; not moved"
+        return 1
+    fi
+
+    local source_had_same_name_child=0
+    local file_type="unknown"
+    if [ -d "$source" ] && [ ! -L "$source" ]; then
+        file_type="directory"
+        if [ -e "$source/$source_basename" ] || [ -L "$source/$source_basename" ]; then
+            source_had_same_name_child=1
+        fi
+    elif [ -L "$source" ]; then
+        file_type="symlink"
+    elif [ -f "$source" ]; then
+        file_type="file"
     fi
     
     # 取得絕對路徑
@@ -379,7 +435,7 @@ move_to_trash() {
     
     # 建立垃圾桶目錄結構
     # Create trash directory structure
-    local trash_path="$TRASH_DIR$(dirname "$abs_path")"
+    local trash_path="$trash_root$(dirname "$abs_path")"
     mkdir -p "$trash_path" 2>/dev/null || {
         error_msg "無法建立垃圾桶目錄: $trash_path"
         error_msg "Failed to create trash directory: $trash_path"
@@ -424,38 +480,13 @@ move_to_trash() {
     
     # 目標路徑，加上時間戳記和 hash
     # Target path with timestamp and hash
-    local target="$TRASH_DIR$abs_path"
+    local target="$trash_root$abs_path"
     target="${target}__${timestamp}__${file_hash}"
     local base_target="$target"
     local reservation=""
     local attempt=0
     local moved=0
-    local source_basename
-    local source_identity
-    local source_had_same_name_child=0
-    source_basename=$(basename "$source")
-    source_identity=$(stat -c '%d:%i' "$source" 2>/dev/null ||
-        stat -f '%d:%i' "$source" 2>/dev/null || true)
-
-    # 判斷檔案類型（在移動之前）
-    # Determine file type (before moving)
-    local file_type="unknown"
-    if [ -d "$source" ] && [ ! -L "$source" ]; then
-        file_type="directory"
-        if [ -e "$source/$source_basename" ] || [ -L "$source/$source_basename" ]; then
-            source_had_same_name_child=1
-        fi
-    elif [ -L "$source" ]; then
-        file_type="symlink"
-    elif [ -f "$source" ]; then
-        file_type="file"
-    fi
-    if [ "$file_type" = "directory" ] && [ -z "$source_identity" ]; then
-        error_msg "無法確認目錄 '$source' 的 inode 身分；未移動"
-        error_msg "Could not verify directory inode identity for '$source'; not moved"
-        return 1
-    fi
-
+    local current_source_identity
     # 時間戳記/hash 組合不保證唯一；保留同層 lock 目錄，並以不覆寫模式移動。
     # The timestamp/hash pair is not unique; reserve a sibling lock directory
     # and move without clobbering. A late writer leaves the source in place.
@@ -485,6 +516,14 @@ move_to_trash() {
                 reservation=""
                 attempt=$((attempt + 1))
                 continue
+            fi
+            current_source_identity=$(stat -c '%d:%i' "$source" 2>/dev/null ||
+                stat -f '%d:%i' "$source" 2>/dev/null || true)
+            if [ "$current_source_identity" != "$source_identity" ]; then
+                rmdir "$reservation" 2>/dev/null || true
+                error_msg "來源 '$source_label' 在移動前已變更；未移動"
+                error_msg "Source '$source_label' changed before move; not moved"
+                return 1
             fi
             if move_without_clobber "$source" "$target" 2>/dev/null; then
                 if [ -e "$source" ] || [ -L "$source" ]; then
@@ -600,10 +639,10 @@ move_to_trash() {
     log_deletion "$abs_path" "$target" "$file_hash" "$timestamp" "$file_type"
 
     if [ "$verbose" = "1" ]; then
-        success_msg "已移除 '$source' (moved to trash: $target)"
+        success_msg "已移除 '$source_label' (moved to trash: $target)"
     fi
     return 0
-}
+)
 
 # 移除字串前後空白
 # Trim leading and trailing whitespace

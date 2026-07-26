@@ -80,10 +80,18 @@ function decodeAnsiCEscape(input, slashIndex) {
 
 function shellWords(command) {
   const words = [];
+  const dynamicExpansions = [];
   const input = String(command || '');
   let word = '';
+  let wordHasDynamicExpansion = false;
   let quote = '';
   let escaped = false;
+
+  function pushWord(value) {
+    words.push(value);
+    dynamicExpansions.push(wordHasDynamicExpansion);
+    wordHasDynamicExpansion = false;
+  }
 
   for (let index = 0; index < input.length; index += 1) {
     const char = input[index];
@@ -101,23 +109,30 @@ function shellWords(command) {
       escaped = true;
     } else if (quote) {
       if (char === quote) quote = '';
-      else word += char;
+      else {
+        if (quote === '"' && (char === '$' || char === '`')) {
+          wordHasDynamicExpansion = true;
+        }
+        word += char;
+      }
     } else if (char === '$' && input[index + 1] === "'") {
       quote = 'ansi-c';
       index += 1;
     } else if (char === '"' || char === "'") {
       quote = char;
     } else if (';&|()<>\n'.includes(char)) {
-      if (word) words.push(word), word = '';
-      words.push(char);
+      if (word) pushWord(word), word = '';
+      pushWord(char);
     } else if (/\s/.test(char)) {
-      if (word) words.push(word), word = '';
+      if (word) pushWord(word), word = '';
     } else {
+      if (char === '$' || char === '`') wordHasDynamicExpansion = true;
       word += char;
     }
   }
   if (escaped) word += '\\';
-  if (word) words.push(word);
+  if (word) pushWord(word);
+  Object.defineProperty(words, 'dynamicExpansions', { value: dynamicExpansions });
   return words;
 }
 
@@ -239,6 +254,13 @@ function normalizedTarget(value, cwd, home) {
   return path.resolve(cwd, expanded);
 }
 
+function hasUnresolvedTargetExpansion(isDynamic) {
+  // Even HOME is unknowable here: the same simple command can override it
+  // (`HOME=/ rm "$HOME/etc"`). Every real shell expansion in an rm operand
+  // therefore fails closed; single-quoted and escaped dollars are not marked.
+  return Boolean(isDynamic);
+}
+
 function globCanMatchGit(value) {
   const basename = path.basename(value);
   if (!/[*?\[\]{}]/.test(basename)) return false;
@@ -279,6 +301,7 @@ function protectedReason(target, cwd, home, extraDirs = []) {
 
 function commandTargets(command, depth = 0) {
   const words = shellWords(command);
+  const dynamicExpansions = words.dynamicExpansions || [];
   const targets = [];
   const separators = new Set([';', '&', '|', '(', ')', '<', '>', '\n']);
   // Redirections (`<`, `>`) stay within a simple command; they are not command
@@ -520,7 +543,11 @@ function commandTargets(command, depth = 0) {
           continue;
         }
         if (candidate === '--') continue;
-        if (!candidate.startsWith('-') || candidate === '-') targets.push(candidate);
+        if (!candidate.startsWith('-') || candidate === '-') {
+          targets.push(
+            hasUnresolvedTargetExpansion(dynamicExpansions[i]) ? '/' : candidate
+          );
+        }
       }
     } else if (shellCarriers.has(executable)) {
       const nestedCommands = [];

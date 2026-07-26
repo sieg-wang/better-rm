@@ -99,6 +99,9 @@ const blocked = [
   "eval 'rm -rf /var'",
   'echo "$(rm -rf /boot)"',
   "printf '%s' \"`rm -rf /usr`\"",
+  'rm -rf "$(printf /)"',
+  'rm -rf "$TARGET"',
+  'HOME=/ rm -rf "$HOME/etc"',
   // A wrapper that ends exactly on a command separator must not swallow it and
   // hide the following rm (regression: unconditional i += 1 after unwrap).
   'sudo -k; rm -rf /etc',
@@ -185,6 +188,8 @@ const allowed = [
   "bash -c '/usr/bin/time -ho /tmp/timing rm -rf build'",
   "cat <(printf safe)",
   "echo 'cat <(rm -rf /usr)'",
+  "rm -rf '$literal'",
+  'rm -rf \\$literal',
   // Redirections trailing an unprotected target stay allowed.
   'rm -rf build >/dev/null',
   'rm -rf build 2>/dev/null',

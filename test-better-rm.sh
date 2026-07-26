@@ -473,6 +473,96 @@ else
     test_fail "快速連續刪除失敗"
 fi
 
+test_item "來源 parent 在 hash 期間被替換時不會移動替身檔案"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+source_parent_race_bin="$TEST_WORK_DIR/source-parent-race-bin"
+mkdir -p "$source_parent_race_bin" source-parent victim-parent
+cat > "$source_parent_race_bin/md5sum" <<'EOF'
+#!/bin/sh
+if [ ! -e "$BETTER_RM_SOURCE_PARENT_RACE_FLAG" ]; then
+    : > "$BETTER_RM_SOURCE_PARENT_RACE_FLAG"
+    "$BETTER_RM_REAL_MV" "$BETTER_RM_SOURCE_PARENT" \
+        "$BETTER_RM_ORIGINAL_PARENT"
+    ln -s "$BETTER_RM_VICTIM_PARENT" "$BETTER_RM_SOURCE_PARENT"
+fi
+exec "$BETTER_RM_REAL_MD5SUM" "$@"
+EOF
+chmod +x "$source_parent_race_bin/md5sum"
+
+printf '%s\n' "ORIGINAL SOURCE" > source-parent/entry.txt
+printf '%s\n' "VICTIM SOURCE" > victim-parent/entry.txt
+source_parent_race_status=0
+BETTER_RM_SOURCE_PARENT_RACE_FLAG="$TEST_WORK_DIR/source-parent-race-injected" \
+BETTER_RM_SOURCE_PARENT="$TEST_WORK_DIR/source-parent" \
+BETTER_RM_ORIGINAL_PARENT="$TEST_WORK_DIR/source-parent-original" \
+BETTER_RM_VICTIM_PARENT="$TEST_WORK_DIR/victim-parent" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_REAL_MD5SUM="$(command -v md5sum)" \
+PATH="$source_parent_race_bin:$PATH" \
+    "$BETTER_RM" source-parent/entry.txt \
+    >"$TEST_WORK_DIR/source-parent-race.out" 2>&1 ||
+    source_parent_race_status=$?
+
+original_source_entries=$(find "$TEST_TRASH_DIR" -type f -name "entry.txt__*" \
+    -exec grep -lFx "ORIGINAL SOURCE" {} + 2>/dev/null | wc -l | tr -d ' ')
+logged_source_parent_target=$(tail -n 1 "$TEST_STATE_DIR/deletion.log" 2>/dev/null |
+    awk -F ' \\| ' '{print $3}')
+if [ "$source_parent_race_status" -eq 0 ] && \
+   [ -L "$TEST_WORK_DIR/source-parent" ] && \
+   [ -f "$TEST_WORK_DIR/victim-parent/entry.txt" ] && \
+   grep -qFx "VICTIM SOURCE" "$TEST_WORK_DIR/victim-parent/entry.txt" && \
+   [ ! -e "$TEST_WORK_DIR/source-parent-original/entry.txt" ] && \
+   [ "$original_source_entries" -eq 1 ] && \
+   [ -f "$logged_source_parent_target" ] && \
+   grep -qFx "ORIGINAL SOURCE" "$logged_source_parent_target"; then
+    test_pass "來源 parent 被替換後仍只移動原始來源，victim 未受影響"
+else
+    test_fail "來源 parent 替換競態移動了 victim、遺失原始來源或寫入錯誤日誌"
+fi
+
+test_item "來源 entry 在 hash 後被替換時 fail closed"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+entry_race_bin="$TEST_WORK_DIR/entry-race-bin"
+mkdir -p "$entry_race_bin"
+cat > "$entry_race_bin/md5sum" <<'EOF'
+#!/bin/sh
+hash_output=$("$BETTER_RM_REAL_MD5SUM" "$@") || exit $?
+if [ ! -e "$BETTER_RM_ENTRY_RACE_FLAG" ]; then
+    : > "$BETTER_RM_ENTRY_RACE_FLAG"
+    "$BETTER_RM_REAL_MV" "$BETTER_RM_ENTRY_SOURCE" \
+        "$BETTER_RM_ENTRY_ORIGINAL"
+    "$BETTER_RM_REAL_MV" "$BETTER_RM_ENTRY_VICTIM" \
+        "$BETTER_RM_ENTRY_SOURCE"
+fi
+printf '%s\n' "$hash_output"
+EOF
+chmod +x "$entry_race_bin/md5sum"
+
+printf '%s\n' "ORIGINAL ENTRY" > entry-race.txt
+printf '%s\n' "VICTIM ENTRY" > entry-victim.txt
+entry_race_status=0
+BETTER_RM_ENTRY_RACE_FLAG="$TEST_WORK_DIR/entry-race-injected" \
+BETTER_RM_ENTRY_SOURCE="$TEST_WORK_DIR/entry-race.txt" \
+BETTER_RM_ENTRY_ORIGINAL="$TEST_WORK_DIR/entry-original.txt" \
+BETTER_RM_ENTRY_VICTIM="$TEST_WORK_DIR/entry-victim.txt" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_REAL_MD5SUM="$(command -v md5sum)" \
+PATH="$entry_race_bin:$PATH" \
+    "$BETTER_RM" entry-race.txt >"$TEST_WORK_DIR/entry-race.out" 2>&1 ||
+    entry_race_status=$?
+
+if [ "$entry_race_status" -ne 0 ] && \
+   [ -f entry-original.txt ] && grep -qFx "ORIGINAL ENTRY" entry-original.txt && \
+   [ -f entry-race.txt ] && grep -qFx "VICTIM ENTRY" entry-race.txt && \
+   [ ! -s "$TEST_STATE_DIR/deletion.log" ] && \
+   ! find "$TEST_TRASH_DIR" -type f -name "entry-race.txt__*" 2>/dev/null | grep -q .; then
+    test_pass "hash 後 entry 身分改變時停止，原始與 replacement 都保留"
+else
+    test_fail "hash 後 entry 身分改變仍移動 replacement、遺失來源或寫入日誌"
+fi
+
 test_item "相同路徑、內容與時間戳記不覆蓋既有垃圾桶項目"
 setup
 cd "$TEST_WORK_DIR" || exit 1
