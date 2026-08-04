@@ -84,6 +84,50 @@ success_msg() {
     echo -e "${GREEN}$1${NC}"
 }
 
+# 編碼 v2 日誌欄位：路徑裡的 | 與換行都是合法字元，未轉義就會毀掉紀錄結構
+# Encode a v2 log field: '|' and newlines are legal in a path and would
+# otherwise break the delimiter and the one-record-per-line structure.
+encode_log_field() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    # 分隔符必須完全不出現在欄位裡：IFS 切割不認轉義，'\|' 一樣會被切開
+    # The delimiter must not survive in the field at all: IFS splitting is not
+    # escape-aware, so a '\|' would still be split.
+    value="${value//|/\\p}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    printf '%s' "$value"
+}
+
+# 解碼 v2 日誌欄位，結果寫入 LOG_FIELD_DECODED
+# （不用命令替換回傳，否則結尾換行的檔名會被吃掉）
+# Decode a v2 log field into LOG_FIELD_DECODED; a command substitution would
+# strip a trailing newline that belongs to the filename.
+decode_log_field() {
+    local value="$1"
+    local out=""
+    local index=0
+    local length=${#value}
+    local char
+    while [ "$index" -lt "$length" ]; do
+        char="${value:index:1}"
+        if [ "$char" = '\' ] && [ $((index + 1)) -lt "$length" ]; then
+            index=$((index + 1))
+            case "${value:index:1}" in
+                n) out+=$'\n' ;;
+                r) out+=$'\r' ;;
+                p) out+='|' ;;
+                '\') out+='\' ;;
+                *) out+="\\${value:index:1}" ;;
+            esac
+        else
+            out+="$char"
+        fi
+        index=$((index + 1))
+    done
+    LOG_FIELD_DECODED="$out"
+}
+
 # 記錄刪除操作到日誌檔案
 # Log deletion operation to log file
 log_deletion() {
@@ -115,8 +159,10 @@ log_deletion() {
             {
                 echo "# Better-RM Deletion Log"
                 echo "# 更好的 RM 刪除日誌"
-                echo "# Format: TIMESTAMP | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE"
-                echo "# 格式：時間戳記 | 原始路徑 | 垃圾桶路徑 | 雜湊值 | 檔案類型"
+                echo "# Format: TIMESTAMP | v2 | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE"
+                echo "# 格式：時間戳記 | v2 | 原始路徑 | 垃圾桶路徑 | 雜湊值 | 檔案類型"
+                echo '# v2: path fields escape \\ (backslash) \p (pipe) \n (newline) \r (CR); records without the v2 marker use the legacy 5-field layout'
+                echo '# v2：路徑欄位轉義 \\ 反斜線、\p 直線、\n 換行、\r 歸位；沒有 v2 標記的紀錄沿用舊版 5 欄格式'
                 echo "# =============================================================================="
             } > "$log_file"
         ) 2>/dev/null; then
@@ -131,8 +177,9 @@ log_deletion() {
     # 記錄刪除操作
     # Log the deletion operation
     if ! {
-        printf '%s | %s | %s | %s | %s\n' \
-            "$timestamp" "$original_path" "$trash_path" "$file_hash" "$file_type" >> "$log_file"
+        printf '%s | v2 | %s | %s | %s | %s\n' \
+            "$timestamp" "$(encode_log_field "$original_path")" \
+            "$(encode_log_field "$trash_path")" "$file_hash" "$file_type" >> "$log_file"
     } 2>/dev/null; then
         # 記錄失敗，顯示警告但不中斷操作
         # Logging failed, show warning but don't interrupt operation
@@ -454,11 +501,16 @@ move_to_trash() (
     if [ -f "$source" ] && [ ! -L "$source" ]; then
         # 如果是普通檔案（非符號連結），計算 hash
         # If it's a regular file (not a symlink), calculate hash
-        file_hash=$(md5sum "$source" 2>/dev/null | cut -d' ' -f1)
+        # 從 stdin 讀取，輸出才不會帶檔名：檔名含換行時 cut 會逐行處理，
+        # 把檔名片段接進 hash，進而污染垃圾桶路徑與日誌。
+        # Hash from stdin so the output carries no filename: a filename with a
+        # newline makes cut emit a second line, appending part of the name to
+        # the hash and corrupting both the trash path and the log record.
+        file_hash=$(md5sum 2>/dev/null < "$source" | cut -d' ' -f1)
         if [ -z "$file_hash" ]; then
             # 如果 md5sum 失敗，使用 sha256sum
             # If md5sum fails, use sha256sum
-            file_hash=$(sha256sum "$source" 2>/dev/null | cut -d' ' -f1)
+            file_hash=$(sha256sum 2>/dev/null < "$source" | cut -d' ' -f1)
         fi
     elif [ -d "$source" ] && [ ! -L "$source" ]; then
         # 如果是目錄，計算目錄內容的 hash
@@ -715,15 +767,39 @@ restore_file() {
 
         for ((i=${#lines[@]}-1; i>=0; i--)); do
             local line="${lines[i]}"
-            # 解析日誌行：TIMESTAMP | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE
+            # 解析日誌行：
+            # v2  → TIMESTAMP | v2 | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE（路徑已轉義）
+            # 舊版 → TIMESTAMP | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE
+            # 舊紀錄是升級前寫下的，必須照樣讀得懂，否則已在垃圾桶的項目會還原不了。
+            # Legacy records predate the v2 marker and must keep working, or
+            # items already in the trash become unrestorable after an upgrade.
             local parts=()
             IFS='|' read -r -a parts <<< "$line"
 
-            timestamp=$(trim "${parts[0]}")
-            original_path=$(trim "${parts[1]}")
-            trash_path=$(trim "${parts[2]}")
-            file_hash=$(trim "${parts[3]}")
-            file_type=$(trim "${parts[4]}")
+            if [ ${#parts[@]} -ge 6 ] && [ "$(trim "${parts[1]}")" = "v2" ]; then
+                # 只剝掉分隔符兩側各一個空白，保留檔名本身的前後空白
+                # Strip only the single delimiter space on each side so spaces
+                # that belong to the filename survive.
+                local encoded_original="${parts[2]}"
+                local encoded_trash="${parts[3]}"
+                encoded_original="${encoded_original# }"
+                encoded_original="${encoded_original% }"
+                encoded_trash="${encoded_trash# }"
+                encoded_trash="${encoded_trash% }"
+                decode_log_field "$encoded_original"
+                original_path="$LOG_FIELD_DECODED"
+                decode_log_field "$encoded_trash"
+                trash_path="$LOG_FIELD_DECODED"
+                timestamp=$(trim "${parts[0]}")
+                file_hash=$(trim "${parts[4]}")
+                file_type=$(trim "${parts[5]}")
+            else
+                timestamp=$(trim "${parts[0]}")
+                original_path=$(trim "${parts[1]}")
+                trash_path=$(trim "${parts[2]}")
+                file_hash=$(trim "${parts[3]}")
+                file_type=$(trim "${parts[4]}")
+            fi
 
             # 檢查 trash_path 是否真的存在於磁碟上
             if [ ! -e "$trash_path" ] && [ ! -L "$trash_path" ]; then

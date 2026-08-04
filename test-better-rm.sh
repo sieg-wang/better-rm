@@ -358,7 +358,10 @@ fi
 
 test_item "日誌格式正確"
 log_file="$TEST_STATE_DIR/deletion.log"
-if grep -E "^[0-9]{8}_[0-9]{6}_[0-9]+ \| .+ \| .+ \| .+ \| (file|directory|symlink)$" "$log_file" >/dev/null 2>&1; then
+# v2 紀錄的路徑欄位一定不含未轉義的 |，否則還原時的切割就會錯位
+# A v2 record never carries an unescaped '|' in a path field; otherwise the
+# split during restore lands on the wrong boundary.
+if grep -E "^[0-9]{8}_[0-9]{6}_[0-9]+ \| v2 \| [^|]+ \| [^|]+ \| [^|]+ \| (file|directory|symlink)$" "$log_file" >/dev/null 2>&1; then
     test_pass "日誌格式正確"
 else
     test_fail "日誌格式不正確"
@@ -530,7 +533,7 @@ PATH="$source_parent_race_bin:$PATH" \
 original_source_entries=$(find "$TEST_TRASH_DIR" -type f -name "entry.txt__*" \
     -exec grep -lFx "ORIGINAL SOURCE" {} + 2>/dev/null | wc -l | tr -d ' ')
 logged_source_parent_target=$(tail -n 1 "$TEST_STATE_DIR/deletion.log" 2>/dev/null |
-    awk -F ' \\| ' '{print $3}')
+    awk -F ' \\| ' '{print $4}')
 if [ "$source_parent_race_status" -eq 0 ] && \
    [ -L "$TEST_WORK_DIR/source-parent" ] && \
    [ -f "$TEST_WORK_DIR/victim-parent/entry.txt" ] && \
@@ -687,7 +690,7 @@ new_directory_race_entries=$(find "$TEST_TRASH_DIR" -type f -name "late-director
 nested_source_entries=$(find "$TEST_TRASH_DIR" -type f -name late-directory.txt \
     -path "*/late-directory.txt__*/*" 2>/dev/null | wc -l | tr -d ' ')
 logged_directory_race_target=$(tail -n 1 "$TEST_STATE_DIR/deletion.log" |
-    awk -F ' \\| ' '{print $3}')
+    awk -F ' \\| ' '{print $4}')
 
 collision_safe=false
 if [ ! -e late-directory.txt ] && [ "$old_directory_entries" -eq 1 ] && \
@@ -819,7 +822,7 @@ symlink_race_links=$(find "$TEST_TRASH_DIR" -type l -name "late-symlink.txt__*" 
 symlink_race_entries=$(find "$TEST_TRASH_DIR" -type f -name "late-symlink.txt__*" \
     -exec grep -lFx "NEW SYMLINK-RACE SOURCE" {} + 2>/dev/null | wc -l | tr -d ' ')
 logged_symlink_race_target=$(tail -n 1 "$TEST_STATE_DIR/deletion.log" |
-    awk -F ' \\| ' '{print $3}')
+    awk -F ' \\| ' '{print $4}')
 if [ ! -e late-symlink.txt ] && [ "$symlink_race_links" -eq 1 ] && \
    [ "$symlink_race_entries" -eq 1 ] && \
    [ ! -e "$TEST_WORK_DIR/attacker-directory/late-symlink.txt" ] && \
@@ -1144,6 +1147,67 @@ if [ "$restore_fail_status" -ne 0 ] && \
     test_pass "搬移失敗時目的地與垃圾桶項目都完好，且未殘留暫存檔"
 else
     test_fail "搬移失敗時毀掉了既有目的地或垃圾桶項目 (status=$restore_fail_status)"
+fi
+
+test_item "含 | 的檔名可完整刪除並還原"
+# 日誌以 | 分隔且還原時逐一切開，合法檔名裡的 | 會讓紀錄無法被解析。
+# The pipe-delimited log cannot represent a legal filename containing '|',
+# so restore could not find its own record.
+setup
+cd "$TEST_WORK_DIR"
+printf '%s\n' "PIPE CONTENT" > 'a|b.txt'
+"$BETTER_RM" 'a|b.txt'
+pipe_restore_status=0
+"$BETTER_RM" --restore 'a|b.txt' >/dev/null 2>&1 || pipe_restore_status=$?
+if [ "$pipe_restore_status" -eq 0 ] && [ -f 'a|b.txt' ] && \
+   [ "$(cat 'a|b.txt')" = "PIPE CONTENT" ]; then
+    test_pass "含 | 的檔名往返還原成功"
+else
+    test_fail "含 | 的檔名無法還原 (status=$pipe_restore_status)"
+fi
+
+test_item "含換行的檔名可完整刪除並還原"
+# 原始路徑直接寫進單行日誌，檔名裡的換行會把一筆紀錄拆成兩行。
+# A raw newline in the path splits one record into two log lines.
+setup
+cd "$TEST_WORK_DIR"
+newline_name=$'nl\nname.txt'
+printf '%s\n' "NEWLINE CONTENT" > "$newline_name"
+"$BETTER_RM" "$newline_name"
+newline_restore_status=0
+"$BETTER_RM" --restore "$newline_name" >/dev/null 2>&1 || newline_restore_status=$?
+if [ "$newline_restore_status" -eq 0 ] && [ -f "$newline_name" ] && \
+   [ "$(cat "$newline_name")" = "NEWLINE CONTENT" ]; then
+    test_pass "含換行的檔名往返還原成功"
+else
+    test_fail "含換行的檔名無法還原 (status=$newline_restore_status)"
+fi
+
+test_item "升級前寫下的舊格式日誌仍可還原"
+# 本機既有的垃圾桶紀錄都是舊格式；新格式必須照樣讀得懂，否則升級即斷。
+# Trash logs written before this change are in the old format; the reader must
+# keep understanding them or upgrading breaks restore of already-trashed items.
+setup
+cd "$TEST_WORK_DIR"
+printf '%s\n' "OLD FORMAT" > old_format.txt
+"$BETTER_RM" old_format.txt
+old_format_trash=$(find "$TEST_TRASH_DIR" -type f -name 'old_format.txt__*' | head -1)
+{
+    printf '%s\n' "# Better-RM Deletion Log"
+    printf '%s | %s | %s | %s | %s\n' \
+        "20260101_000000_000000000" \
+        "$TEST_WORK_DIR/old_format.txt" \
+        "$old_format_trash" \
+        "0123456789abcdef" \
+        "file"
+} > "$TEST_STATE_DIR/deletion.log"
+old_format_status=0
+"$BETTER_RM" --restore old_format.txt >/dev/null 2>&1 || old_format_status=$?
+if [ "$old_format_status" -eq 0 ] && [ -f old_format.txt ] && \
+   [ "$(cat old_format.txt)" = "OLD FORMAT" ]; then
+    test_pass "舊格式日誌紀錄仍可還原"
+else
+    test_fail "舊格式日誌紀錄無法還原 (status=$old_format_status)"
 fi
 
 # 清理測試產生的檔案

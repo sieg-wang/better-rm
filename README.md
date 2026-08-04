@@ -230,13 +230,16 @@ cat ~/.local/state/better-rm/deletion.log
 
 日誌格式：
 ```
-TIMESTAMP | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE
+TIMESTAMP | v2 | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE
 ```
+
+`v2` 標記代表兩個路徑欄位是轉義過的：`\\` 反斜線、`\p` 直線 `|`、`\n` 換行、`\r` 歸位。因此含有 `|` 或換行的合法檔名也能被正確記錄與還原。沒有 `v2` 標記的紀錄是升級前寫下的舊版 5 欄格式（`TIMESTAMP | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE`），`--restore` 仍可讀取。
 
 範例：
 ```
-20251209_084530_429345278 | /home/user/file.txt | /home/user/.Trash/.../file.txt__...__hash | d6eb320... | file
-20251209_084547_505346836 | /home/user/mydir | /home/user/.Trash/.../mydir__...__hash | c55e1b8... | directory
+20251209_084530_429345278 | v2 | /home/user/file.txt | /home/user/.Trash/.../file.txt__...__hash | d6eb320... | file
+20251209_084547_505346836 | v2 | /home/user/mydir | /home/user/.Trash/.../mydir__...__hash | c55e1b8... | directory
+20251209_084551_118273540 | v2 | /home/user/a\pb.txt | /home/user/.Trash/.../a\pb.txt__...__hash | 4b1e77f... | file
 ```
 
 這個日誌可以幫助你：

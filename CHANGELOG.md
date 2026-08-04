@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Detect protected removals nested inside shell carriers, `eval`, command substitutions, and chained `sudo`/`env`/`command` wrappers.
 
 ### Changed
+- `deletion.log` records now carry a `v2` marker and escape `\\`, `|`, newline, and CR in both path fields, so filenames containing `|` or a newline can be logged and restored. Records written before this change (no `v2` marker) are still read by `--restore`.
 - Added `BETTER_RM_STATE_DIR` and XDG state-directory support for `deletion.log`.
 - Restricted newly created state directories and deletion logs to user-only access.
 
