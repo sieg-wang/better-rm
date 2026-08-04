@@ -343,6 +343,7 @@ function commandTargets(command, depth = 0) {
       continue;
     }
     let executable = '';
+    let executableIndex = -1;
 
     // Wrapper commands can be chained arbitrarily (for example
     // `sudo env SAFE=1 command bash -c ...`). Unwrap each layer until the
@@ -357,6 +358,7 @@ function commandTargets(command, depth = 0) {
         continue;
       }
       executable = path.basename(words[i]);
+      executableIndex = i;
 
       if (executable === 'sudo') {
         const optionsWithValue = new Set(['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from', '-T', '--command-timeout', '-R', '--chroot', '-D', '--chdir', '-r', '--role', '-t', '--type']);
@@ -532,8 +534,14 @@ function commandTargets(command, depth = 0) {
     // Only advance past a real executable. When the unwrap loop above consumed
     // wrapper layers and stopped AT a separator (executable === ''), advancing
     // here would swallow that separator and hide the command that follows it.
+    // A command word that only exists after expansion (`CMD=rm; $CMD -rf /`,
+    // `"$CMD" -rf /`, backticks) is unknowable here, so it must be assumed to be
+    // rm: its operands are scanned exactly like rm operands. Matching on the
+    // literal word alone let every dynamic spelling of rm through.
+    const unresolvedExecutable = executable !== ''
+      && hasUnresolvedTargetExpansion(dynamicExpansions[executableIndex]);
     if (executable) i += 1;
-    if (['rm', 'rmdir'].includes(executable)) {
+    if (['rm', 'rmdir'].includes(executable) || unresolvedExecutable) {
       for (; i < words.length && !terminators.has(words[i]); i += 1) {
         const candidate = words[i];
         if (redirectors.has(candidate)) {
@@ -543,6 +551,13 @@ function commandTargets(command, depth = 0) {
           continue;
         }
         if (candidate === '--') continue;
+        // An unresolvable command word may also be a shell carrier, so an
+        // operand holding a whole command string (`$CMD -c 'rm -rf /'`) has to
+        // be parsed as a command as well as compared as a path.
+        if (unresolvedExecutable && /\s/.test(candidate)) {
+          if (depth >= 8) targets.push('/');
+          else targets.push(...commandTargets(candidate, depth + 1));
+        }
         if (!candidate.startsWith('-') || candidate === '-') {
           targets.push(
             hasUnresolvedTargetExpansion(dynamicExpansions[i]) ? '/' : candidate

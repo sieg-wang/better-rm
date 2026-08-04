@@ -301,4 +301,63 @@ for (const badInput of ['not-json{', '', '{"tool_input":']) {
   errorPathChecks += 1;
 }
 
-console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks}`);
+// A command word that only exists after expansion (`CMD=rm; $CMD -rf /`) is
+// still `rm` when the shell runs it, so the hook must fail closed on it. These
+// run through the real stdin JSON contract, because that is the seam every
+// agent actually uses; `evaluate()` alone cannot prove the deployed path works.
+// 命令字必須展開後才知道是什麼（`CMD=rm; $CMD -rf /`），shell 執行時仍是 rm，
+// 因此 hook 必須失敗關閉；此處走真正的 stdin JSON 契約。
+function runHookOverStdin(payload) {
+  const child = spawnSync('node', [`${__dirname}/hooks/protect-important-paths.js`], {
+    input: JSON.stringify(payload),
+    encoding: 'utf8',
+    env: { ...process.env, ...env },
+  });
+  return { status: child.status, stdout: child.stdout };
+}
+
+const dynamicExecutableBlocked = [
+  // Positive control: the literal form was already blocked and must stay blocked.
+  'rm -rf /',
+  'CMD=rm; $CMD -rf /',
+  'CMD=/bin/rm; "$CMD" -rf /',
+  'CMD=rmdir; $CMD /etc',
+  'CMD=rm; ${CMD} -rf /var',
+  'CMD=rm; sudo $CMD -rf /usr',
+  // An unresolvable command word may also be a shell carrier.
+  "CMD=bash; $CMD -c 'rm -rf /'",
+  'CMD=rm; $CMD -rf .git',
+];
+
+const dynamicExecutableAllowed = [
+  // Negative controls: the guard must not become a blanket deny. A protected
+  // path handed to a non-deleting command was allowed before and stays allowed;
+  // an unresolvable command word with a harmless operand stays allowed too.
+  'ls',
+  'ls -la /etc',
+  'cat /etc/hosts',
+  '$EDITOR notes.txt',
+  'CMD=ls; $CMD build',
+];
+
+let stdinChecks = 0;
+for (const command of dynamicExecutableBlocked) {
+  const { status, stdout } = runHookOverStdin(claude(command));
+  assert.equal(status, 0, `${command} (exit)`);
+  let parsed = null;
+  try { parsed = JSON.parse(stdout); } catch (_) { parsed = null; }
+  assert.equal(
+    parsed?.hookSpecificOutput?.permissionDecision,
+    'deny',
+    `dynamic executable must fail closed: ${command} (stdout: ${JSON.stringify(stdout)})`
+  );
+  stdinChecks += 1;
+}
+for (const command of dynamicExecutableAllowed) {
+  const { status, stdout } = runHookOverStdin(claude(command));
+  assert.equal(status, 0, `${command} (exit)`);
+  assert.equal(stdout, '', `benign command must stay allowed: ${command}`);
+  stdinChecks += 1;
+}
+
+console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks}`);
