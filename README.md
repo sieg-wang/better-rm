@@ -324,6 +324,27 @@ WSL 可透過 `/etc/wsl.conf` 更改 Windows 磁碟的 automount root；非預�
 | OpenCode | `.opencode/plugins/protect-important-paths.ts` |
 | Grok Build | `.grok/hooks/better-rm.json` |
 
+### 無法靜態判定的命令字會被當成 `rm`（含少量誤擋）
+
+命令字要展開後才知道是什麼時（`$CMD`、`` `…` ``、未加引號的 `$( … )`），hook 無法
+在執行前知道它是不是 `rm`，因此一律以最壞情況處理：把它的操作對象當成刪除目標
+檢查。`CMD=rm; $CMD -rf /` 這類繞道因此擋得住，**代價是有一類合法命令會被誤擋**。
+
+誤擋的觸發條件很窄，需要同時滿足兩點：**執行檔位置**是未加引號的 `$( … )`，
+**而且**至少有一個非選項的操作對象含有任何展開。操作對象的內容不會被檢視 ——
+任何動態值都以最壞情況看待，所以連 `$USER` 都會被拒絕。
+
+| 現在會被擋（以前允許） | 仍然允許 |
+|---|---|
+| `$(which docker) run -v $(pwd):/work img ls` | `docker run -v $(pwd):/work img ls`（執行檔是靜態的） |
+| `$(brew --prefix)/bin/rg "$PATTERN" src/` | `$(command -v python3) ./build.py`（操作對象是靜態的） |
+| `$(which git) -C $(pwd) status` | `$(which make) -j$(nproc) all`（動態值在選項裡） |
+| `$(which cat) $HOME/.zshrc` | `cd $(git rev-parse --show-toplevel)`（`$( )` 不在執行檔位置） |
+| `$(which echo) $USER` | `` `which rm` `` 之外的一般用法 |
+
+**繞開方式**：直接寫命令名（`docker run …`），或不要把展開放進操作對象。
+被擋時會顯示明確的拒絕訊息與它拒絕的路徑，不會靜默失敗。
+
 預設保護範圍與 `better-rm` 相同：系統根目錄、使用者家目錄，以及任何位置的
 `.git` 目錄。若要加入其他重要目錄，請以平台的 PATH 分隔字元設定
 `BETTER_RM_PROTECTED_DIRS`：

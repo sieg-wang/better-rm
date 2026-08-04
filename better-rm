@@ -763,14 +763,26 @@ restore_file() {
     local found=0
     local i
 
-    # 便宜的預先排除：能匹配的紀錄，其原始路徑一定含有目標名稱，因此整行也一定
-    # 含有它（或它的轉義形式）。先用字串比對刷掉絕大多數紀錄，就不必為它們付出
-    # 切欄位、trim 與解碼的成本 —— 日誌只增不減，掃描成本會隨時間單調變差。
-    # Cheap pre-rejection: any record that can match contains the target name in
-    # its original path, so the whole line must contain it (or its escaped
-    # form). Filtering on the raw line first avoids paying for field splitting,
-    # trims and decoding on records that cannot match — the log is append-only,
-    # so that cost grows monotonically over the tool's lifetime.
+    # 便宜的預先排除：先用字串比對刷掉絕大多數紀錄，就不必為它們付出切欄位、
+    # trim 與解碼的成本 —— 日誌只增不減，掃描成本會隨時間單調變差。
+    # 成立範圍要講清楚：本工具寫出的 v2 欄位一定是 encode_log_field 的輸出（每個
+    # 反斜線都已加倍），在那個像上「原始路徑含目標名稱 ⇒ 整行含其轉義形式」可證；
+    # 但對任意手工編造的 v2 欄位並不成立，例如 `/craft/\a\\b.txt`（未知轉義 \a 緊
+    # 鄰標準的 \\）解碼後是 `/craft/\a\b.txt`，字面與標準轉義兩種寫法都不會出現在
+    # 原始行裡而被跳過。那種紀錄 better-rm 自己不會寫出，且結果是「找不到」
+    # （fail-closed），不會還原到錯的檔案。
+    # Cheap pre-rejection: a raw-string test drops the vast majority of records
+    # before paying for field splitting, trims and decoding — the log is
+    # append-only, so that cost grows monotonically over the tool's lifetime.
+    # Scope of the argument: fields this tool writes are always the image of
+    # encode_log_field (every backslash already doubled), and on that image
+    # "the original path contains the target name" does imply "the raw line
+    # contains its escaped spelling". It does NOT hold for an arbitrary
+    # hand-written v2 field: `/craft/\a\\b.txt` (an unknown escape \a next to a
+    # canonical \\) decodes to `/craft/\a\b.txt`, yet neither the literal nor
+    # the canonical spelling occurs in the raw line, so the record is skipped.
+    # better-rm never writes such a record, and the outcome is NOT FOUND
+    # (fail-closed) rather than restoring the wrong file.
     local needle="${target_name#./}"
     local needle_encoded
     needle_encoded=$(encode_log_field "$needle")

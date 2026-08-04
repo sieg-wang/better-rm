@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Detect protected removals nested inside shell carriers, `eval`, command substitutions, and chained `sudo`/`env`/`command` wrappers.
 
 ### Changed
+- The protected-path hook now treats an unresolvable command word (`$CMD`, `` `…` ``, and an unquoted `$( … )`) as if it were `rm`, because the shell resolves it to a real command only at run time. **This denies some legitimate commands.** The trigger is narrow: an unquoted `$( … )` in the *executable* position **and** at least one non-option operand that contains any expansion. The operand's value is never inspected — any dynamic operand is treated as the worst case, so even `$USER` is refused.
+  - Now denied (previously allowed): `$(which docker) run -v $(pwd):/work img ls`, `$(brew --prefix)/bin/rg "$PATTERN" src/`, `$(which git) -C $(pwd) status`, `$(which cat) $HOME/.zshrc`, `$(which echo) $USER`.
+  - Still allowed: a static executable with anything after it (`docker run -v $(pwd):/work img ls`), static operands (`$(command -v python3) ./build.py`), expansions inside options (`$(which make) -j$(nproc) all`), and `$( … )` anywhere other than the executable position (`cd $(git rev-parse --show-toplevel)`).
+  - Workaround: name the command directly (`docker run …`) or quote nothing dynamic into the operands. The denial is loud and names the path it refused.
 - `deletion.log` records now carry a `v2` marker and escape `\\`, `|`, newline, and CR in both path fields, so filenames containing `|` or a newline can be logged and restored. Records written before this change (no `v2` marker) are still read by `--restore`.
 - Added `BETTER_RM_STATE_DIR` and XDG state-directory support for `deletion.log`.
 - Restricted newly created state directories and deletion logs to user-only access.
