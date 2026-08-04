@@ -413,6 +413,37 @@ else
     fail "installed hook accepts harmless payload"
 fi
 
+# A readable but stale runtime hook must be refreshed. Keeping it means a hook
+# security fix lives only in the source checkout and never reaches the agent.
+STALE_HOME="$TMP_ROOT/stale-home"
+mkdir -p "$STALE_HOME/.claude"
+STALE_HOOK="$STALE_HOME/.claude/protect-important-paths.js"
+printf '#!/usr/bin/env node\n// stale hook without the security fix\n' > "$STALE_HOOK"
+printf '{"env":{"KEEP_ME":"yes"}}\n' > "$STALE_HOME/.claude/settings.json"
+STALE_HOOK_HASH=$(file_hash "$STALE_HOOK")
+(
+    cd "$TMP_ROOT"
+    HOME="$STALE_HOME" CLAUDE_CONFIG_DIR= "$INSTALLER" -a claude --global >/dev/null
+)
+assert_equal "stale runtime hook is refreshed from source" \
+    "$(file_hash "$SCRIPT_DIR/hooks/protect-important-paths.js")" \
+    "$(file_hash "$STALE_HOOK")"
+STALE_BACKUP=$(find "$STALE_HOME/.claude" -maxdepth 1 -name 'protect-important-paths.js.better-rm.bak.*' | head -1)
+if [ -n "$STALE_BACKUP" ] && [ "$(file_hash "$STALE_BACKUP")" = "$STALE_HOOK_HASH" ]; then
+    pass "stale runtime hook is backed up before replacement"
+else
+    fail "stale runtime hook is backed up before replacement"
+fi
+assert_equal "unrelated settings survive the runtime hook refresh" "yes" \
+    "$(node -e 'process.stdout.write(String(require(process.argv[1]).env.KEEP_ME))' "$STALE_HOME/.claude/settings.json")"
+assert_equal "refreshed runtime hook is registered once" "1" "$(hook_count "$STALE_HOME/.claude/settings.json")"
+(
+    cd "$TMP_ROOT"
+    HOME="$STALE_HOME" CLAUDE_CONFIG_DIR= "$INSTALLER" -a claude --global >/dev/null
+)
+assert_equal "an up-to-date runtime hook is not rewritten or re-backed-up" "1" \
+    "$(find "$STALE_HOME/.claude" -maxdepth 1 -name 'protect-important-paths.js.better-rm.bak.*' | wc -l | tr -d ' ')"
+
 # Missing shared hook fails before touching settings.
 MISSING_SOURCE="$TMP_ROOT/missing-source"
 mkdir -p "$MISSING_SOURCE"

@@ -236,6 +236,32 @@ resolve_shared_hook_for_settings() {
     if [ ! -f "$HOOK_PATH" ] || [ ! -r "$HOOK_PATH" ]; then
         mkdir -p -- "$(dirname -- "$HOOK_PATH")"
         cp "$HOOK_SOURCE_PATH" "$HOOK_PATH"
+    elif ! cmp -s "$HOOK_SOURCE_PATH" "$HOOK_PATH"; then
+        # 保留可讀但過期的 runtime hook，等於讓 hook 的安全修補停在原始碼樹裡，
+        # 永遠到不了 agent 實際執行的檔案，因此內容不同時必須更新（先備份）。
+        # Keeping a readable but stale runtime hook strands hook security fixes
+        # in the source checkout, so a differing runtime file is refreshed after
+        # a timestamped backup.
+        if [ -L "$HOOK_PATH" ]; then
+            error "拒絕覆蓋符號連結的共用 hook：$HOOK_PATH"
+            error "Refusing to replace symbolic link shared hook: $HOOK_PATH"
+            exit 1
+        fi
+        local backup_path
+        backup_path="$HOOK_PATH.better-rm.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+        local suffix=1
+        while [ -e "$backup_path" ]; do
+            backup_path="$HOOK_PATH.better-rm.bak.$(date -u +%Y%m%dT%H%M%SZ).${suffix}"
+            suffix=$((suffix + 1))
+        done
+        local hook_mode
+        hook_mode=$(stat -f '%Lp' "$HOOK_PATH" 2>/dev/null || stat -c '%a' "$HOOK_PATH")
+        cp "$HOOK_PATH" "$backup_path"
+        cp "$HOOK_SOURCE_PATH" "$HOOK_PATH"
+        chmod "$hook_mode" "$HOOK_PATH"
+        success "已更新共用 hook：$HOOK_PATH"
+        success "Updated shared hook: $HOOK_PATH"
+        info "備份檔案 / Backup: $backup_path"
     fi
 
     if [ ! -f "$HOOK_PATH" ] || [ ! -r "$HOOK_PATH" ]; then
