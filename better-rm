@@ -777,21 +777,46 @@ restore_file() {
         fi
     fi
     
-    # 執行還原：移動檔案
+    # 執行還原：先把既有目的地移到同層的讓位路徑，確認搬移成功後才刪除它。
+    # 先刪除目的地會讓 mv 失敗時「既有檔案」與「還原」同時失去。
+    # Move the existing destination aside first and delete it only after the
+    # restore move succeeds; deleting it up front loses both the local file and
+    # the restore whenever the move fails.
+    local displaced=""
     if [ -e "$dest_path" ] || [ -L "$dest_path" ]; then
-        /bin/rm -rf "$dest_path"
+        local displaced_suffix=1
+        displaced="${dest_path}.better-rm-restore-$$"
+        while [ -e "$displaced" ] || [ -L "$displaced" ]; do
+            displaced="${dest_path}.better-rm-restore-$$.${displaced_suffix}"
+            displaced_suffix=$((displaced_suffix + 1))
+        done
+        if ! mv "$dest_path" "$displaced" 2>/dev/null; then
+            error_msg "還原失敗：無法暫存既有的 '$dest_filename'"
+            error_msg "Restore failed: cannot set aside the existing '$dest_filename'"
+            return 1
+        fi
     fi
-    
+
     if mv "$trash_path" "$dest_path" 2>/dev/null; then
+        if [ -n "$displaced" ]; then
+            /bin/rm -rf "$displaced"
+        fi
         if [ "$verbose" = "1" ]; then
             success_msg "已還原 '$dest_filename' 到目前資料夾 (restored to: $dest_path)"
         fi
         return 0
-    else
-        error_msg "還原失敗：無法將檔案移回目前資料夾"
-        error_msg "Restore failed: cannot move file back to current folder"
+    fi
+
+    # 搬移失敗：把讓位的目的地放回原處，維持呼叫前的狀態。
+    # The move failed: put the displaced destination back so nothing is lost.
+    if [ -n "$displaced" ] && ! mv "$displaced" "$dest_path" 2>/dev/null; then
+        error_msg "還原失敗且既有的 '$dest_filename' 仍留在 '$displaced'"
+        error_msg "Restore failed; the existing '$dest_filename' remains at '$displaced'"
         return 1
     fi
+    error_msg "還原失敗：無法將檔案移回目前資料夾"
+    error_msg "Restore failed: cannot move file back to current folder"
+    return 1
 }
 
 # 主程式

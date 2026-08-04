@@ -1100,6 +1100,52 @@ else
     test_fail "舊版垃圾桶日誌回退還原失敗"
 fi
 
+test_item "還原搬移失敗時不得先毀掉既有目的地"
+# 覆蓋確認通過後若先 /bin/rm -rf 目的地再 mv，mv 失敗就等於同時失去
+# 「本機既有檔案」與「還原」。搬移失敗必須讓兩邊都原封不動。
+# Deleting the destination before the mv means a failed mv loses the existing
+# local file AND the restore. A failed move must leave both sides untouched.
+setup
+cd "$TEST_WORK_DIR"
+restore_fail_bin="$TEST_WORK_DIR/restore-fail-bin"
+mkdir -p "$restore_fail_bin"
+cat > "$restore_fail_bin/mv" <<'EOF'
+#!/bin/sh
+# 只讓「從垃圾桶搬回」這一步失敗，其餘 mv 照常執行。
+for arg in "$@"; do
+    case "$arg" in
+        "$BETTER_RM_FAIL_MV_PREFIX"*)
+            echo "mv: simulated failure" >&2
+            exit 1
+            ;;
+    esac
+done
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$restore_fail_bin/mv"
+
+printf '%s\n' "TRASHED CONTENT" > restore_atomic.txt
+"$BETTER_RM" restore_atomic.txt
+printf '%s\n' "LOCAL CONTENT" > restore_atomic.txt
+restore_trash_item=$(find "$TEST_TRASH_DIR" -type f -name "restore_atomic.txt__*" | head -1)
+restore_fail_status=0
+BETTER_RM_FAIL_MV_PREFIX="$TEST_TRASH_DIR" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$restore_fail_bin:$PATH" \
+    "$BETTER_RM" -f --restore restore_atomic.txt >/dev/null 2>&1 ||
+    restore_fail_status=$?
+
+if [ "$restore_fail_status" -ne 0 ] && \
+   [ -f restore_atomic.txt ] && \
+   [ "$(cat restore_atomic.txt)" = "LOCAL CONTENT" ] && \
+   [ -n "$restore_trash_item" ] && [ -f "$restore_trash_item" ] && \
+   [ "$(cat "$restore_trash_item")" = "TRASHED CONTENT" ] && \
+   [ -z "$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'restore_atomic.txt.better-rm-restore-*' 2>/dev/null)" ]; then
+    test_pass "搬移失敗時目的地與垃圾桶項目都完好，且未殘留暫存檔"
+else
+    test_fail "搬移失敗時毀掉了既有目的地或垃圾桶項目 (status=$restore_fail_status)"
+fi
+
 # 清理測試產生的檔案
 rm -f test_restore.txt
 
