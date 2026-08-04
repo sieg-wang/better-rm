@@ -123,7 +123,16 @@ were fixed on 2026-08-04 and are no longer open. What replaced them:
   known-good / known-bad pair as its control (the download cannot be its own
   positive control). Failing either way aborts the install.
 - The first install runs `hook_is_trustworthy` on the freshly copied file and,
-  on failure, writes the fail-closed stub and exits non-zero.
+  on failure, writes the fail-closed stub and exits non-zero. Follow-up on
+  2026-08-04: when the probe itself cannot run, `hook_is_trustworthy` degrades to
+  "byte-identical to the source", and the first install used to accept that
+  silently — so on a machine with no usable `node` the install *looked*
+  behaviourally verified when only a `cmp` had run. It now prints the same
+  "could not run the hook self-check" warning the refresh path already printed
+  (`HOOK_PROBE_UNAVAILABLE` was assigned there and never read, which is what gave
+  it away). The degraded check still catches the truncated / 0-byte copy this
+  path exists to catch; what it cannot catch is a source that does not deny, and
+  validating the source stays `test-hooks.js`'s job.
 - `install-hooks.sh` no longer invokes `stat` at all; `cp` onto an existing file
   already preserves its inode and mode, which made the `chmod` redundant.
 

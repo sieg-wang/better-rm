@@ -695,6 +695,33 @@ else
     pass "an unavailable self-check never restores a permissive predecessor"
 fi
 
+# 第一次安裝（目的地本來就沒有 hook）在同一情況下必須說一樣的話。
+# hook_is_trustworthy 在探測跑不起來時退化成「與來源位元組相同」，那抓得到截斷的
+# 複製，但抓不到「來源自己不擋」。refresh 路徑會明講，第一次安裝若沉默，一台沒有可
+# 用 node 的機器就會拿到一個「看起來通過行為驗證、其實只做了 cmp」的安裝。
+# The first install — destination hook absent — has to say the same thing in the
+# same situation. hook_is_trustworthy degrades to "byte-identical to the source"
+# when the probe cannot run: that catches a truncated copy but not a source that
+# fails to deny. The refresh path says so; a silent first install would hand a
+# machine with no usable node an install that looks behaviourally verified when
+# only a cmp had run.
+FIRST_PROBE_HOME="$TMP_ROOT/first-install-probe-home"
+mkdir -p "$FIRST_PROBE_HOME/.claude"
+printf '{"env":{"KEEP_ME":"yes"}}\n' > "$FIRST_PROBE_HOME/.claude/settings.json"
+FIRST_PROBE_OUT="$TMP_ROOT/first-install-probe.out"
+(
+    cd "$TMP_ROOT"
+    PATH="$PROBE_SHIM_BIN:$PATH" HOME="$FIRST_PROBE_HOME" CLAUDE_CONFIG_DIR= "$INSTALLER" -a claude --global
+) > "$FIRST_PROBE_OUT" 2>&1
+if grep -q "self-check" "$FIRST_PROBE_OUT"; then
+    pass "a first install reports that the self-check could not run"
+else
+    fail "a first install reports that the self-check could not run"
+fi
+assert_equal "a first install without a self-check still writes the source hook" \
+    "$(file_hash "$SCRIPT_DIR/hooks/protect-important-paths.js")" \
+    "$(file_hash "$FIRST_PROBE_HOME/.claude/protect-important-paths.js")"
+
 # A failing backup copy aborts under `set -e` BEFORE any of the hardening above
 # can run, leaving whatever was on disk registered and in place. On a full disk
 # that is exactly the 0-byte hook someone re-ran the installer to repair, so the

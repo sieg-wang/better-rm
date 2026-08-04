@@ -278,6 +278,22 @@ resolve_shared_hook_for_settings() {
             fi
             exit 1
         fi
+        # 探測本身跑不起來時，hook_is_trustworthy 會退化成「與來源位元組相同」。那
+        # 仍抓得到截斷／0 byte 的複製（正是這段防的失敗模式），但抓不到「來源自己
+        # 不擋」。refresh 路徑遇到同一情況會明講，第一次安裝卻沉默 —— 於是一台沒有
+        # 可用 node 的機器上，安裝看起來像通過了行為驗證，實際上只跑了 cmp。
+        # HOOK_PROBE_UNAVAILABLE 在上面被設為 false 卻從未被讀取，就是這個缺口。
+        # When the probe itself cannot run, hook_is_trustworthy degrades to
+        # "byte-identical to the source". That still catches the truncated or
+        # 0-byte copy this block exists to catch, but not a source that fails to
+        # deny. The refresh path says so out loud in exactly this situation while
+        # the first install stayed silent, so on a machine with no usable node the
+        # install looked behaviourally verified when only a cmp had run.
+        # HOOK_PROBE_UNAVAILABLE was set to false above and then never read.
+        if [ "$HOOK_PROBE_UNAVAILABLE" = true ]; then
+            warning "無法執行 hook 自我檢測，已改以位元組比對確認與來源完全相同"
+            warning "Could not run the hook self-check; verified byte-identical to the source instead"
+        fi
     elif ! cmp -s "$HOOK_SOURCE_PATH" "$HOOK_PATH"; then
         # 保留可讀但過期的 runtime hook，等於讓 hook 的安全修補停在原始碼樹裡，
         # 永遠到不了 agent 實際執行的檔案，因此內容不同時必須更新。
