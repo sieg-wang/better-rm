@@ -695,6 +695,87 @@ else
     pass "an unavailable self-check never restores a permissive predecessor"
 fi
 
+# A failing backup copy aborts under `set -e` BEFORE any of the hardening above
+# can run, leaving whatever was on disk registered and in place. On a full disk
+# that is exactly the 0-byte hook someone re-ran the installer to repair, so the
+# repair attempt silently leaves the guard disarmed. The shim fails only the
+# timestamped backup copy, which is the shape a real ENOSPC produces here.
+FAILING_CP_BIN="$TMP_ROOT/failing-backup-cp-bin"
+mkdir -p "$FAILING_CP_BIN"
+cat > "$FAILING_CP_BIN/cp" <<'EOF'
+#!/bin/sh
+for arg in "$@"; do
+    case "$arg" in
+        *.better-rm.bak.*)
+            echo "cp: $arg: No space left on device" >&2
+            exit 1
+            ;;
+    esac
+done
+exec /bin/cp "$@"
+EOF
+chmod +x "$FAILING_CP_BIN/cp"
+
+backup_failure_case() { # name, writer -> prints hook path
+    local name="$1" writer="$2"
+    local home="$TMP_ROOT/$name"
+    mkdir -p "$home/.claude"
+    local hook="$home/.claude/protect-important-paths.js"
+    "$writer" "$hook"
+    printf '{"env":{"KEEP_ME":"yes"}}\n' > "$home/.claude/settings.json"
+    (
+        cd "$TMP_ROOT"
+        PATH="$FAILING_CP_BIN:$PATH" HOME="$home" CLAUDE_CONFIG_DIR= "$INSTALLER" -a claude --global >/dev/null 2>&1
+    )
+    printf '%s' "$hook"
+}
+BACKUP_FAIL_HOOK=$(backup_failure_case backup-cp-fails write_empty_hook)
+if hook_is_permissive "$BACKUP_FAIL_HOOK"; then
+    fail "a failing backup copy never leaves a permissive hook registered"
+else
+    pass "a failing backup copy never leaves a permissive hook registered"
+fi
+
+# ... but a predecessor that DOES deny must not be downgraded to the stub just
+# because the backup could not be written: nothing was touched, so the working
+# hook stays exactly as it was.
+write_working_variant_hook() {
+    cat "$SCRIPT_DIR/hooks/protect-important-paths.js" > "$1"
+    printf '\n// older but working runtime hook\n' >> "$1"
+}
+WORKING_PREDECESSOR=$(backup_failure_case backup-cp-fails-working write_working_variant_hook)
+if hook_is_permissive "$WORKING_PREDECESSOR"; then
+    fail "a failing backup copy leaves a working predecessor untouched"
+else
+    assert_contains "a failing backup copy leaves a working predecessor untouched" \
+        "$(cat "$WORKING_PREDECESSOR")" "older but working runtime hook"
+fi
+
+# When even the stub cannot be written, the predecessor is what stays on disk.
+# Claiming "it now fails closed" there would send the user away believing they
+# are protected, so the message must say the opposite.
+READONLY_HOME="$TMP_ROOT/readonly-hook-home"
+mkdir -p "$READONLY_HOME/.claude"
+READONLY_HOOK="$READONLY_HOME/.claude/protect-important-paths.js"
+write_empty_hook "$READONLY_HOOK"
+printf '{"env":{"KEEP_ME":"yes"}}\n' > "$READONLY_HOME/.claude/settings.json"
+chmod 444 "$READONLY_HOOK"
+READONLY_OUTPUT=$(
+    cd "$TMP_ROOT"
+    HOME="$READONLY_HOME" CLAUDE_CONFIG_DIR= "$INSTALLER" -a claude --global 2>&1 || true
+)
+chmod 644 "$READONLY_HOOK"
+if printf '%s' "$READONLY_OUTPUT" | grep -q 'may allow everything'; then
+    pass "an unwritable stub is reported as unverified, not as fail-closed"
+else
+    fail "an unwritable stub is reported as unverified, not as fail-closed"
+fi
+if printf '%s' "$READONLY_OUTPUT" | grep -q 'it now fails closed'; then
+    fail "an unwritable stub never claims the hook fails closed"
+else
+    pass "an unwritable stub never claims the hook fails closed"
+fi
+
 # Missing shared hook fails before touching settings.
 MISSING_SOURCE="$TMP_ROOT/missing-source"
 mkdir -p "$MISSING_SOURCE"

@@ -383,7 +383,34 @@ apply_pending_hook_refresh() {
         backup_path="$HOOK_PATH.better-rm.bak.$(date -u +%Y%m%dT%H%M%SZ).${suffix}"
         suffix=$((suffix + 1))
     done
-    cp "$HOOK_PATH" "$backup_path"
+    # 備份失敗就不能繼續 —— 沒有備份就沒有復原路徑。但也不能只是讓 set -e 中止：
+    # 那樣會在「什麼都還沒做」的狀態下離開，而磁碟上留著的是舊 hook。使用者重跑
+    # 安裝程式最常見的原因，正是那份舊 hook 已經壞掉（例如舊版 `|| true` 留下的
+    # 0 byte 檔案，而磁碟依然是滿的），於是一個放行一切的 hook 就這樣繼續掛著。
+    # 因此先判斷舊 hook 可不可信：可信就原封不動留著（不要無謂降級），不可信才換成
+    # fail-closed stub。
+    # A failed backup means the refresh cannot proceed: without a backup there is
+    # no recovery path. Letting set -e abort here is not enough either — that
+    # leaves the OLD hook on disk, and the usual reason to re-run the installer
+    # is that the old hook is already broken (the 0-byte file left by the earlier
+    # `|| true` bug, with the disk still full), so an allow-everything hook would
+    # simply stay registered. The old hook is therefore checked: trustworthy, it
+    # is left exactly as it is; untrustworthy, it is replaced with the stub.
+    if ! cp "$HOOK_PATH" "$backup_path"; then
+        error "無法建立備份，因此不更新共用 hook：$backup_path"
+        error "Could not create the backup, so the shared hook was not updated: $backup_path"
+        if hook_is_trustworthy "$HOOK_PATH"; then
+            error "現有的共用 hook 未被更動，仍會擋下受保護的刪除：$HOOK_PATH"
+            error "The existing shared hook is untouched and still denies protected deletions: $HOOK_PATH"
+        elif write_fail_closed_hook_stub "$HOOK_PATH"; then
+            error "現有的共用 hook 無法通過驗證，已改為 fail-closed（拒絕所有工具呼叫）"
+            error "The existing shared hook could not be verified; it now fails closed (every tool call is denied)"
+        else
+            error "現有的共用 hook 無法通過驗證，連 fail-closed stub 也寫不進去：$HOOK_PATH 目前的內容可能會放行所有刪除"
+            error "The existing shared hook could not be verified and the stub could not be written either; what is at $HOOK_PATH may allow everything"
+        fi
+        exit 1
+    fi
 
     # 就地覆寫內容（不換檔）：inode 不變，權限與擁有者自然保留，所以不需要先讀
     # 原本的 mode，也就完全不必用 stat —— stat 的旗標在 BSD 與 GNU userland 並不
@@ -448,12 +475,18 @@ apply_pending_hook_refresh() {
     # call is refused under the claude matcher (Read/Write/Edit still work), and
     # cursor's matcher is `.*`, so EVERY tool is refused there. Re-running the
     # installer recovers it, but it is a hard stop until then.
-    if ! write_fail_closed_hook_stub "$HOOK_PATH"; then
-        error "連 fail-closed stub 都無法寫入，$HOOK_PATH 的內容不可信任"
-        error "Could not even write the fail-closed stub; $HOOK_PATH must not be trusted"
+    # 訊息必須跟著 stub 是否真的寫成功而分歧：stub 寫失敗時磁碟上留下的是未經驗證
+    # 的舊內容（可能放行一切），此時再印「已改為 fail-closed」就是騙人。
+    # The message has to branch on whether the stub was actually written: if it
+    # was not, what remains on disk is the unverified predecessor, which may
+    # allow everything — claiming "it now fails closed" there would be a lie.
+    if write_fail_closed_hook_stub "$HOOK_PATH"; then
+        error "共用 hook 無法更新，前一份也無法驗證，已改為 fail-closed（拒絕所有工具呼叫）"
+        error "The shared hook could not be updated and the previous one could not be verified; it now fails closed (every tool call is denied)"
+    else
+        error "共用 hook 無法更新，連 fail-closed stub 也寫不進去：$HOOK_PATH 目前的內容未經驗證，可能會放行所有刪除"
+        error "The shared hook could not be updated and the fail-closed stub could not be written either; what is at $HOOK_PATH is unverified and may allow everything"
     fi
-    error "共用 hook 無法更新，前一份也無法驗證，已改為 fail-closed（拒絕所有工具呼叫）"
-    error "The shared hook could not be updated and the previous one could not be verified; it now fails closed (every tool call is denied)"
     error "請從備份還原 / Restore it from the backup: $backup_path"
     exit 1
 }

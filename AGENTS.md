@@ -109,6 +109,38 @@ This project uses GitHub Copilot, Google Antigravity, Pi, Grok Build, and AI-ass
 
 3. **Fallback Mechanisms**: Always provide fallbacks (e.g., md5sum → sha256sum → "nohash")
 
+## Known gaps in the hook install path (deliberately not fixed yet)
+
+Recorded during the 2026-08 hook review. Each was reproduced; none is fixed
+here, so nobody has to rediscover them.
+
+- **The release download has no integrity check.** `download_release_file`
+  (used when `hooks/` is missing from the checkout) is a bare `curl -fsSL`
+  followed only by `[ -f ]` and `[ -r ]`. A captive portal that answers with an
+  HTML page installs that page as the runtime hook: the install exits 0 with no
+  warning, and the hook then throws a SyntaxError on every invocation — which is
+  a non-blocking exit for PreToolUse, i.e. it silently allows everything. A
+  checksum or a "does this file actually deny" probe on the downloaded file
+  would close it. Note this also limits the claim made in
+  `install-hooks.sh`'s `hook_is_trustworthy`: validating the source is normally
+  `test-hooks.js`'s job, but a network accident can supply a source that never
+  passed through it.
+- **First install is not probed.** `resolve_shared_hook_for_settings` copies the
+  hook when the destination is missing, and no trust probe runs on that path;
+  `hook_is_trustworthy` is only used by the refresh. A corrupted first install is
+  therefore accepted silently.
+- **`install-hooks.sh:1199` and `:1225`** (OpenCode plugin and runtime) still use
+  `stat -f '%Lp' || stat -c '%a'`, which yields concatenated garbage on GNU
+  userland and aborts the install mid-write. The shared-hook path no longer reads
+  the mode at all; these two were left alone as a separate change. No test
+  reaches that branch today, which is why CI never caught it.
+- **A broken `sed` extraction would misdirect.** `test-hooks.js` extracts
+  `hook_denies_protected_deletion` and `write_fail_closed_hook_stub` from
+  `install-hooks.sh` with a `sed` range ending at `/^}/`. Re-indenting the
+  embedded JS so a line starts at column zero truncates the extraction, and the
+  resulting failure message points at the probe rather than at the extraction.
+  An assertion on the extracted line count would save that trip.
+
 ## Suggested Future Enhancements
 
 ### High Priority
