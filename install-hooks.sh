@@ -264,17 +264,95 @@ resolve_shared_hook_for_settings() {
 }
 
 # 註冊成功後才替換過期的 runtime hook（由 main 在 agent 安裝完成後呼叫）
-# 實測 runtime hook 是否真的會擋下受保護的刪除。
+# 實測一份 hook 是否真的會擋下受保護的刪除。
 # 只看寫入指令的回傳值不夠：截斷或 0 byte 的 hook 一樣「寫入成功」，執行起來卻是
-# exit 0、無輸出，等同放行一切。payload 純粹是資料，永遠不會被執行。
-# Prove the runtime hook still denies a protected deletion. The write's exit
-# status is not enough: a truncated or 0-byte file writes "successfully" yet
-# runs as exit 0 with no output, i.e. it allows everything. The payload is data
-# for the parser and is never executed.
+# exit 0、無輸出，在 Claude Code／Copilot 契約下就是「允許」。
+# 三個必要條件缺一不可：
+#  1. 每個 payload 都要 deny。只測一個 payload 只能證明「沒被截斷」，證明不了它
+#     真的在保護 —— 只擋該 payload、其餘全放行的 hook 也會通過。
+#  2. 結束碼必須為 0。印出 deny 卻以 1 結束，在 Claude Code PreToolUse 屬於
+#     「非阻擋錯誤」，工具照樣會執行。
+#  3. 必須有逾時。卡住不結束的 hook 會讓安裝程式永遠停在這裡（runtime 註冊本身
+#     有 timeout: 5，安裝程式以前完全沒有）。
+# 界線講清楚：通過只代表「這幾個目標擋得住」，不等於證明所有保護規則都完好。
+# Prove a hook really denies protected deletions. A write's exit status is not
+# enough: a truncated or 0-byte file writes "successfully" yet runs as exit 0
+# with no output, which the Claude Code and Copilot contracts read as allow.
+# All three conditions are necessary: every payload must be denied (one payload
+# only proves the file is not truncated, not that it protects anything); the
+# exit status must be 0 (printing deny while exiting 1 is a NON-blocking error
+# for PreToolUse, so the tool still runs); and there must be a timeout (a hook
+# that never terminates would hang the installer forever). Passing means these
+# targets are denied — it is not proof that every protection rule is intact.
+# The payloads are data for the parser and are never executed.
+# 內嵌的 JS 全部縮排，讓函式主體中沒有任何一行以 `}` 起始 —— 測試會用
+# `sed -n '/^hook_denies_protected_deletion()/,/^}/p'` 把這個函式原封不動抽出來
+# 直接測，行首的 `}` 會讓抽取提早結束。
+# The embedded JS is indented so that no line inside the body starts with `}`:
+# the tests extract this function verbatim with a sed range ending at /^}/ and
+# run it directly, which a column-zero brace would truncate.
 hook_denies_protected_deletion() {
-    printf '%s' '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"},"cwd":"/"}' \
-        | node "$1" 2>/dev/null \
-        | grep -q '"permissionDecision":"deny"'
+    node -e '
+    const { spawnSync } = require("child_process");
+    const hookPath = process.argv[1];
+    const commands = [
+      "rm -rf /",
+      "rm -rf /etc",
+      "rm -rf /usr",
+      "rmdir /var",
+      "rm -rf /project/.git",
+    ];
+    for (const command of commands) {
+      const result = spawnSync(process.execPath, [hookPath], {
+        input: JSON.stringify({
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command },
+          cwd: "/project",
+        }),
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      if (result.error || result.status !== 0) process.exit(1);
+      if (!/"permissionDecision":"deny"/.test(result.stdout)) process.exit(1);
+    }
+    process.exit(0);
+' "$1" 2>/dev/null
+}
+
+# 判斷磁碟上這份 hook 能不能信任。
+# 行為優先；只有在「探測本身壞掉」時才退回位元組比對，而且只承認與已知良好的來源
+# 檔完全相同的檔案，絕不承認任何無法驗證的檔案。
+# 正對照是關鍵：如果連 HOOK_SOURCE_PATH（剛複製過來的已知良好來源）都測不出
+# deny，那壞掉的是探測工具（node 不可用、sandbox 限制…），而不是候選檔案。此時
+# 若還「保險起見」把候選檔換成來歷不明的前任，反而會把剛寫好的正確 hook 換成有
+# 問題的舊檔 —— 那正是這個函式存在的理由。
+# Decide whether the hook on disk can be trusted. Behaviour first; the byte
+# comparison is only a fallback for when the PROBE itself is broken, and it
+# accepts nothing except a file identical to the known-good source. The positive
+# control is the point: if even HOOK_SOURCE_PATH cannot be shown to deny, the
+# probe is broken (node unavailable, sandboxing, ...) rather than the candidate,
+# and "restoring" an unknown predecessor over a freshly written correct hook
+# would be the actual damage.
+# 界線：這個機制偵測的是「寫出來的檔案相對於來源被破壞」。如果來源檔本身就是壞的
+# hook，正對照同樣測不出 deny，會被判定成「探測工具壞掉」而接受它 —— 來源的正確性
+# 由 test-hooks.js 負責，不是安裝程式的職責。
+# Limit: this detects CORRUPTION of the written file relative to the source. If
+# the source hook is itself bad, the control fails too and that is indistinguishable
+# from a broken probe, so it is accepted — validating the source is test-hooks.js's
+# job, not the installer's.
+hook_is_trustworthy() {
+    local candidate="$1"
+    if hook_denies_protected_deletion "$candidate"; then
+        return 0
+    fi
+    if hook_denies_protected_deletion "$HOOK_SOURCE_PATH"; then
+        # 探測工具正常，所以是候選檔案真的不擋。
+        # The probe works, so the candidate genuinely fails to deny.
+        return 1
+    fi
+    HOOK_PROBE_UNAVAILABLE=true
+    cmp -s "$HOOK_SOURCE_PATH" "$candidate"
 }
 
 # 寫入一個必定 fail-closed 的 stub：沿用本專案既有約定，exit 2 對 Claude Code
@@ -324,42 +402,60 @@ apply_pending_hook_refresh() {
     # Note: an unaliased `cp` onto an existing file preserves the destination's
     # mode and inode just the same. cat is used here only to make "no mode is
     # needed" obvious, not because cp is unusable.
-    if ! cat "$HOOK_SOURCE_PATH" > "$HOOK_PATH" \
-        || ! hook_denies_protected_deletion "$HOOK_PATH"; then
-        # 寫入可能只完成一半。截斷或 0 byte 的 hook 會以 exit 0、空輸出結束，
-        # 而那被每個 agent 契約解讀為「允許」——防護等於被完全解除，比原本那份
-        # 過期的 hook 還危險。因此還原之後必須驗證，不能只看回傳值。
-        # The write may have half-completed. A truncated or 0-byte hook exits 0
-        # with no output, which every agent contract reads as ALLOW: the guard
-        # would be fully disarmed, which is worse than the stale hook it
-        # replaced. The restore therefore has to be verified, not assumed.
-        if cat "$backup_path" > "$HOOK_PATH" 2>/dev/null && cmp -s "$backup_path" "$HOOK_PATH"; then
-            error "更新共用 hook 失敗，已還原並驗證原本的檔案：$HOOK_PATH"
-            error "Failed to update shared hook; restored and verified the previous file: $HOOK_PATH"
-            exit 1
+    HOOK_PROBE_UNAVAILABLE=false
+    if cat "$HOOK_SOURCE_PATH" > "$HOOK_PATH" && hook_is_trustworthy "$HOOK_PATH"; then
+        if [ "$HOOK_PROBE_UNAVAILABLE" = true ]; then
+            warning "無法執行 hook 自我檢測，已改以位元組比對確認與來源完全相同"
+            warning "Could not run the hook self-check; verified byte-identical to the source instead"
         fi
+        success "已更新共用 hook：$HOOK_PATH"
+        success "Updated shared hook: $HOOK_PATH"
+        info "備份檔案 / Backup: $backup_path"
+        return 0
+    fi
 
-        # 還原也失敗：此刻磁碟上的 hook 可能是截斷的，也就是「全部允許」。
-        # 寧可留下一個必定阻擋的 stub，也不要留下一個不擋任何東西的檔案。
-        # 用 shell 內建的 printf 寫入，才不會再次依賴剛剛失敗的那個外部工具。
-        # The restore failed too, so the file on disk may be truncated — that is
-        # the allow-everything state. Leaving a stub that blocks everything is
-        # strictly safer than leaving a file that blocks nothing. It is written
-        # with the printf builtin so it does not depend on the external tool
-        # that just failed.
-        if ! write_fail_closed_hook_stub "$HOOK_PATH"; then
-            error "連 fail-closed stub 都無法寫入，$HOOK_PATH 的內容不可信任"
-            error "Could not even write the fail-closed stub; $HOOK_PATH must not be trusted"
-        fi
-        error "更新與還原共用 hook 都失敗，已改為 fail-closed（拒絕所有工具呼叫）"
-        error "Both the update and the restore failed; the hook now fails closed (every tool call is denied)"
-        error "請從備份還原 / Restore it from the backup: $backup_path"
+    # 寫入可能只完成一半。截斷或 0 byte 的 hook 會以 exit 0、空輸出結束，在 Claude
+    # Code／Copilot 契約下就是「允許」——防護等於被完全解除，比原本那份過期的
+    # hook 還危險。因此「還原」同樣要驗行為，不能只用 cmp：cmp 只證明位元組等於
+    # 備份，證明不了那份備份曾經是能用的 hook。舊版 `|| true` 留下 0 byte 檔案後、
+    # 使用者再跑一次安裝想修好它，就正是這個情境。
+    # The write may have half-completed. A truncated or 0-byte hook exits 0 with
+    # no output, which the Claude Code and Copilot contracts read as ALLOW: the
+    # guard would be fully disarmed, which is worse than the stale hook it
+    # replaced. The restore is therefore verified by BEHAVIOUR, not by cmp alone
+    # — cmp only proves the bytes match the backup, never that the backup was a
+    # working hook. Re-running the installer to repair the 0-byte file left by
+    # the earlier `|| true` bug is exactly that case.
+    if cat "$backup_path" > "$HOOK_PATH" 2>/dev/null \
+        && cmp -s "$backup_path" "$HOOK_PATH" \
+        && hook_is_trustworthy "$HOOK_PATH"; then
+        error "更新共用 hook 失敗，已還原並驗證原本的檔案：$HOOK_PATH"
+        error "Failed to update shared hook; restored and verified the previous file: $HOOK_PATH"
         exit 1
     fi
 
-    success "已更新共用 hook：$HOOK_PATH"
-    success "Updated shared hook: $HOOK_PATH"
-    info "備份檔案 / Backup: $backup_path"
+    # 走到這裡表示：新檔案不可信，前一份也不可信（或根本還原不了）。磁碟上的東西
+    # 可能是截斷的，也就是「全部允許」。寧可留下一個必定阻擋的 stub，也不要留下一
+    # 個什麼都不擋的檔案。用 shell 內建的 printf 寫入，才不會再依賴剛失敗的外部
+    # 工具。代價要講明白：stub 在位時，claude 的 matcher 是 Bash，所以每個 Bash
+    # 呼叫都會被擋（Read/Write/Edit 仍可用）；cursor 的 matcher 是 `.*`，會擋下
+    # 所有工具。重跑安裝程式即可復原，但這確實是一個硬停點。
+    # Neither the new file nor the predecessor can be trusted (or the restore
+    # itself failed). What is on disk may be truncated, i.e. allow-everything.
+    # A stub that blocks everything is strictly safer than a file that blocks
+    # nothing; printf is a builtin so it does not depend on the tool that just
+    # failed. The cost, stated plainly: while the stub is in place every Bash
+    # call is refused under the claude matcher (Read/Write/Edit still work), and
+    # cursor's matcher is `.*`, so EVERY tool is refused there. Re-running the
+    # installer recovers it, but it is a hard stop until then.
+    if ! write_fail_closed_hook_stub "$HOOK_PATH"; then
+        error "連 fail-closed stub 都無法寫入，$HOOK_PATH 的內容不可信任"
+        error "Could not even write the fail-closed stub; $HOOK_PATH must not be trusted"
+    fi
+    error "共用 hook 無法更新，前一份也無法驗證，已改為 fail-closed（拒絕所有工具呼叫）"
+    error "The shared hook could not be updated and the previous one could not be verified; it now fails closed (every tool call is denied)"
+    error "請從備份還原 / Restore it from the backup: $backup_path"
+    exit 1
 }
 
 # 取得專案根目錄（所有支援的 JSON 設定預設放在專案 root）

@@ -609,6 +609,92 @@ else
     pass "a silently truncated hook write never leaves an allow-everything hook"
 fi
 
+# The restore-succeeded branch: the write fails but the restore works, so the
+# installer falls back to the PREVIOUS hook. Matching the backup byte for byte
+# says nothing about whether that backup was ever a working hook — and the most
+# likely reason someone re-runs the installer is to repair a hook that is
+# already broken. Both shapes of a broken predecessor are pinned here.
+restore_branch_case() { # name, writer, expectation label
+    local name="$1" writer="$2"
+    local home="$TMP_ROOT/$name"
+    mkdir -p "$home/.claude"
+    local hook="$home/.claude/protect-important-paths.js"
+    "$writer" "$hook"
+    printf '{"env":{"KEEP_ME":"yes"}}\n' > "$home/.claude/settings.json"
+    (
+        cd "$TMP_ROOT"
+        PATH="$SOURCE_READ_FAILS_BIN:$PATH" HOME="$home" CLAUDE_CONFIG_DIR= "$INSTALLER" -a claude --global >/dev/null 2>&1
+    )
+    printf '%s' "$hook"
+}
+write_empty_hook() { : > "$1"; }
+write_permissive_hook() {
+    printf '%s\n' '#!/usr/bin/env node' \
+        '// syntactically valid leftover that allows everything' \
+        'process.stdin.resume();' \
+        'process.stdin.on("end", () => process.exit(0));' > "$1"
+}
+
+# `cat` fails only when reading the hook SOURCE, so the write fails while the
+# restore from the backup still succeeds — the shape of a full disk.
+SOURCE_READ_FAILS_BIN="$TMP_ROOT/source-read-fails-bin"
+mkdir -p "$SOURCE_READ_FAILS_BIN"
+cat > "$SOURCE_READ_FAILS_BIN/cat" <<'EOF'
+#!/bin/sh
+case "$1" in
+    */hooks/protect-important-paths.js) exit 1 ;;
+esac
+exec /bin/cat "$@"
+EOF
+chmod +x "$SOURCE_READ_FAILS_BIN/cat"
+
+EMPTY_PREDECESSOR=$(restore_branch_case restore-empty-predecessor write_empty_hook)
+if hook_is_permissive "$EMPTY_PREDECESSOR"; then
+    fail "restoring a 0-byte predecessor never ends at allow-everything"
+else
+    pass "restoring a 0-byte predecessor never ends at allow-everything"
+fi
+PERMISSIVE_PREDECESSOR=$(restore_branch_case restore-permissive-predecessor write_permissive_hook)
+if hook_is_permissive "$PERMISSIVE_PREDECESSOR"; then
+    fail "restoring a valid-but-permissive predecessor never ends at allow-everything"
+else
+    pass "restoring a valid-but-permissive predecessor never ends at allow-everything"
+fi
+
+# When only the SELF-CHECK cannot run, the freshly written file is already the
+# known-good source. Restoring the predecessor over it would replace a correct
+# hook with a broken one, so the probe failure must be distinguished from a
+# hook failure by running the same probe against the source as a control.
+PROBE_HOME="$TMP_ROOT/probe-unavailable-home"
+mkdir -p "$PROBE_HOME/.claude"
+PROBE_HOOK="$PROBE_HOME/.claude/protect-important-paths.js"
+write_empty_hook "$PROBE_HOOK"
+printf '{"env":{"KEEP_ME":"yes"}}\n' > "$PROBE_HOME/.claude/settings.json"
+PROBE_SHIM_BIN="$TMP_ROOT/probe-unavailable-bin"
+mkdir -p "$PROBE_SHIM_BIN"
+cat > "$PROBE_SHIM_BIN/node" <<EOF
+#!/bin/sh
+# Everything node does works EXCEPT running the hook self-check.
+if [ "\$1" = "-" ]; then exec "$REAL_NODE" "\$@"; fi
+exit 1
+EOF
+chmod +x "$PROBE_SHIM_BIN/node"
+if (
+    cd "$TMP_ROOT"
+    PATH="$PROBE_SHIM_BIN:$PATH" HOME="$PROBE_HOME" CLAUDE_CONFIG_DIR= "$INSTALLER" -a claude --global >/dev/null 2>&1
+); then
+    pass "an unavailable self-check does not fail an otherwise correct install"
+else
+    fail "an unavailable self-check does not fail an otherwise correct install"
+fi
+assert_equal "an unavailable self-check keeps the freshly written hook" \
+    "$(file_hash "$SCRIPT_DIR/hooks/protect-important-paths.js")" "$(file_hash "$PROBE_HOOK")"
+if hook_is_permissive "$PROBE_HOOK"; then
+    fail "an unavailable self-check never restores a permissive predecessor"
+else
+    pass "an unavailable self-check never restores a permissive predecessor"
+fi
+
 # Missing shared hook fails before touching settings.
 MISSING_SOURCE="$TMP_ROOT/missing-source"
 mkdir -p "$MISSING_SOURCE"
