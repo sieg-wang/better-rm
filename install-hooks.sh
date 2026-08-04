@@ -233,35 +233,27 @@ resolve_shared_hook_for_settings() {
     settings_dir="$(dirname -- "$SETTINGS_PATH")"
     HOOK_PATH="$settings_dir/protect-important-paths.js"
 
+    PENDING_HOOK_REFRESH=false
+
     if [ ! -f "$HOOK_PATH" ] || [ ! -r "$HOOK_PATH" ]; then
         mkdir -p -- "$(dirname -- "$HOOK_PATH")"
         cp "$HOOK_SOURCE_PATH" "$HOOK_PATH"
     elif ! cmp -s "$HOOK_SOURCE_PATH" "$HOOK_PATH"; then
         # 保留可讀但過期的 runtime hook，等於讓 hook 的安全修補停在原始碼樹裡，
-        # 永遠到不了 agent 實際執行的檔案，因此內容不同時必須更新（先備份）。
+        # 永遠到不了 agent 實際執行的檔案，因此內容不同時必須更新。
+        # 但替換動作要等設定註冊成功之後才做：先換檔再註冊失敗，會留下
+        # 「hook 已被換掉、卻沒有任何註冊」的半套安裝。
         # Keeping a readable but stale runtime hook strands hook security fixes
-        # in the source checkout, so a differing runtime file is refreshed after
-        # a timestamped backup.
+        # in the source checkout. The replacement is deferred until after the
+        # settings merge succeeds: replacing first leaves the install
+        # half-applied (new file on disk, nothing registered) if the merge
+        # aborts.
         if [ -L "$HOOK_PATH" ]; then
             error "拒絕覆蓋符號連結的共用 hook：$HOOK_PATH"
             error "Refusing to replace symbolic link shared hook: $HOOK_PATH"
             exit 1
         fi
-        local backup_path
-        backup_path="$HOOK_PATH.better-rm.bak.$(date -u +%Y%m%dT%H%M%SZ)"
-        local suffix=1
-        while [ -e "$backup_path" ]; do
-            backup_path="$HOOK_PATH.better-rm.bak.$(date -u +%Y%m%dT%H%M%SZ).${suffix}"
-            suffix=$((suffix + 1))
-        done
-        local hook_mode
-        hook_mode=$(stat -f '%Lp' "$HOOK_PATH" 2>/dev/null || stat -c '%a' "$HOOK_PATH")
-        cp "$HOOK_PATH" "$backup_path"
-        cp "$HOOK_SOURCE_PATH" "$HOOK_PATH"
-        chmod "$hook_mode" "$HOOK_PATH"
-        success "已更新共用 hook：$HOOK_PATH"
-        success "Updated shared hook: $HOOK_PATH"
-        info "備份檔案 / Backup: $backup_path"
+        PENDING_HOOK_REFRESH=true
     fi
 
     if [ ! -f "$HOOK_PATH" ] || [ ! -r "$HOOK_PATH" ]; then
@@ -269,6 +261,41 @@ resolve_shared_hook_for_settings() {
         error "Failed to locate shared hook: $HOOK_PATH"
         exit 1
     fi
+}
+
+# 註冊成功後才替換過期的 runtime hook（由 main 在 agent 安裝完成後呼叫）
+# Replace a stale runtime hook only after registration succeeded; main calls
+# this once the agent installer returned without error.
+apply_pending_hook_refresh() {
+    [ "${PENDING_HOOK_REFRESH:-false}" = true ] || return 0
+    PENDING_HOOK_REFRESH=false
+
+    local backup_path
+    backup_path="$HOOK_PATH.better-rm.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+    local suffix=1
+    while [ -e "$backup_path" ]; do
+        backup_path="$HOOK_PATH.better-rm.bak.$(date -u +%Y%m%dT%H%M%SZ).${suffix}"
+        suffix=$((suffix + 1))
+    done
+    cp "$HOOK_PATH" "$backup_path"
+
+    # 就地覆寫內容而非換檔：inode 不變，權限與擁有者自然保留，因此完全不需要
+    # stat/chmod —— stat 的旗標在 BSD 與 GNU userland 並不相容
+    # （GNU 的 `stat -f '%Lp'` 會印出 '?p' 且結束碼為 0，接著 chmod 就會失敗）。
+    # Overwrite the content in place instead of replacing the file: the inode is
+    # kept, so mode and owner survive without stat/chmod — stat's flags are not
+    # portable between BSD and GNU userland (GNU `stat -f '%Lp'` prints '?p' and
+    # exits 0, and the chmod that follows then fails).
+    if ! cat "$HOOK_SOURCE_PATH" > "$HOOK_PATH"; then
+        cat "$backup_path" > "$HOOK_PATH" || true
+        error "更新共用 hook 失敗，已還原原本的檔案：$HOOK_PATH"
+        error "Failed to update shared hook; restored the previous file: $HOOK_PATH"
+        exit 1
+    fi
+
+    success "已更新共用 hook：$HOOK_PATH"
+    success "Updated shared hook: $HOOK_PATH"
+    info "備份檔案 / Backup: $backup_path"
 }
 
 # 取得專案根目錄（所有支援的 JSON 設定預設放在專案 root）
@@ -1186,6 +1213,13 @@ main() {
             exit 2
             ;;
     esac
+
+    # 只有在上面的安裝（含設定註冊）成功回來後，才替換過期的 runtime hook。
+    # set -e 會讓任何失敗在這之前就中止，因此不會出現「換了 hook 卻沒註冊」。
+    # The stale runtime hook is replaced only after the installer above returned
+    # successfully, registration included. set -e aborts before this point on any
+    # failure, so a replaced-but-unregistered hook cannot happen.
+    apply_pending_hook_refresh
 }
 
 main "$@"

@@ -444,6 +444,73 @@ assert_equal "refreshed runtime hook is registered once" "1" "$(hook_count "$STA
 assert_equal "an up-to-date runtime hook is not rewritten or re-backed-up" "1" \
     "$(find "$STALE_HOME/.claude" -maxdepth 1 -name 'protect-important-paths.js.better-rm.bak.*' | wc -l | tr -d ' ')"
 
+# The refresh must not depend on `stat`: its flags are not portable between BSD
+# and GNU userland. GNU `stat -f '%Lp'` reports FILE SYSTEM status, prints '?'
+# for the unknown %L directive and exits 0, so a BSD-first probe silently yields
+# '?p' on Linux/WSL and the chmod built from it fails mid-install. This shim
+# reproduces that shape on any platform: every stat call returns junk with a
+# success status, so any surviving stat dependency shows up as a failed install.
+STAT_HOME="$TMP_ROOT/hostile-stat-home"
+mkdir -p "$STAT_HOME/.claude"
+STAT_HOOK="$STAT_HOME/.claude/protect-important-paths.js"
+printf '#!/usr/bin/env node\n// stale hook, hostile stat\n' > "$STAT_HOOK"
+printf '{"env":{"KEEP_ME":"yes"}}\n' > "$STAT_HOME/.claude/settings.json"
+chmod 600 "$STAT_HOOK"
+STAT_SHIM_BIN="$TMP_ROOT/hostile-stat-bin"
+mkdir -p "$STAT_SHIM_BIN"
+cat > "$STAT_SHIM_BIN/stat" <<'EOF'
+#!/bin/sh
+# Mimics GNU stat answering BSD flags (and vice versa): junk output, exit 0.
+printf '%s\n' '?p'
+exit 0
+EOF
+chmod +x "$STAT_SHIM_BIN/stat"
+if (
+    cd "$TMP_ROOT"
+    PATH="$STAT_SHIM_BIN:$PATH" HOME="$STAT_HOME" CLAUDE_CONFIG_DIR= "$INSTALLER" -a claude --global >/dev/null 2>&1
+); then
+    pass "install does not depend on a platform-specific stat"
+else
+    fail "install does not depend on a platform-specific stat"
+fi
+assert_equal "stale hook is refreshed even with a hostile stat" \
+    "$(file_hash "$SCRIPT_DIR/hooks/protect-important-paths.js")" "$(file_hash "$STAT_HOOK")"
+assert_equal "refreshed runtime hook keeps its original mode" "600" "$(file_mode "$STAT_HOOK")"
+
+# Registration must happen before the runtime hook is replaced. Otherwise a
+# failure between the two leaves a new hook on disk that nothing invokes — the
+# agent silently loses its guard. Fail the settings merge and require that the
+# runtime hook and the settings are both exactly as they were.
+HALF_HOME="$TMP_ROOT/half-install-home"
+mkdir -p "$HALF_HOME/.claude"
+HALF_HOOK="$HALF_HOME/.claude/protect-important-paths.js"
+printf '#!/usr/bin/env node\n// stale hook, merge will fail\n' > "$HALF_HOOK"
+printf '{"env":{"KEEP_ME":"yes"}}\n' > "$HALF_HOME/.claude/settings.json"
+HALF_HOOK_HASH=$(file_hash "$HALF_HOOK")
+HALF_SETTINGS_HASH=$(file_hash "$HALF_HOME/.claude/settings.json")
+FAILING_NODE_BIN="$TMP_ROOT/failing-node-bin"
+mkdir -p "$FAILING_NODE_BIN"
+cat > "$FAILING_NODE_BIN/node" <<'EOF'
+#!/bin/sh
+echo "simulated node failure" >&2
+exit 1
+EOF
+chmod +x "$FAILING_NODE_BIN/node"
+if (
+    cd "$TMP_ROOT"
+    PATH="$FAILING_NODE_BIN:$PATH" HOME="$HALF_HOME" CLAUDE_CONFIG_DIR= "$INSTALLER" -a claude --global >/dev/null 2>&1
+); then
+    fail "a failed settings merge aborts the install"
+else
+    pass "a failed settings merge aborts the install"
+fi
+assert_equal "a failed settings merge leaves the runtime hook untouched" \
+    "$HALF_HOOK_HASH" "$(file_hash "$HALF_HOOK")"
+assert_equal "a failed settings merge leaves the settings untouched" \
+    "$HALF_SETTINGS_HASH" "$(file_hash "$HALF_HOME/.claude/settings.json")"
+assert_equal "a failed settings merge leaves no hook backup behind" "0" \
+    "$(find "$HALF_HOME/.claude" -maxdepth 1 -name 'protect-important-paths.js.better-rm.bak.*' | wc -l | tr -d ' ')"
+
 # Missing shared hook fails before touching settings.
 MISSING_SOURCE="$TMP_ROOT/missing-source"
 mkdir -p "$MISSING_SOURCE"
