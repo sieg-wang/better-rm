@@ -146,6 +146,49 @@ were fixed on 2026-08-04 and are no longer open. What replaced them:
   resulting failure message points at the probe rather than at the extraction.
   An assertion on the extracted line count would save that trip.
 
+## `--restore` and concurrent processes (what is closed, what is not)
+
+`--restore` used to move the trashed item onto the destination and then
+`/bin/rm -rf` the path it had moved the old destination to. Making that path
+unpredictable (`mktemp -d`) was **not** enough: a same-UID process can enumerate
+the parent directory, find the staging directory and pre-create its own object at
+the child path better-rm is about to use. Measured against that version, a
+fork-free glob-polling attacker destroyed unrelated data in 9 of 10 runs, 7 of
+them while `--restore` returned exit 0.
+
+The overwrite no longer deletes anything by path. The trashed item is moved into
+a staging directory this process created exclusively, and is then put in place by
+a single same-filesystem `rename`, which replaces an existing file or symlink
+atomically — the kernel unlinks the old destination as part of that call. Every
+move is verified afterwards by `device:inode`, because a landing spot cannot be
+trusted to flags alone (BSD `mv -h` still treats a real directory as a container,
+and BSD `mv -n` returns 0 without doing anything when the target exists).
+
+**Closed:** every destination that is not a real directory. There is no
+delete-by-path step at all on that route, so there is no window to hijack. The
+same attacker now scores 0 of 10, aborting fail-closed with the local file, the
+trashed item and the other process's data all intact.
+
+**Narrowed, not closed:** a destination that *is* a real directory. A `rename`
+cannot replace one, so that directory still has to be set aside and deleted. Both
+the staging directory and the set-aside object are re-verified by inode
+immediately before `/bin/rm -rf`, and any mismatch refuses to delete. What
+remains is the interval between that last `stat` and the `unlink` inside
+`/bin/rm` — about **2 ms** on this machine (measured: 2.2 ms per `/bin/rm`
+fork+exec). To exploit it a same-UID process must swap the set-aside path inside
+that interval *and* not have tripped either earlier guard, since any swap landing
+before the final check aborts the restore. A spinning attacker that renames its
+own directory over the set-aside path as fast as it can scored 0 data loss in 30
+runs (28 aborted at exit 1, 2 never got in). It cannot be closed in POSIX shell:
+there is no way to bind a name to an inode for `unlink`, i.e. no way to delete
+through a handle only this process can produce.
+
+Exit contract, because "partially successful" must not read as success:
+`0` = restored and nothing unintended was touched; `1` = the restore did not
+happen and the error names anything that could not be put back; `2` = the item
+*was* restored but the cleanup was refused after detecting interference, and the
+leftover path is printed.
+
 ## Suggested Future Enhancements
 
 ### High Priority

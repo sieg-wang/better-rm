@@ -722,6 +722,42 @@ trim() {
     echo -n "$var"
 }
 
+# 取得路徑的「裝置:inode」身分。symlink 取連結本身而非其目標，因此被掉包的連結
+# 不可能冒充成同一個物件。路徑不存在或無法 stat 時輸出空字串，呼叫端必須把空字串
+# 當成「無法確認」而非「相符」。
+# Report a path's device:inode identity. Symlinks are identified by the link
+# itself, not by its target, so a swapped link cannot pass as the same object.
+# An unreadable or missing path yields the empty string; callers must treat that
+# as "cannot confirm", never as a match.
+path_identity() {
+    stat -c '%d:%i' "$1" 2>/dev/null ||
+        stat -f '%d:%i' "$1" 2>/dev/null ||
+        true
+}
+
+# 以 rename 語意搬移。$1 是覆蓋政策：-f 代表「取代既有目的地」（呼叫端已取得使用者
+# 同意），-n 代表「絕不覆蓋」。目的地是「指向目錄的 symlink」時絕不搬進去，而是取代
+# 該連結：GNU 用 -T，連「真目錄」也一併涵蓋；BSD 只有 -h，真目錄仍會被當成容器。
+# 而且 BSD 的 -n 在目的地已存在時是「靜默不做事並回傳 0」，所以呼叫端一律必須在事後
+# 用 inode 驗證落點，不能倚賴旗標或結束碼。
+# Move with rename semantics. $1 is the clobber policy: -f replaces an existing
+# target (the caller already has the user's consent), -n never overwrites. When
+# the target is a symlink to a directory, replace the link instead of moving into
+# it: GNU's -T also covers a real directory target, BSD only has -h and still
+# treats a real directory as a container. BSD's -n moreover does nothing and
+# returns 0 when the target exists, so every caller must verify the landing spot
+# by inode afterwards rather than trusting the flag or the exit status.
+move_exact() {
+    case "$(uname -s)" in
+        Darwin|FreeBSD|NetBSD|OpenBSD|DragonFly)
+            mv "$1" -h -- "$2" "$3"
+            ;;
+        *)
+            mv "$1" -T -- "$2" "$3"
+            ;;
+    esac
+}
+
 # 還原檔案
 # Restore file
 restore_file() {
@@ -899,7 +935,9 @@ restore_file() {
     
     # 檢查目標路徑是否已存在同名檔案/目錄
     # Check if a file/directory with the same name already exists in the destination
+    local dest_existed=0
     if [ -e "$dest_path" ] || [ -L "$dest_path" ]; then
+        dest_existed=1
         if [ "$force" != "1" ]; then
             echo -n "rm: 檔案或目錄 '$dest_filename' 已存在於目前資料夾，是否覆蓋？(y/N) " >&2
             read -r response
@@ -910,64 +948,189 @@ restore_file() {
         fi
     fi
     
-    # 執行還原：先把既有目的地移到同層的讓位路徑，確認搬移成功後才刪除它。
-    # 先刪除目的地會讓 mv 失敗時「既有檔案」與「還原」同時失去。
-    # Move the existing destination aside first and delete it only after the
-    # restore move succeeds; deleting it up front loses both the local file and
-    # the restore whenever the move fails.
-    # 讓位的落點必須是「本行程獨佔建立」的目錄。舊寫法用 [ -e ] 探路後才 mv，中間
-    # 的空窗足夠讓並行行程在那個可預測的路徑上建立目錄：mv 於是把既有檔案搬「進」
-    # 該目錄，成功路徑的 /bin/rm -rf 就連同裡面不相干的檔案一起刪掉，而還原本身仍
-    # 回報成功。mktemp -d 同時解決兩件事 —— 名稱不可預測，且建立動作本身不可分割
-    # 且獨佔 —— 因此 rm -rf 的目標永遠只會是本行程自己建立的目錄。
-    # The move-aside location must be a directory this process created
-    # exclusively. Probing with [ -e ] and then moving leaves a window in which a
-    # concurrent process can create a directory at that predictable path: mv then
-    # moves the existing file INTO it and the success path's /bin/rm -rf takes the
-    # unrelated contents with it, while the restore still reports success.
-    # mktemp -d fixes both halves at once — the name is unpredictable and its
-    # creation is atomic and exclusive — so rm -rf can only ever target a
-    # directory this process made.
+    # 還原的不變式：better-rm 只能刪掉「它自己讓出來、且經 inode 證明仍是同一個」的
+    # 物件。舊寫法先把垃圾桶項目 mv 到目的地，再對讓位路徑 /bin/rm -rf。即使讓位落點
+    # 改用 mktemp -d（名稱不可預測、建立為獨佔），同 UID 的並行行程仍可枚舉父目錄找到
+    # 它，搶先在 $staging/<name> 建立自己的目錄：讓位那次 mv 於是變成「搬進去」，成功
+    # 路徑的 rm -rf 便連同對方的內容一起刪掉，而 --restore 依然回報 exit 0。實測一支
+    # 純 glob 輪詢（不 fork）的並行行程，10 次裡贏 9 次、其中 7 次 exit 0。
+    # 所以這裡不再倚賴「刪除」來完成覆蓋：先把垃圾桶項目搬進本行程獨佔建立的暫存目錄
+    # （跨裝置的複製發生在這一步，目的地全程沒被碰過），再用同一檔案系統內的一次
+    # rename 就位。rename(2) 取代既有的檔案或 symlink 是原子的，舊目的地由核心解除
+    # 連結 —— 覆蓋路徑上根本沒有「依路徑刪除」這個步驟，也就沒有可被搶佔的空窗。
+    # 只有「目的地是真目錄」時 rename 無法取代它，才仍需讓位並刪除；那條路徑上每一步
+    # 都以 inode 綁定，刪除前再驗證一次，任何不符一律中止且不刪任何東西。
+    # The invariant: better-rm may only delete an object it set aside itself and
+    # has proven by inode to still be that same object. The old shape moved the
+    # trashed item onto the destination and then /bin/rm -rf'd the move-aside
+    # path. Even with mktemp -d (unpredictable name, atomic exclusive creation) a
+    # same-UID concurrent process can enumerate the parent directory, find the
+    # staging directory and pre-create its own directory at $staging/<name>: the
+    # set-aside mv then moves INTO it and the success path's rm -rf takes the
+    # unrelated contents with it, while --restore still reports exit 0. Measured:
+    # a fork-free glob-polling process won 9 of 10 runs, 7 of them with exit 0.
+    # So the overwrite no longer relies on deletion at all. The trashed item is
+    # moved into a staging directory this process created exclusively (the
+    # cross-device copy, if any, happens there while the destination is still
+    # untouched) and is then put in place by a single same-filesystem rename.
+    # rename(2) replaces an existing file or symlink atomically and the kernel
+    # unlinks the old destination as part of it — there is no delete-by-path step
+    # on the overwrite path, hence no window to hijack. Only a real directory at
+    # the destination still needs a set-aside and a delete, and there every step
+    # is bound to an inode and re-verified immediately before the delete; any
+    # mismatch aborts without deleting anything.
+    local trash_identity=""
+    local staging_dir=""
+    local staging_identity=""
+    local incoming=""
     local displaced=""
-    local displaced_dir=""
-    if [ -e "$dest_path" ] || [ -L "$dest_path" ]; then
-        if ! displaced_dir=$(mktemp -d "${dest_path}.better-rm-restore-XXXXXX" 2>/dev/null); then
-            error_msg "還原失敗：無法建立暫存目錄以讓出 '$dest_filename'"
-            error_msg "Restore failed: cannot create a staging directory for the existing '$dest_filename'"
-            return 1
-        fi
-        displaced="$displaced_dir/$dest_filename"
-        if ! mv "$dest_path" "$displaced" 2>/dev/null; then
-            rmdir "$displaced_dir" 2>/dev/null
-            error_msg "還原失敗：無法暫存既有的 '$dest_filename'"
-            error_msg "Restore failed: cannot set aside the existing '$dest_filename'"
-            return 1
-        fi
+    local dest_identity=""
+    local clobber_policy="-n"
+    if [ "$dest_existed" = "1" ]; then
+        # 使用者已同意覆蓋（-f 或互動確認）才允許取代既有目的地；否則一律不覆蓋，
+        # 才不會把「還原期間才被建立的檔案」默默蓋掉。
+        # Only replace an existing destination once the user has consented (-f or
+        # the interactive prompt); otherwise never clobber, so a file created at
+        # that path while the restore is running is not silently overwritten.
+        clobber_policy="-f"
     fi
 
-    if mv "$trash_path" "$dest_path" 2>/dev/null; then
-        if [ -n "$displaced_dir" ]; then
-            /bin/rm -rf "$displaced_dir"
-        fi
-        if [ "$verbose" = "1" ]; then
-            success_msg "已還原 '$dest_filename' 到目前資料夾 (restored to: $dest_path)"
-        fi
-        return 0
-    fi
-
-    # 搬移失敗：把讓位的目的地放回原處，維持呼叫前的狀態。
-    # The move failed: put the displaced destination back so nothing is lost.
-    if [ -n "$displaced" ] && ! mv "$displaced" "$dest_path" 2>/dev/null; then
-        error_msg "還原失敗且既有的 '$dest_filename' 仍留在 '$displaced'"
-        error_msg "Restore failed; the existing '$dest_filename' remains at '$displaced'"
+    trash_identity=$(path_identity "$trash_path")
+    if [ -z "$trash_identity" ]; then
+        error_msg "還原失敗：無法確認垃圾桶項目的 inode 身分"
+        error_msg "Restore failed: cannot confirm the inode identity of the trashed item"
         return 1
     fi
-    if [ -n "$displaced_dir" ]; then
-        rmdir "$displaced_dir" 2>/dev/null
+
+    if ! staging_dir=$(mktemp -d "${dest_path}.better-rm-restore-XXXXXX" 2>/dev/null); then
+        error_msg "還原失敗：無法在目的地旁建立獨佔的暫存目錄"
+        error_msg "Restore failed: cannot create an exclusive staging directory beside the destination"
+        return 1
     fi
-    error_msg "還原失敗：無法將檔案移回目前資料夾"
-    error_msg "Restore failed: cannot move file back to current folder"
-    return 1
+    staging_identity=$(path_identity "$staging_dir")
+    incoming="$staging_dir/$dest_filename"
+    if [ -z "$staging_identity" ]; then
+        rmdir "$staging_dir" 2>/dev/null
+        error_msg "還原失敗：無法確認暫存目錄的 inode 身分"
+        error_msg "Restore failed: cannot confirm the staging directory's inode identity"
+        return 1
+    fi
+
+    # 中止時的復原：把取出的項目放回垃圾桶、把讓位的目的地放回原處，兩者都以 inode
+    # 驗證。任何一步不成立就把「東西實際在哪裡」講清楚，但絕不刪除任何東西。
+    # Unwind on abort: put the extracted item back in the trash and the displaced
+    # destination back in place, both verified by inode. Whatever cannot be put
+    # back is named explicitly — but nothing is ever deleted to make it fit.
+    restore_unwind() {
+        local sunk="$dest_path/$dest_filename"
+        if [ "$(path_identity "$sunk")" = "$trash_identity" ]; then
+            move_exact -n "$sunk" "$incoming" 2>/dev/null || true
+        fi
+        if [ "$(path_identity "$incoming")" = "$trash_identity" ]; then
+            if ! move_exact -n "$incoming" "$trash_path" 2>/dev/null ||
+               [ "$(path_identity "$trash_path")" != "$trash_identity" ]; then
+                error_msg "垃圾桶項目暫留於 '$incoming'"
+                error_msg "The trashed item is left at '$incoming'"
+            fi
+        fi
+        if [ -n "$displaced" ] && [ "$(path_identity "$displaced")" = "$dest_identity" ]; then
+            if ! move_exact -n "$displaced" "$dest_path" 2>/dev/null ||
+               [ "$(path_identity "$dest_path")" != "$dest_identity" ]; then
+                error_msg "既有的 '$dest_filename' 暫留於 '$displaced'"
+                error_msg "The existing '$dest_filename' is left at '$displaced'"
+            fi
+        fi
+        rmdir "$staging_dir" 2>/dev/null || true
+    }
+
+    # 取出垃圾桶項目到暫存目錄。跨裝置時 mv 退化成「複製後刪除」，那段較長、較容易
+    # 失敗的過程在這裡完成，此刻目的地仍原封不動。
+    # Extract the trashed item into the staging directory. On a cross-device move
+    # this is where mv degrades into copy-then-delete; that long, failure-prone
+    # part now happens while the destination is still untouched.
+    if ! move_exact -n "$trash_path" "$incoming" 2>/dev/null ||
+       [ "$(path_identity "$incoming")" != "$trash_identity" ]; then
+        # 暫存目錄雖為獨佔建立，同 UID 的並行行程仍可能枚舉後搶先佔用 $incoming；
+        # BSD mv 此時會把項目搬「進」對方的目錄，必須撈回垃圾桶再中止。
+        # The staging directory is created exclusively, but a same-UID process can
+        # still enumerate it and occupy $incoming first; BSD mv then moves the
+        # item INTO that directory, so pull it back to the trash before aborting.
+        local buried="$incoming/$(basename "$trash_path")"
+        if [ "$(path_identity "$buried")" = "$trash_identity" ]; then
+            move_exact -n "$buried" "$trash_path" 2>/dev/null || true
+        fi
+        rmdir "$staging_dir" 2>/dev/null
+        error_msg "還原失敗：無法將檔案移回目前資料夾"
+        error_msg "Restore failed: cannot move file back to current folder"
+        return 1
+    fi
+
+    # rename 不能用別的東西取代一個真目錄，所以目的地是真目錄時仍得先讓位。
+    # A rename cannot replace a real directory, so a directory destination still
+    # has to be set aside first.
+    if [ -d "$dest_path" ] && [ ! -L "$dest_path" ]; then
+        dest_identity=$(path_identity "$dest_path")
+        displaced="$staging_dir/.better-rm-displaced"
+        if [ -z "$dest_identity" ] ||
+           ! move_exact -n "$dest_path" "$displaced" 2>/dev/null ||
+           [ "$(path_identity "$displaced")" != "$dest_identity" ]; then
+            # 讓位落點被搶佔時，既有目錄可能被搬進對方目錄，先撈回原位再中止。
+            # If the set-aside path was occupied, the existing directory may have
+            # been moved into it; pull it back before aborting.
+            local nested="$displaced/$dest_filename"
+            if [ -n "$dest_identity" ] &&
+               [ "$(path_identity "$nested")" = "$dest_identity" ] &&
+               { [ ! -e "$dest_path" ] && [ ! -L "$dest_path" ]; }; then
+                move_exact -n "$nested" "$dest_path" 2>/dev/null || true
+            fi
+            displaced=""
+            restore_unwind
+            error_msg "還原失敗：無法安全讓出既有的 '$dest_filename'"
+            error_msg "Restore failed: cannot safely set aside the existing '$dest_filename'"
+            return 1
+        fi
+    fi
+
+    # 就位：同一檔案系統內的一次 rename。目的地若是既有檔案或 symlink，核心會原子地
+    # 以新項目取代它並解除舊 inode 的連結，全程沒有任何「依路徑刪除」。
+    # Put it in place with a single same-filesystem rename. If the destination is
+    # an existing file or symlink the kernel replaces it atomically and unlinks
+    # the old inode as part of the same call — no delete-by-path anywhere.
+    if ! move_exact "$clobber_policy" "$incoming" "$dest_path" 2>/dev/null ||
+       [ "$(path_identity "$dest_path")" != "$trash_identity" ]; then
+        restore_unwind
+        error_msg "還原失敗：無法將檔案就位到 '$dest_path'"
+        error_msg "Restore failed: cannot put the item in place at '$dest_path'"
+        return 1
+    fi
+
+    # 還原本身已完成。只有先前讓位過真目錄時才需要刪除，且刪除前必須再驗證一次：
+    # 暫存目錄與讓位物件都仍是本行程當初建立／讓出的那一個。
+    # The restore itself is complete. Only a previously displaced real directory
+    # still needs deleting, and only after re-verifying that both the staging
+    # directory and the displaced object are still the ones this process made and
+    # set aside.
+    if [ -n "$displaced" ]; then
+        if [ "$(path_identity "$staging_dir")" = "$staging_identity" ] &&
+           [ "$(path_identity "$displaced")" = "$dest_identity" ]; then
+            /bin/rm -rf -- "$displaced"
+        else
+            error_msg "已還原 '$dest_filename'，但讓位路徑遭並行修改，拒絕刪除；請檢查 '$staging_dir'"
+            error_msg "Restored '$dest_filename', but the staging path was modified concurrently; refusing to delete. Inspect '$staging_dir'"
+            return 2
+        fi
+    fi
+
+    if ! rmdir "$staging_dir" 2>/dev/null; then
+        warn_msg "已還原 '$dest_filename'，但暫存目錄 '$staging_dir' 非空，未刪除"
+        warn_msg "Restored '$dest_filename', but the staging directory '$staging_dir' is not empty and was left in place"
+        return 2
+    fi
+
+    if [ "$verbose" = "1" ]; then
+        success_msg "已還原 '$dest_filename' 到目前資料夾 (restored to: $dest_path)"
+    fi
+    return 0
 }
 
 # 主程式

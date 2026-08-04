@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected `/mnt` and its immediate mount roots by default to prevent deleting Windows drives from WSL ([#9](https://github.com/doggy8088/better-rm/issues/9)).
 - Store deletion history outside `TRASH_DIR` to avoid macOS log write failures, while retaining legacy log fallback for restore operations ([#10](https://github.com/doggy8088/better-rm/issues/10)).
 - Prevent trash-path collisions and late writers from overwriting an existing recovery entry; suffixed recovery paths remain compatible with `--restore`.
+- `--restore` no longer deletes the overwritten destination by path. The trashed item is staged in a directory this process creates exclusively and then put in place with a single same-filesystem `rename`, so an existing file or symlink is replaced atomically by the kernel. A concurrent process could previously occupy the move-aside path and have its own data deleted by the success path while `--restore` still returned 0. Every move is now verified by `device:inode`, and a real-directory destination — the only case that still needs a set-aside and a delete — re-verifies both the staging directory and the set-aside object immediately before deleting, refusing to delete on any mismatch.
+- `--restore` now exits `2` when the file was restored but the cleanup was refused after detecting a concurrent modification, and prints the leftover path. A partially successful restore never exits `0`. `1` continues to mean the restore did not happen.
 - Detect protected removals nested inside shell carriers, `eval`, command substitutions, and chained `sudo`/`env`/`command` wrappers.
 
 ### Changed

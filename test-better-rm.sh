@@ -1202,6 +1202,169 @@ else
     test_fail "還原刪掉了並行行程建立的不相干檔案 (status=$restore_race_status, sentinel='$restore_race_sentinel')"
 fi
 
+# 以下三個測試共用同一支 mv shim。它不看 better-rm 的內部命名，只看「第 N 次 mv 的
+# 目的地是什麼」，再對那個路徑動手 —— 這正是並行行程枚舉父目錄後能做到的事，因此
+# 釘住的是「不可刪到不是自己讓出來的物件」這個契約，而非任何實作細節。
+# The three tests below share one mv shim. It never looks at better-rm's internal
+# naming; it only observes the destination of the Nth mv and acts on that path,
+# which is exactly what a concurrent process that enumerates the parent directory
+# can do. They therefore pin the contract — never delete an object you did not set
+# aside yourself — rather than any implementation detail.
+make_restore_race_shim() {
+    local shim_bin="$1"
+    mkdir -p "$shim_bin"
+    cat > "$shim_bin/mv" <<'EOF'
+#!/bin/sh
+n=$(cat "$BETTER_RM_RACE_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s' "$n" > "$BETTER_RM_RACE_COUNT"
+for a in "$@"; do dst=$a; done
+if [ "$n" = "${BETTER_RM_RACE_RECORD:-}" ]; then
+    printf '%s' "$dst" > "$BETTER_RM_RACE_RECORDED"
+fi
+if [ "$n" = "${BETTER_RM_RACE_OCCUPY:-}" ]; then
+    "$BETTER_RM_REAL_MV" "$BETTER_RM_RACE_PRECIOUS" "$dst" 2>/dev/null
+fi
+if [ "$n" = "${BETTER_RM_RACE_SWAP:-}" ]; then
+    swap_target=$(cat "$BETTER_RM_RACE_RECORDED" 2>/dev/null)
+    if [ -n "$swap_target" ]; then
+        "$BETTER_RM_REAL_MV" "$swap_target" "$BETTER_RM_RACE_KIDNAP" 2>/dev/null
+        "$BETTER_RM_REAL_MV" "$BETTER_RM_RACE_PRECIOUS" "$swap_target" 2>/dev/null
+    fi
+fi
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+    chmod +x "$shim_bin/mv"
+}
+
+count_precious_sentinels() {
+    find "$TEST_WORK_DIR" -type f -name 'sentinel.txt' \
+        -exec grep -lFx "PRECIOUS SENTINEL" {} + 2>/dev/null | wc -l | tr -d ' '
+}
+
+test_item "還原：暫存落點被搶佔時，垃圾桶項目與既有檔案都必須完好"
+# 暫存目錄雖以 mktemp -d 獨佔建立，同 UID 的並行行程仍可枚舉父目錄找到它，並搶先
+# 佔用 better-rm 即將寫入的子路徑。此時 BSD mv 會把垃圾桶項目搬「進」對方的目錄，
+# 若不用 inode 驗證落點，該項目就等於從垃圾桶消失而 better-rm 毫無所覺。
+# The staging directory is created exclusively with mktemp -d, but a same-UID
+# process can enumerate the parent, find it and occupy the child path better-rm
+# is about to write. BSD mv then moves the trashed item INTO that directory; with
+# no inode check on the landing spot the item silently vanishes from the trash.
+setup
+cd "$TEST_WORK_DIR"
+occupy_bin="$TEST_WORK_DIR/restore-occupy-bin"
+make_restore_race_shim "$occupy_bin"
+
+printf '%s\n' "TRASHED CONTENT" > occupy_target.txt
+"$BETTER_RM" occupy_target.txt
+printf '%s\n' "LOCAL CONTENT" > occupy_target.txt
+mkdir -p precious_occupy
+printf '%s\n' "PRECIOUS SENTINEL" > precious_occupy/sentinel.txt
+occupy_trash_item=$(find "$TEST_TRASH_DIR" -type f -name "occupy_target.txt__*" | head -1)
+occupy_status=0
+BETTER_RM_RACE_COUNT="$TEST_WORK_DIR/occupy-count" \
+BETTER_RM_RACE_OCCUPY=1 \
+BETTER_RM_RACE_PRECIOUS="$TEST_WORK_DIR/precious_occupy" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$occupy_bin:$PATH" \
+    "$BETTER_RM" -f --restore occupy_target.txt >/dev/null 2>&1 ||
+    occupy_status=$?
+
+if [ "$occupy_status" -ne 0 ] && \
+   [ "$(cat occupy_target.txt)" = "LOCAL CONTENT" ] && \
+   [ -n "$occupy_trash_item" ] && [ -f "$occupy_trash_item" ] && \
+   [ "$(cat "$occupy_trash_item")" = "TRASHED CONTENT" ] && \
+   [ "$(count_precious_sentinels)" -eq 1 ]; then
+    test_pass "落點被搶佔時中止還原，垃圾桶項目、既有檔案與他人資料都完好"
+else
+    test_fail "落點被搶佔時吞掉了垃圾桶項目或動到既有檔案 (status=$occupy_status)"
+fi
+
+test_item "還原：讓位落點被搶佔時，不得把不是自己讓出來的目錄當成讓位物"
+# 目的地是真目錄時 rename 無法取代它，仍必須讓位。若讓位後不驗證「站在讓位路徑上的
+# 就是剛才那個目錄」，並行行程只要搶先佔用該路徑，後續的刪除就會刪到對方的資料。
+# A real directory at the destination cannot be replaced by a rename and still has
+# to be set aside. Without verifying that the object now standing at the set-aside
+# path is the very one just moved there, a concurrent process that occupies that
+# path first gets its own data deleted later.
+setup
+cd "$TEST_WORK_DIR"
+displace_bin="$TEST_WORK_DIR/restore-displace-bin"
+make_restore_race_shim "$displace_bin"
+
+mkdir -p displace_dir
+printf '%s\n' "TRASHED MARKER" > displace_dir/marker.txt
+"$BETTER_RM" -r displace_dir
+mkdir -p displace_dir
+printf '%s\n' "LOCAL MARKER" > displace_dir/marker.txt
+mkdir -p precious_displace
+printf '%s\n' "PRECIOUS SENTINEL" > precious_displace/sentinel.txt
+displace_trash_item=$(find "$TEST_TRASH_DIR" -type d -name "displace_dir__*" | head -1)
+displace_status=0
+BETTER_RM_RACE_COUNT="$TEST_WORK_DIR/displace-count" \
+BETTER_RM_RACE_OCCUPY=2 \
+BETTER_RM_RACE_PRECIOUS="$TEST_WORK_DIR/precious_displace" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$displace_bin:$PATH" \
+    "$BETTER_RM" -f --restore displace_dir >/dev/null 2>&1 ||
+    displace_status=$?
+
+if [ "$displace_status" -ne 0 ] && \
+   [ "$(cat displace_dir/marker.txt 2>/dev/null)" = "LOCAL MARKER" ] && \
+   [ -n "$displace_trash_item" ] && \
+   [ "$(cat "$displace_trash_item/marker.txt" 2>/dev/null)" = "TRASHED MARKER" ] && \
+   [ "$(count_precious_sentinels)" -eq 1 ]; then
+    test_pass "讓位落點被搶佔時中止還原，三方資料都完好"
+else
+    test_fail "讓位落點被搶佔時動到了既有目錄、垃圾桶項目或他人資料 (status=$displace_status)"
+fi
+
+test_item "還原：讓位物在刪除前被掉包，必須拒絕刪除且不得回報成功"
+# 讓位與刪除之間隔著一次真正的 rename，並行行程可以在這段時間把讓位路徑上的物件換
+# 成自己的資料。刪除前若不重新驗證 inode，/bin/rm -rf 就會刪掉對方的目錄，而
+# --restore 仍回報 exit 0 —— 「成功」與「毀掉不相干資料」同時成立。
+# 部分成功的結束碼契約：還原確實完成、但清理因偵測到並行干擾而未執行時回傳 2，
+# 絕不回傳 0。
+# A real rename sits between the set-aside and the delete, and a concurrent
+# process can swap the object at the set-aside path within it. Without
+# re-verifying the inode right before the delete, /bin/rm -rf takes the other
+# process's directory while --restore still reports exit 0 — success and
+# destruction of unrelated data at the same time. Exit contract for a partially
+# successful restore: the restore itself completed but the cleanup was refused
+# after detecting interference, so it returns 2 and never 0.
+setup
+cd "$TEST_WORK_DIR"
+swap_bin="$TEST_WORK_DIR/restore-swap-bin"
+make_restore_race_shim "$swap_bin"
+
+mkdir -p swap_dir
+printf '%s\n' "TRASHED MARKER" > swap_dir/marker.txt
+"$BETTER_RM" -r swap_dir
+mkdir -p swap_dir
+printf '%s\n' "LOCAL MARKER" > swap_dir/marker.txt
+mkdir -p precious_swap
+printf '%s\n' "PRECIOUS SENTINEL" > precious_swap/sentinel.txt
+swap_status=0
+BETTER_RM_RACE_COUNT="$TEST_WORK_DIR/swap-count" \
+BETTER_RM_RACE_RECORD=2 \
+BETTER_RM_RACE_SWAP=3 \
+BETTER_RM_RACE_RECORDED="$TEST_WORK_DIR/swap-recorded" \
+BETTER_RM_RACE_KIDNAP="$TEST_WORK_DIR/kidnapped_dir" \
+BETTER_RM_RACE_PRECIOUS="$TEST_WORK_DIR/precious_swap" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$swap_bin:$PATH" \
+    "$BETTER_RM" -f --restore swap_dir >/dev/null 2>&1 ||
+    swap_status=$?
+
+if [ "$swap_status" -eq 2 ] && \
+   [ "$(cat swap_dir/marker.txt 2>/dev/null)" = "TRASHED MARKER" ] && \
+   [ "$(cat kidnapped_dir/marker.txt 2>/dev/null)" = "LOCAL MARKER" ] && \
+   [ "$(count_precious_sentinels)" -eq 1 ]; then
+    test_pass "讓位物被掉包時拒絕刪除、保留他人資料，並以 2 回報部分成功"
+else
+    test_fail "讓位物被掉包時刪到他人資料或回報成功 (status=$swap_status)"
+fi
+
 test_item "含 | 的檔名可完整刪除並還原"
 # 日誌以 | 分隔且還原時逐一切開，合法檔名裡的 | 會讓紀錄無法被解析。
 # The pipe-delimited log cannot represent a legal filename containing '|',
