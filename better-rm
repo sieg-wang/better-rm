@@ -915,15 +915,30 @@ restore_file() {
     # Move the existing destination aside first and delete it only after the
     # restore move succeeds; deleting it up front loses both the local file and
     # the restore whenever the move fails.
+    # 讓位的落點必須是「本行程獨佔建立」的目錄。舊寫法用 [ -e ] 探路後才 mv，中間
+    # 的空窗足夠讓並行行程在那個可預測的路徑上建立目錄：mv 於是把既有檔案搬「進」
+    # 該目錄，成功路徑的 /bin/rm -rf 就連同裡面不相干的檔案一起刪掉，而還原本身仍
+    # 回報成功。mktemp -d 同時解決兩件事 —— 名稱不可預測，且建立動作本身不可分割
+    # 且獨佔 —— 因此 rm -rf 的目標永遠只會是本行程自己建立的目錄。
+    # The move-aside location must be a directory this process created
+    # exclusively. Probing with [ -e ] and then moving leaves a window in which a
+    # concurrent process can create a directory at that predictable path: mv then
+    # moves the existing file INTO it and the success path's /bin/rm -rf takes the
+    # unrelated contents with it, while the restore still reports success.
+    # mktemp -d fixes both halves at once — the name is unpredictable and its
+    # creation is atomic and exclusive — so rm -rf can only ever target a
+    # directory this process made.
     local displaced=""
+    local displaced_dir=""
     if [ -e "$dest_path" ] || [ -L "$dest_path" ]; then
-        local displaced_suffix=1
-        displaced="${dest_path}.better-rm-restore-$$"
-        while [ -e "$displaced" ] || [ -L "$displaced" ]; do
-            displaced="${dest_path}.better-rm-restore-$$.${displaced_suffix}"
-            displaced_suffix=$((displaced_suffix + 1))
-        done
+        if ! displaced_dir=$(mktemp -d "${dest_path}.better-rm-restore-XXXXXX" 2>/dev/null); then
+            error_msg "還原失敗：無法建立暫存目錄以讓出 '$dest_filename'"
+            error_msg "Restore failed: cannot create a staging directory for the existing '$dest_filename'"
+            return 1
+        fi
+        displaced="$displaced_dir/$dest_filename"
         if ! mv "$dest_path" "$displaced" 2>/dev/null; then
+            rmdir "$displaced_dir" 2>/dev/null
             error_msg "還原失敗：無法暫存既有的 '$dest_filename'"
             error_msg "Restore failed: cannot set aside the existing '$dest_filename'"
             return 1
@@ -931,8 +946,8 @@ restore_file() {
     fi
 
     if mv "$trash_path" "$dest_path" 2>/dev/null; then
-        if [ -n "$displaced" ]; then
-            /bin/rm -rf "$displaced"
+        if [ -n "$displaced_dir" ]; then
+            /bin/rm -rf "$displaced_dir"
         fi
         if [ "$verbose" = "1" ]; then
             success_msg "已還原 '$dest_filename' 到目前資料夾 (restored to: $dest_path)"
@@ -946,6 +961,9 @@ restore_file() {
         error_msg "還原失敗且既有的 '$dest_filename' 仍留在 '$displaced'"
         error_msg "Restore failed; the existing '$dest_filename' remains at '$displaced'"
         return 1
+    fi
+    if [ -n "$displaced_dir" ]; then
+        rmdir "$displaced_dir" 2>/dev/null
     fi
     error_msg "還原失敗：無法將檔案移回目前資料夾"
     error_msg "Restore failed: cannot move file back to current folder"

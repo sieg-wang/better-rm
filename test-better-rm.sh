@@ -1149,6 +1149,59 @@ else
     test_fail "搬移失敗時毀掉了既有目的地或垃圾桶項目 (status=$restore_fail_status)"
 fi
 
+test_item "還原時讓位路徑被並行行程搶佔，不得刪到別人的檔案"
+# 讓位路徑一旦可預測（$dest.better-rm-restore-<PID>）且以 [ -e ] 探路後才 mv，
+# 兩者之間就有空窗：並行行程在空窗內於同一路徑建目錄，mv 會把既有檔案「搬進」
+# 那個目錄，成功路徑的 /bin/rm -rf 於是連同目錄裡不相干的檔案一起刪掉。
+# 注入點是真正的 mv／rename 介面：讓位那一次 mv 被呼叫時才動手，重現真正的競態
+# 時序；路徑由測試自行從 PID 推導，不看 better-rm 傳進來的參數，因此這個測試釘的
+# 是「讓位路徑不可被外部推導與搶佔」，而不是任何內部實作細節。
+# The move-aside path is predictable ($dest.better-rm-restore-<PID>) and chosen
+# by an [ -e ] probe before the mv, so a concurrent process can create a
+# directory there inside the window: mv then moves the existing file INTO it and
+# the success path's /bin/rm -rf takes the unrelated contents with it. The
+# injection happens at the real mv/rename boundary and derives the path from the
+# PID rather than from better-rm's own arguments.
+setup
+cd "$TEST_WORK_DIR"
+restore_race_bin="$TEST_WORK_DIR/restore-race-bin"
+mkdir -p "$restore_race_bin"
+cat > "$restore_race_bin/mv" <<'EOF'
+#!/bin/sh
+# 第一次 mv（讓位那一步）真正執行之前，模擬並行行程搶先在可預測路徑建目錄。
+if [ ! -e "$BETTER_RM_RACE_MARKER" ]; then
+    race_dir="$BETTER_RM_RACE_DEST.better-rm-restore-$PPID"
+    printf '%s\n' "$race_dir" > "$BETTER_RM_RACE_MARKER"
+    mkdir "$race_dir" 2>/dev/null
+    printf '%s\n' "UNRELATED SENTINEL" > "$race_dir/unrelated-sentinel.txt" 2>/dev/null
+fi
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$restore_race_bin/mv"
+
+printf '%s\n' "TRASHED CONTENT" > restore_race.txt
+"$BETTER_RM" restore_race.txt
+printf '%s\n' "LOCAL CONTENT" > restore_race.txt
+restore_race_marker="$TEST_WORK_DIR/restore-race-marker"
+restore_race_status=0
+BETTER_RM_RACE_MARKER="$restore_race_marker" \
+BETTER_RM_RACE_DEST="$TEST_WORK_DIR/restore_race.txt" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$restore_race_bin:$PATH" \
+    "$BETTER_RM" -f --restore restore_race.txt >/dev/null 2>&1 ||
+    restore_race_status=$?
+
+restore_race_sentinel="$(find "$TEST_WORK_DIR" -maxdepth 2 -name 'unrelated-sentinel.txt' 2>/dev/null | head -1)"
+if [ -s "$restore_race_marker" ] && \
+   [ "$restore_race_status" -eq 0 ] && \
+   [ "$(cat restore_race.txt)" = "TRASHED CONTENT" ] && \
+   [ -n "$restore_race_sentinel" ] && \
+   [ "$(cat "$restore_race_sentinel")" = "UNRELATED SENTINEL" ]; then
+    test_pass "並行行程搶佔讓位路徑時，還原成功且不相干的檔案沒被刪掉"
+else
+    test_fail "還原刪掉了並行行程建立的不相干檔案 (status=$restore_race_status, sentinel='$restore_race_sentinel')"
+fi
+
 test_item "含 | 的檔名可完整刪除並還原"
 # 日誌以 | 分隔且還原時逐一切開，合法檔名裡的 | 會讓紀錄無法被解析。
 # The pipe-delimited log cannot represent a legal filename containing '|',
