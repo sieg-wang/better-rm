@@ -776,15 +776,86 @@ else
     pass "an unwritable stub never claims the hook fails closed"
 fi
 
+# ---------------------------------------------------------------------------
+# Release download boundary
+# ---------------------------------------------------------------------------
+# 測試套件不得依賴外部服務：這裡把 curl/wget 這個網路邊界換成本機替身，
+# 由 RELEASE_ASSET_DIR 提供 Release 資產。之前的版本沒有 stub，跑一次 gate
+# 就等於對 GitHub Release 發一次真實請求 —— 離線就紅、上游改版就紅，而且測不到
+# 「下載內容被竄改」這種真正該測的情境。
+# The suite must not depend on an external service. curl/wget — the network
+# boundary — are replaced with local shims served from RELEASE_ASSET_DIR.
+# BETTER_RM_TEST_RELEASE_BODY overrides the payload so a tampered or truncated
+# download can be reproduced, which a live download can never test.
+RELEASE_ASSET_DIR="$TMP_ROOT/release-assets"
+mkdir -p "$RELEASE_ASSET_DIR"
+cp "$SCRIPT_DIR/hooks/protect-important-paths.js" "$RELEASE_ASSET_DIR/protect-important-paths.js"
+cp "$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts" \
+    "$RELEASE_ASSET_DIR/opencode-protect-important-paths.ts"
+
+RELEASE_STUB_BIN="$TMP_ROOT/release-stub-bin"
+mkdir -p "$RELEASE_STUB_BIN"
+cat > "$RELEASE_STUB_BIN/curl" <<'EOF'
+#!/bin/bash
+url=""
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        -*) shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+printf '%s\n' "$url" >> "${BETTER_RM_TEST_RELEASE_LOG:-/dev/null}"
+if [ -n "${BETTER_RM_TEST_RELEASE_BODY:-}" ]; then
+    printf '%s' "$BETTER_RM_TEST_RELEASE_BODY" > "$out"
+    exit 0
+fi
+src="$BETTER_RM_TEST_RELEASE_DIR/${url##*/}"
+[ -f "$src" ] || exit 22
+/bin/cat "$src" > "$out"
+EOF
+cat > "$RELEASE_STUB_BIN/wget" <<'EOF'
+#!/bin/bash
+url=""
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -qO) out="$2"; shift 2 ;;
+        -*) shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+printf '%s\n' "$url" >> "${BETTER_RM_TEST_RELEASE_LOG:-/dev/null}"
+if [ -n "${BETTER_RM_TEST_RELEASE_BODY:-}" ]; then
+    printf '%s' "$BETTER_RM_TEST_RELEASE_BODY" > "$out"
+    exit 0
+fi
+src="$BETTER_RM_TEST_RELEASE_DIR/${url##*/}"
+[ -f "$src" ] || exit 8
+/bin/cat "$src" > "$out"
+EOF
+chmod +x "$RELEASE_STUB_BIN/curl" "$RELEASE_STUB_BIN/wget"
+
 # Missing shared hook fails before touching settings.
 MISSING_SOURCE="$TMP_ROOT/missing-source"
 mkdir -p "$MISSING_SOURCE"
 cp "$INSTALLER" "$MISSING_SOURCE/install-hooks.sh"
 chmod +x "$MISSING_SOURCE/install-hooks.sh"
 MISSING_HOME="$TMP_ROOT/missing-home"
-assert_success "missing shared hook installs from release" env HOME="$MISSING_HOME" CLAUDE_CONFIG_DIR= "$MISSING_SOURCE/install-hooks.sh" -a claude --global
+RELEASE_DOWNLOAD_LOG="$TMP_ROOT/release-download.log"
+assert_success "missing shared hook installs from release" \
+    env PATH="$RELEASE_STUB_BIN:$PATH" \
+        BETTER_RM_TEST_RELEASE_DIR="$RELEASE_ASSET_DIR" \
+        BETTER_RM_TEST_RELEASE_LOG="$RELEASE_DOWNLOAD_LOG" \
+        HOME="$MISSING_HOME" CLAUDE_CONFIG_DIR= "$MISSING_SOURCE/install-hooks.sh" -a claude --global
 assert_file "missing shared hook creates settings" "$MISSING_HOME/.claude/settings.json"
 assert_file "missing shared hook installs local runtime" "$MISSING_HOME/.claude/protect-important-paths.js"
+# 這行是「stub 真的被走到」的證據：沒有它，上面三個斷言就算改回打真網路也照樣綠。
+# Proof the stub was actually exercised; without it the assertions above would
+# stay green even if the download went back to hitting the network.
+assert_contains "the release download went through the stubbed boundary" \
+    "$(cat "$RELEASE_DOWNLOAD_LOG")" "releases/latest/download/protect-important-paths.js"
 
 echo ""
 echo "========================================"
