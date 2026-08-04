@@ -445,11 +445,13 @@ assert_equal "an up-to-date runtime hook is not rewritten or re-backed-up" "1" \
     "$(find "$STALE_HOME/.claude" -maxdepth 1 -name 'protect-important-paths.js.better-rm.bak.*' | wc -l | tr -d ' ')"
 
 # The refresh must not depend on `stat`: its flags are not portable between BSD
-# and GNU userland. GNU `stat -f '%Lp'` reports FILE SYSTEM status, prints '?'
-# for the unknown %L directive and exits 0, so a BSD-first probe silently yields
-# '?p' on Linux/WSL and the chmod built from it fails mid-install. This shim
-# reproduces that shape on any platform: every stat call returns junk with a
-# success status, so any surviving stat dependency shows up as a failed install.
+# and GNU userland. GNU `stat -f` means FILE SYSTEM status and takes the format
+# only via -c/--printf, so `stat -f '%Lp' FILE` treats '%Lp' as a second operand:
+# it reports an error for that name on stderr and exits 1, yet still prints
+# FILE's filesystem block on stdout. A BSD-first probe therefore does fall
+# through to its `|| stat -c '%a'` fallback, and the command substitution
+# captures BOTH outputs, so the chmod built from them fails mid-install. This
+# shim reproduces that shape on any platform.
 STAT_HOME="$TMP_ROOT/hostile-stat-home"
 mkdir -p "$STAT_HOME/.claude"
 STAT_HOOK="$STAT_HOME/.claude/protect-important-paths.js"
@@ -460,8 +462,17 @@ STAT_SHIM_BIN="$TMP_ROOT/hostile-stat-bin"
 mkdir -p "$STAT_SHIM_BIN"
 cat > "$STAT_SHIM_BIN/stat" <<'EOF'
 #!/bin/sh
-# Mimics GNU stat answering BSD flags (and vice versa): junk output, exit 0.
-printf '%s\n' '?p'
+# Mimics GNU stat receiving BSD flags: -f is filesystem mode, the format string
+# is taken as a filename operand, so the error goes to stderr with exit 1 while
+# the other operand's filesystem block still goes to stdout.
+if [ "$1" = "-f" ]; then
+    echo "stat: cannot read file system information for '$2': No such file or directory" >&2
+    printf '%s\n' "  File: \"$3\"" "Block size: 4096" "Blocks: Total: 1 Free: 1"
+    exit 1
+fi
+# The GNU spelling of "print the mode" still works, which is what makes the
+# fallback succeed and the captured output a concatenation of both.
+printf '%s\n' '644'
 exit 0
 EOF
 chmod +x "$STAT_SHIM_BIN/stat"
@@ -490,10 +501,19 @@ HALF_HOOK_HASH=$(file_hash "$HALF_HOOK")
 HALF_SETTINGS_HASH=$(file_hash "$HALF_HOME/.claude/settings.json")
 FAILING_NODE_BIN="$TMP_ROOT/failing-node-bin"
 mkdir -p "$FAILING_NODE_BIN"
-cat > "$FAILING_NODE_BIN/node" <<'EOF'
+REAL_NODE=$(command -v node)
+cat > "$FAILING_NODE_BIN/node" <<EOF
 #!/bin/sh
-echo "simulated node failure" >&2
-exit 1
+# Fail ONLY the settings merge, which is the sole \`node -\` (script on stdin)
+# invocation. A blunt always-fail shim would also break the installer's own
+# check that the freshly written hook still denies, so the install would abort
+# inside the refresh instead of before it, and the ordering under test would
+# never be exercised at all.
+if [ "\$1" = "-" ]; then
+    echo "simulated node failure" >&2
+    exit 1
+fi
+exec "$REAL_NODE" "\$@"
 EOF
 chmod +x "$FAILING_NODE_BIN/node"
 if (
@@ -510,6 +530,84 @@ assert_equal "a failed settings merge leaves the settings untouched" \
     "$HALF_SETTINGS_HASH" "$(file_hash "$HALF_HOME/.claude/settings.json")"
 assert_equal "a failed settings merge leaves no hook backup behind" "0" \
     "$(find "$HALF_HOME/.claude" -maxdepth 1 -name 'protect-important-paths.js.better-rm.bak.*' | wc -l | tr -d ' ')"
+
+# A hook that exits 0 with no output is an ALLOW under every agent contract in
+# this repo, so a truncated or 0-byte runtime hook does not merely fail to
+# update — it disarms the guard completely. That state must be unreachable no
+# matter which write fails, and it is worse than the stale hook being replaced.
+hook_is_permissive() {
+    local out status
+    out=$(printf '%s' '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"},"cwd":"/"}' | node "$1" 2>/dev/null)
+    status=$?
+    if [ "$status" -eq 0 ] && ! printf '%s' "$out" | grep -q '"permissionDecision":"deny"'; then
+        return 0
+    fi
+    return 1
+}
+
+DISARM_HOME="$TMP_ROOT/disarm-home"
+mkdir -p "$DISARM_HOME/.claude"
+DISARM_HOOK="$DISARM_HOME/.claude/protect-important-paths.js"
+printf '#!/usr/bin/env node\n// stale hook, every write will fail\n' > "$DISARM_HOOK"
+printf '{"env":{"KEEP_ME":"yes"}}\n' > "$DISARM_HOME/.claude/settings.json"
+FAILING_CAT_BIN="$TMP_ROOT/failing-cat-bin"
+mkdir -p "$FAILING_CAT_BIN"
+cat > "$FAILING_CAT_BIN/cat" <<'EOF'
+#!/bin/sh
+# The shell truncated the redirect target before this ran, so failing here is
+# exactly the shape of a half-completed write: the destination is now empty.
+exit 1
+EOF
+chmod +x "$FAILING_CAT_BIN/cat"
+if (
+    cd "$TMP_ROOT"
+    PATH="$FAILING_CAT_BIN:$PATH" HOME="$DISARM_HOME" CLAUDE_CONFIG_DIR= "$INSTALLER" -a claude --global >/dev/null 2>&1
+); then
+    fail "a failed hook write aborts the install"
+else
+    pass "a failed hook write aborts the install"
+fi
+if hook_is_permissive "$DISARM_HOOK"; then
+    fail "a failed hook write never leaves an allow-everything hook"
+else
+    pass "a failed hook write never leaves an allow-everything hook"
+fi
+assert_equal "a failed hook write keeps a backup to recover from" "1" \
+    "$(find "$DISARM_HOME/.claude" -maxdepth 1 -name 'protect-important-paths.js.better-rm.bak.*' | wc -l | tr -d ' ')"
+DISARM_BACKUP=$(find "$DISARM_HOME/.claude" -maxdepth 1 -name 'protect-important-paths.js.better-rm.bak.*' | head -1)
+assert_contains "the recoverable backup holds the previous hook" "$(cat "$DISARM_BACKUP")" "stale hook, every write will fail"
+
+# The dangerous shape is a write that REPORTS SUCCESS while leaving the file
+# empty or partial: nothing in the exit status betrays it, so the install would
+# happily declare victory over a hook that allows everything. The only way to
+# know is to run the freshly written hook and require it to still deny.
+SILENT_HOME="$TMP_ROOT/silent-truncation-home"
+mkdir -p "$SILENT_HOME/.claude"
+SILENT_HOOK="$SILENT_HOME/.claude/protect-important-paths.js"
+printf '#!/usr/bin/env node\n// stale hook, writes silently truncate\n' > "$SILENT_HOOK"
+printf '{"env":{"KEEP_ME":"yes"}}\n' > "$SILENT_HOME/.claude/settings.json"
+SILENT_CAT_BIN="$TMP_ROOT/silent-cat-bin"
+mkdir -p "$SILENT_CAT_BIN"
+cat > "$SILENT_CAT_BIN/cat" <<'EOF'
+#!/bin/sh
+# Writes nothing and reports success: the redirect target has already been
+# truncated by the shell, so the caller sees exit 0 over an empty file.
+exit 0
+EOF
+chmod +x "$SILENT_CAT_BIN/cat"
+if (
+    cd "$TMP_ROOT"
+    PATH="$SILENT_CAT_BIN:$PATH" HOME="$SILENT_HOME" CLAUDE_CONFIG_DIR= "$INSTALLER" -a claude --global >/dev/null 2>&1
+); then
+    fail "a silently truncated hook write is not reported as success"
+else
+    pass "a silently truncated hook write is not reported as success"
+fi
+if hook_is_permissive "$SILENT_HOOK"; then
+    fail "a silently truncated hook write never leaves an allow-everything hook"
+else
+    pass "a silently truncated hook write never leaves an allow-everything hook"
+fi
 
 # Missing shared hook fails before touching settings.
 MISSING_SOURCE="$TMP_ROOT/missing-source"

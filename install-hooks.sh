@@ -264,6 +264,34 @@ resolve_shared_hook_for_settings() {
 }
 
 # 註冊成功後才替換過期的 runtime hook（由 main 在 agent 安裝完成後呼叫）
+# 實測 runtime hook 是否真的會擋下受保護的刪除。
+# 只看寫入指令的回傳值不夠：截斷或 0 byte 的 hook 一樣「寫入成功」，執行起來卻是
+# exit 0、無輸出，等同放行一切。payload 純粹是資料，永遠不會被執行。
+# Prove the runtime hook still denies a protected deletion. The write's exit
+# status is not enough: a truncated or 0-byte file writes "successfully" yet
+# runs as exit 0 with no output, i.e. it allows everything. The payload is data
+# for the parser and is never executed.
+hook_denies_protected_deletion() {
+    printf '%s' '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"},"cwd":"/"}' \
+        | node "$1" 2>/dev/null \
+        | grep -q '"permissionDecision":"deny"'
+}
+
+# 寫入一個必定 fail-closed 的 stub：沿用本專案既有約定，exit 2 對 Claude Code
+# PreToolUse 是「阻擋」，其餘 agent 也只會看到非零結束碼與空 stdout。
+# Write a stub that always fails closed. Exit 2 is this project's existing
+# convention for a blocking PreToolUse error; other agents see a non-zero exit
+# and empty stdout, which is never an allow.
+write_fail_closed_hook_stub() {
+    printf '%s\n' \
+        '#!/usr/bin/env node' \
+        '// better-rm: 這個 runtime hook 更新失敗，內容不可信任，因此保持 fail-closed。' \
+        '// better-rm: this runtime hook failed to update; it stays fail-closed until restored.' \
+        "console.error('better-rm hook 未正確安裝，已拒絕工具呼叫 / better-rm hook is not installed correctly; tool call denied');" \
+        'process.exit(2);' \
+        > "$1"
+}
+
 # Replace a stale runtime hook only after registration succeeded; main calls
 # this once the agent installer returned without error.
 apply_pending_hook_refresh() {
@@ -279,17 +307,53 @@ apply_pending_hook_refresh() {
     done
     cp "$HOOK_PATH" "$backup_path"
 
-    # 就地覆寫內容而非換檔：inode 不變，權限與擁有者自然保留，因此完全不需要
-    # stat/chmod —— stat 的旗標在 BSD 與 GNU userland 並不相容
-    # （GNU 的 `stat -f '%Lp'` 會印出 '?p' 且結束碼為 0，接著 chmod 就會失敗）。
-    # Overwrite the content in place instead of replacing the file: the inode is
-    # kept, so mode and owner survive without stat/chmod — stat's flags are not
-    # portable between BSD and GNU userland (GNU `stat -f '%Lp'` prints '?p' and
-    # exits 0, and the chmod that follows then fails).
-    if ! cat "$HOOK_SOURCE_PATH" > "$HOOK_PATH"; then
-        cat "$backup_path" > "$HOOK_PATH" || true
-        error "更新共用 hook 失敗，已還原原本的檔案：$HOOK_PATH"
-        error "Failed to update shared hook; restored the previous file: $HOOK_PATH"
+    # 就地覆寫內容（不換檔）：inode 不變，權限與擁有者自然保留，所以不需要先讀
+    # 原本的 mode，也就完全不必用 stat —— stat 的旗標在 BSD 與 GNU userland 並不
+    # 相容（GNU 的 `-f` 是「檔案系統狀態」，會把 '%Lp' 當成另一個檔名：stderr 報
+    # 錯、結束碼 1，但仍把該檔案的檔案系統資訊印到 stdout；於是 `||` 後援確實會
+    # 執行，命令替換卻把「兩段 stdout」一起收下，chmod 就吃到垃圾而失敗）。
+    # 註：未經 alias 的 `cp` 覆寫既有檔案時同樣保留目的地的 mode 與 inode，
+    # 因此這裡用 cat 只是為了「不需要 mode」這件事更明顯，並非 cp 不可用。
+    # Overwrite the content in place: the inode is kept, so mode and owner
+    # survive and the original mode never has to be read — which removes the
+    # need for stat, whose flags are not portable (GNU `-f` means FILE SYSTEM
+    # status and treats '%Lp' as another operand: it errors on stderr and exits
+    # 1 but still prints that file's filesystem info on stdout, so the `||`
+    # fallback does run and the command substitution captures BOTH outputs,
+    # feeding chmod garbage).
+    # Note: an unaliased `cp` onto an existing file preserves the destination's
+    # mode and inode just the same. cat is used here only to make "no mode is
+    # needed" obvious, not because cp is unusable.
+    if ! cat "$HOOK_SOURCE_PATH" > "$HOOK_PATH" \
+        || ! hook_denies_protected_deletion "$HOOK_PATH"; then
+        # 寫入可能只完成一半。截斷或 0 byte 的 hook 會以 exit 0、空輸出結束，
+        # 而那被每個 agent 契約解讀為「允許」——防護等於被完全解除，比原本那份
+        # 過期的 hook 還危險。因此還原之後必須驗證，不能只看回傳值。
+        # The write may have half-completed. A truncated or 0-byte hook exits 0
+        # with no output, which every agent contract reads as ALLOW: the guard
+        # would be fully disarmed, which is worse than the stale hook it
+        # replaced. The restore therefore has to be verified, not assumed.
+        if cat "$backup_path" > "$HOOK_PATH" 2>/dev/null && cmp -s "$backup_path" "$HOOK_PATH"; then
+            error "更新共用 hook 失敗，已還原並驗證原本的檔案：$HOOK_PATH"
+            error "Failed to update shared hook; restored and verified the previous file: $HOOK_PATH"
+            exit 1
+        fi
+
+        # 還原也失敗：此刻磁碟上的 hook 可能是截斷的，也就是「全部允許」。
+        # 寧可留下一個必定阻擋的 stub，也不要留下一個不擋任何東西的檔案。
+        # 用 shell 內建的 printf 寫入，才不會再次依賴剛剛失敗的那個外部工具。
+        # The restore failed too, so the file on disk may be truncated — that is
+        # the allow-everything state. Leaving a stub that blocks everything is
+        # strictly safer than leaving a file that blocks nothing. It is written
+        # with the printf builtin so it does not depend on the external tool
+        # that just failed.
+        if ! write_fail_closed_hook_stub "$HOOK_PATH"; then
+            error "連 fail-closed stub 都無法寫入，$HOOK_PATH 的內容不可信任"
+            error "Could not even write the fail-closed stub; $HOOK_PATH must not be trusted"
+        fi
+        error "更新與還原共用 hook 都失敗，已改為 fail-closed（拒絕所有工具呼叫）"
+        error "Both the update and the restore failed; the hook now fails closed (every tool call is denied)"
+        error "請從備份還原 / Restore it from the backup: $backup_path"
         exit 1
     fi
 

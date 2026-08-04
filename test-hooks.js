@@ -381,4 +381,42 @@ for (const command of dynamicExecutableAllowed) {
   stdinChecks += 1;
 }
 
-console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks}`);
+// A truncated or 0-byte hook file cannot be told apart from a hook that allows:
+// an empty program exits 0 and prints nothing, and every agent contract above
+// reads "exit 0, no output" as allow. Nothing inside the hook can change that,
+// so the property has to be owned by whoever writes the file — install-hooks.sh
+// verifies the freshly written hook still denies, and otherwise leaves a stub
+// that exits 2. These assertions pin both halves: that the hazard is real (so
+// the installer-side guarantee is not dead weight someone may delete), and that
+// the fail-closed stub shape is never read as an allow.
+const fs = require('fs');
+const os = require('os');
+const denyPayload = JSON.stringify(claude('rm -rf /', '/'));
+const scratch = fs.mkdtempSync(`${os.tmpdir()}/better-rm-hook-shape-`);
+let hookShapeChecks = 0;
+
+const realHook = spawnSync('node', [`${__dirname}/hooks/protect-important-paths.js`], { input: denyPayload, encoding: 'utf8', env: { ...process.env, ...env } });
+assert.equal(realHook.status, 0, 'the real hook exits 0');
+assert.match(realHook.stdout, /"permissionDecision":"deny"/, 'the real hook denies a protected deletion');
+hookShapeChecks += 1;
+
+const emptyHook = `${scratch}/empty.js`;
+fs.writeFileSync(emptyHook, '');
+const emptyResult = spawnSync('node', [emptyHook], { input: denyPayload, encoding: 'utf8' });
+assert.equal(emptyResult.status, 0, 'a 0-byte hook exits 0');
+assert.equal(emptyResult.stdout, '', 'a 0-byte hook prints nothing');
+// Same shape as an explicit allow: this is the disarmed state the installer
+// must never leave behind.
+assert.equal(evaluate(claude('ls'), env), null, 'allow is expressed as no output');
+hookShapeChecks += 1;
+
+const stubHook = `${scratch}/stub.js`;
+fs.writeFileSync(stubHook, "console.error('hook is not installed correctly');\nprocess.exit(2);\n");
+const stubResult = spawnSync('node', [stubHook], { input: denyPayload, encoding: 'utf8' });
+assert.equal(stubResult.status, 2, 'the fail-closed stub exits 2 (blocking for PreToolUse)');
+assert.equal(stubResult.stdout, '', 'the fail-closed stub prints no allow');
+hookShapeChecks += 1;
+
+fs.rmSync(scratch, { recursive: true, force: true });
+
+console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks}`);
