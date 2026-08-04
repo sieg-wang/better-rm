@@ -1149,6 +1149,153 @@ else
     test_fail "搬移失敗時毀掉了既有目的地或垃圾桶項目 (status=$restore_fail_status)"
 fi
 
+test_item "還原：起初不存在、途中才出現的真目錄，連一次搬進去的嘗試都不可以有"
+# 目的地在同意檢查時不存在，就沒有任何覆蓋授權；之後才出現的目錄不是合法的覆蓋對象。
+# 只靠事後的 inode 驗證是不夠的：BSD mv 會把項目搬「進」那個目錄，事後再撈出來。撈得
+# 回來是運氣，撈不回來（例如對方目錄隨即變成不可寫）項目就卡在別人的樹裡。因此契約
+# 是「未經授權的目的地，連一次 mv 的落點都不可以是它」，shim 記錄每一次 mv 的落點來
+# 驗證這件事。
+# The destination did not exist at the consent check, so no overwrite was ever
+# authorized and a directory appearing later is not a legal overwrite target.
+# Verifying by inode afterwards is not enough: BSD mv moves the item INTO that
+# directory and only then is it pulled back out. Getting it back is luck; if the
+# newcomer's directory turns unwritable in between, the item is stranded inside
+# someone else's tree. The contract is therefore "an unauthorized destination must
+# never be the target of even one mv", and the shim records every mv target to
+# prove it.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+late_dir_bin="$TEST_WORK_DIR/restore-late-dir-bin"
+mkdir -p "$late_dir_bin"
+cat > "$late_dir_bin/mv" <<'EOF'
+#!/bin/sh
+if [ ! -e "$BETTER_RM_LATE_MARKER" ]; then
+    mkdir "$BETTER_RM_LATE_DEST" || exit 1
+    printf '%s\n' "LATE DIRECTORY" > "$BETTER_RM_LATE_DEST/marker.txt"
+    : > "$BETTER_RM_LATE_MARKER"
+fi
+for a in "$@"; do dst=$a; done
+printf '%s\n' "$dst" >> "$BETTER_RM_LATE_TARGETS"
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$late_dir_bin/mv"
+
+printf '%s\n' "TRASHED CONTENT" > late_dir_target.txt
+"$BETTER_RM" late_dir_target.txt
+late_dir_trash_item=$(find "$TEST_TRASH_DIR" -type f -name 'late_dir_target.txt__*' | head -1)
+late_dir_status=0
+BETTER_RM_LATE_MARKER="$TEST_WORK_DIR/late-dir-marker" \
+BETTER_RM_LATE_DEST="$TEST_WORK_DIR/late_dir_target.txt" \
+BETTER_RM_LATE_TARGETS="$TEST_WORK_DIR/late-dir-targets" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$late_dir_bin:$PATH" \
+    "$BETTER_RM" --restore late_dir_target.txt >/dev/null 2>&1 ||
+    late_dir_status=$?
+
+late_displaced=$(find "$TEST_WORK_DIR" -name '.better-rm-displaced' -print -quit 2>/dev/null)
+late_attempts=0
+if [ -f "$TEST_WORK_DIR/late-dir-targets" ]; then
+    late_attempts=$(grep -cxF "$TEST_WORK_DIR/late_dir_target.txt" \
+        "$TEST_WORK_DIR/late-dir-targets" 2>/dev/null || true)
+    late_attempts=${late_attempts:-0}
+fi
+if [ "$late_dir_status" -eq 1 ] && \
+   [ -d late_dir_target.txt ] && \
+   [ "$(cat late_dir_target.txt/marker.txt 2>/dev/null)" = "LATE DIRECTORY" ] && \
+   [ -n "$late_dir_trash_item" ] && [ -f "$late_dir_trash_item" ] && \
+   [ "$(cat "$late_dir_trash_item")" = "TRASHED CONTENT" ] && \
+   [ "$late_attempts" -eq 0 ] && \
+   [ -z "$late_displaced" ]; then
+    test_pass "未經授權的目的地從未成為任何 mv 的落點，垃圾桶項目也完整放回"
+else
+    test_fail "途中出現的真目錄被當成落點或吞掉垃圾桶項目 (status=$late_dir_status, attempts=$late_attempts)"
+fi
+
+test_item "還原：所有檢查都通過後、就位前一刻才出現的真目錄仍不得被覆蓋"
+# 比上一個測試更晚的窗口：目錄在「取出完成、前置存在性檢查也已通過」之後才出現，
+# 就在 publish 的那一次 mv 之前。此時唯一還能擋住覆蓋的是 publish 用 -n 加上事後的
+# inode 驗證。shim 只依「第 N 次 mv」動手，不依賴 better-rm 的任何內部命名。
+# A strictly later window than the previous test: the directory appears after the
+# extraction and after the existence gate has passed, immediately before the
+# publishing mv. The only thing that can still prevent a clobber at that point is
+# the -n publish plus the inode check after it. The shim keys off "the Nth mv"
+# only, never on any internal naming.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+publish_bin="$TEST_WORK_DIR/restore-publish-bin"
+mkdir -p "$publish_bin"
+cat > "$publish_bin/mv" <<'EOF'
+#!/bin/sh
+n=$(cat "$BETTER_RM_PUBLISH_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s' "$n" > "$BETTER_RM_PUBLISH_COUNT"
+if [ "$n" -eq 2 ]; then
+    mkdir "$BETTER_RM_PUBLISH_DEST" || exit 1
+    printf '%s\n' "LATE DIRECTORY" > "$BETTER_RM_PUBLISH_DEST/marker.txt"
+fi
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$publish_bin/mv"
+
+printf '%s\n' "TRASHED CONTENT" > publish_target.txt
+"$BETTER_RM" publish_target.txt
+publish_trash_item=$(find "$TEST_TRASH_DIR" -type f -name 'publish_target.txt__*' | head -1)
+publish_status=0
+BETTER_RM_PUBLISH_COUNT="$TEST_WORK_DIR/publish-count" \
+BETTER_RM_PUBLISH_DEST="$TEST_WORK_DIR/publish_target.txt" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$publish_bin:$PATH" \
+    "$BETTER_RM" --restore publish_target.txt >/dev/null 2>&1 ||
+    publish_status=$?
+publish_staging=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'publish_target.txt.better-rm-restore-*' -print -quit 2>/dev/null)
+
+if [ "$publish_status" -eq 1 ] && \
+   [ -d publish_target.txt ] && \
+   [ "$(cat publish_target.txt/marker.txt 2>/dev/null)" = "LATE DIRECTORY" ] && \
+   [ -n "$publish_trash_item" ] && [ -f "$publish_trash_item" ] && \
+   [ "$(cat "$publish_trash_item")" = "TRASHED CONTENT" ] && \
+   [ -z "$publish_staging" ]; then
+    test_pass "publish 前一刻出現的目錄未被覆蓋，垃圾桶項目完整放回且不殘留 staging"
+else
+    test_fail "publish 前的競態覆蓋了新目錄、吞掉垃圾桶項目或留下 staging (status=$publish_status)"
+fi
+
+test_item "還原：已授權覆蓋真目錄時完成還原，舊目錄進垃圾桶且可再還原"
+# 覆蓋等於刪除。使用者同意的是「換掉」，不是「銷毀」：舊目的地必須用工具自己的垃圾桶
+# 機制保存，結束碼維持 0，且不得在使用者的資料夾留下暫存殘骸。
+# An overwrite is a deletion. The user consented to replacing the directory, not
+# to destroying it: the old destination has to be preserved through the tool's own
+# trash, the exit code stays 0, and no staging debris may be left behind.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+mkdir -p authorized_dir
+printf '%s\n' "TRASHED MARKER" > authorized_dir/marker.txt
+"$BETTER_RM" -r authorized_dir
+mkdir -p authorized_dir
+printf '%s\n' "LOCAL MARKER" > authorized_dir/marker.txt
+authorized_status=0
+authorized_output=$("$BETTER_RM" -f --restore authorized_dir 2>&1) ||
+    authorized_status=$?
+authorized_staging=$(find "$TEST_WORK_DIR" -maxdepth 1 \
+    -type d -name 'authorized_dir.better-rm-restore-*' -print -quit)
+authorized_trashed_local=$(find "$TEST_TRASH_DIR" -type f -name marker.txt \
+    -exec grep -lFx "LOCAL MARKER" {} + 2>/dev/null | head -1)
+# 舊目錄必須真的能被再還原回來，而不只是「檔案還躺在垃圾桶某處」。
+# The old directory must actually restore, not merely sit somewhere in the trash.
+authorized_recover_status=0
+rm -rf authorized_dir
+"$BETTER_RM" -f --restore authorized_dir >/dev/null 2>&1 || authorized_recover_status=$?
+if [ "$authorized_status" -eq 0 ] && \
+   [ -z "$authorized_staging" ] && \
+   [ -n "$authorized_trashed_local" ] && \
+   [[ "$authorized_output" == *"--restore"* ]] && \
+   [ "$authorized_recover_status" -eq 0 ] && \
+   [ "$(cat authorized_dir/marker.txt 2>/dev/null)" = "LOCAL MARKER" ]; then
+    test_pass "已授權真目錄還原以 0 完成，舊目錄進垃圾桶並可再度還原"
+else
+    test_fail "已授權真目錄還原未以 0 完成或舊目錄不可還原 (status=$authorized_status, recover=$authorized_recover_status)"
+fi
+
 test_item "還原時讓位路徑被並行行程搶佔，不得刪到別人的檔案"
 # 讓位路徑一旦可預測（$dest.better-rm-restore-<PID>）且以 [ -e ] 探路後才 mv，
 # 兩者之間就有空窗：並行行程在空窗內於同一路徑建目錄，mv 會把既有檔案「搬進」
@@ -1280,89 +1427,393 @@ else
     test_fail "落點被搶佔時吞掉了垃圾桶項目或動到既有檔案 (status=$occupy_status)"
 fi
 
-test_item "還原：讓位落點被搶佔時，不得把不是自己讓出來的目錄當成讓位物"
-# 目的地是真目錄時 rename 無法取代它，仍必須讓位。若讓位後不驗證「站在讓位路徑上的
-# 就是剛才那個目錄」，並行行程只要搶先佔用該路徑，後續的刪除就會刪到對方的資料。
-# A real directory at the destination cannot be replaced by a rename and still has
-# to be set aside. Without verifying that the object now standing at the set-aside
-# path is the very one just moved there, a concurrent process that occupies that
-# path first gets its own data deleted later.
+# 以下兩個測試共用同一支 stat shim：它先用真實的 device:inode 回答呼叫端，緊接著在
+# 同一次呼叫裡把該 pathname 換成不相干的目錄。這模擬的是「檢查通過之後、下一個
+# syscall 之前」被同 UID 行程掉包 —— shell 無法把兩者合成一個原子操作，所以真正要
+# 釘住的契約是：讓位動作永遠只能是「移動」，絕不可以是遞迴刪除。
+# The two tests below share one stat shim. It answers the caller with the genuine
+# device:inode and then, inside the same call, swaps that pathname for an
+# unrelated directory. That is exactly a same-UID swap between a passed check and
+# the next syscall, which no shell can make atomic. The contract being pinned is
+# therefore: clearing a destination out of the way must always be a MOVE, never a
+# recursive delete.
+make_dest_swap_shim() {
+    local shim_bin="$1"
+    mkdir -p "$shim_bin"
+    cat > "$shim_bin/stat" <<'EOF'
+#!/bin/sh
+last=""
+for arg in "$@"; do last="$arg"; done
+if [ "$last" = "$BETTER_RM_SWAP_KEY" ]; then
+    n=$(cat "$BETTER_RM_SWAP_COUNT" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    printf '%s' "$n" > "$BETTER_RM_SWAP_COUNT"
+    identity=$("$BETTER_RM_REAL_STAT" -f '%d:%i' "$last" 2>/dev/null) || exit 1
+    printf '%s\n' "$identity"
+    if [ "$n" -eq "$BETTER_RM_SWAP_AT" ]; then
+        "$BETTER_RM_REAL_MV" "$BETTER_RM_SWAP_DEST" "$BETTER_RM_SWAP_KIDNAP" || exit 1
+        "$BETTER_RM_REAL_MV" "$BETTER_RM_SWAP_PRECIOUS" "$BETTER_RM_SWAP_DEST" || exit 1
+    fi
+    exit 0
+fi
+exec "$BETTER_RM_REAL_STAT" "$@"
+EOF
+    chmod +x "$shim_bin/stat"
+}
+
+test_item "還原：讓位前一刻目的地被掉包，必須中止且不得動到任何一方的資料"
+# 目的地被證明過 inode 之後、真正讓位之前的窗口。讓位動作必須綁在那個已證明的
+# inode 上：pathname 上換了東西就中止，而不是把不相干的目錄拿去讓位。
+# The window between proving the destination's inode and actually clearing it.
+# The clearing step must be bound to that proven inode: if the pathname now holds
+# something else the restore aborts instead of displacing an unrelated directory.
 setup
-cd "$TEST_WORK_DIR"
-displace_bin="$TEST_WORK_DIR/restore-displace-bin"
-make_restore_race_shim "$displace_bin"
+cd "$TEST_WORK_DIR" || exit 1
+swapa_bin="$TEST_WORK_DIR/restore-swapa-bin"
+make_dest_swap_shim "$swapa_bin"
 
-mkdir -p displace_dir
-printf '%s\n' "TRASHED MARKER" > displace_dir/marker.txt
-"$BETTER_RM" -r displace_dir
-mkdir -p displace_dir
-printf '%s\n' "LOCAL MARKER" > displace_dir/marker.txt
-mkdir -p precious_displace
-printf '%s\n' "PRECIOUS SENTINEL" > precious_displace/sentinel.txt
-displace_trash_item=$(find "$TEST_TRASH_DIR" -type d -name "displace_dir__*" | head -1)
-displace_status=0
-BETTER_RM_RACE_COUNT="$TEST_WORK_DIR/displace-count" \
-BETTER_RM_RACE_OCCUPY=2 \
-BETTER_RM_RACE_PRECIOUS="$TEST_WORK_DIR/precious_displace" \
+mkdir -p swapa_dir
+printf '%s\n' "TRASHED MARKER" > swapa_dir/marker.txt
+"$BETTER_RM" -r swapa_dir
+mkdir -p swapa_dir
+printf '%s\n' "LOCAL MARKER" > swapa_dir/marker.txt
+mkdir -p precious_swapa
+printf '%s\n' "PRECIOUS SENTINEL" > precious_swapa/sentinel.txt
+swapa_trash_item=$(find "$TEST_TRASH_DIR" -type d -name 'swapa_dir__*' | head -1)
+swapa_status=0
+BETTER_RM_SWAP_KEY="$TEST_WORK_DIR/swapa_dir" \
+BETTER_RM_SWAP_AT=1 \
+BETTER_RM_SWAP_COUNT="$TEST_WORK_DIR/swapa-count" \
+BETTER_RM_SWAP_DEST="$TEST_WORK_DIR/swapa_dir" \
+BETTER_RM_SWAP_KIDNAP="$TEST_WORK_DIR/swapa_kidnapped" \
+BETTER_RM_SWAP_PRECIOUS="$TEST_WORK_DIR/precious_swapa" \
+BETTER_RM_REAL_STAT="$(command -v stat)" \
 BETTER_RM_REAL_MV="$(command -v mv)" \
-PATH="$displace_bin:$PATH" \
-    "$BETTER_RM" -f --restore displace_dir >/dev/null 2>&1 ||
-    displace_status=$?
+PATH="$swapa_bin:$PATH" \
+    "$BETTER_RM" -f --restore swapa_dir >/dev/null 2>&1 ||
+    swapa_status=$?
 
-if [ "$displace_status" -ne 0 ] && \
-   [ "$(cat displace_dir/marker.txt 2>/dev/null)" = "LOCAL MARKER" ] && \
-   [ -n "$displace_trash_item" ] && \
-   [ "$(cat "$displace_trash_item/marker.txt" 2>/dev/null)" = "TRASHED MARKER" ] && \
-   [ "$(count_precious_sentinels)" -eq 1 ]; then
-    test_pass "讓位落點被搶佔時中止還原，三方資料都完好"
+swapa_trashed_precious=$(find "$TEST_TRASH_DIR" -type f -name sentinel.txt \
+    -exec grep -lFx "PRECIOUS SENTINEL" {} + 2>/dev/null | head -1)
+if [ "$swapa_status" -eq 1 ] && \
+   [ -s "$TEST_WORK_DIR/swapa-count" ] && \
+   [ -n "$swapa_trash_item" ] && \
+   [ "$(cat "$swapa_trash_item/marker.txt" 2>/dev/null)" = "TRASHED MARKER" ] && \
+   [ "$(cat swapa_kidnapped/marker.txt 2>/dev/null)" = "LOCAL MARKER" ] && \
+   [ "$(count_precious_sentinels)" -eq 1 ] && \
+   [ -z "$swapa_trashed_precious" ]; then
+    test_pass "讓位前被掉包時中止還原，垃圾桶項目、既有目錄與他人資料都沒被動到"
 else
-    test_fail "讓位落點被搶佔時動到了既有目錄、垃圾桶項目或他人資料 (status=$displace_status)"
+    test_fail "讓位前被掉包時仍讓位、消耗垃圾桶項目或動到他人資料 (status=$swapa_status)"
 fi
 
-test_item "還原：讓位物在刪除前被掉包，必須拒絕刪除且不得回報成功"
-# 讓位與刪除之間隔著一次真正的 rename，並行行程可以在這段時間把讓位路徑上的物件換
-# 成自己的資料。刪除前若不重新驗證 inode，/bin/rm -rf 就會刪掉對方的目錄，而
-# --restore 仍回報 exit 0 —— 「成功」與「毀掉不相干資料」同時成立。
-# 部分成功的結束碼契約：還原確實完成、但清理因偵測到並行干擾而未執行時回傳 2，
-# 絕不回傳 0。
-# A real rename sits between the set-aside and the delete, and a concurrent
-# process can swap the object at the set-aside path within it. Without
-# re-verifying the inode right before the delete, /bin/rm -rf takes the other
-# process's directory while --restore still reports exit 0 — success and
-# destruction of unrelated data at the same time. Exit contract for a partially
-# successful restore: the restore itself completed but the cleanup was refused
-# after detecting interference, so it returns 2 and never 0.
+test_item "還原：讓位動作自身的最後窗口被掉包，資料只能進垃圾桶、絕不可被銷毀"
+# 讓位動作內部「最後一次 stat」與「真正的 mv」之間仍是兩個 syscall，shell 無法合成
+# 原子操作。因此契約不是「絕不會搬錯」，而是「搬錯也只是搬進垃圾桶」：被掉包的目錄
+# 必須整份留在垃圾桶裡，任何情況下都不得被遞迴刪除。
+# Inside the clearing step, the last stat and the actual mv are still two
+# syscalls and no shell can fuse them. The contract is therefore not "it can
+# never move the wrong object" but "moving the wrong object can only ever mean
+# moving it INTO THE TRASH": the swapped directory must survive there in full.
+# It must never be recursively deleted.
 setup
-cd "$TEST_WORK_DIR"
-swap_bin="$TEST_WORK_DIR/restore-swap-bin"
-make_restore_race_shim "$swap_bin"
+cd "$TEST_WORK_DIR" || exit 1
+swapb_bin="$TEST_WORK_DIR/restore-swapb-bin"
+make_dest_swap_shim "$swapb_bin"
 
-mkdir -p swap_dir
-printf '%s\n' "TRASHED MARKER" > swap_dir/marker.txt
-"$BETTER_RM" -r swap_dir
-mkdir -p swap_dir
-printf '%s\n' "LOCAL MARKER" > swap_dir/marker.txt
-mkdir -p precious_swap
-printf '%s\n' "PRECIOUS SENTINEL" > precious_swap/sentinel.txt
-swap_status=0
-BETTER_RM_RACE_COUNT="$TEST_WORK_DIR/swap-count" \
-BETTER_RM_RACE_RECORD=2 \
-BETTER_RM_RACE_SWAP=3 \
-BETTER_RM_RACE_RECORDED="$TEST_WORK_DIR/swap-recorded" \
-BETTER_RM_RACE_KIDNAP="$TEST_WORK_DIR/kidnapped_dir" \
-BETTER_RM_RACE_PRECIOUS="$TEST_WORK_DIR/precious_swap" \
+mkdir -p swapb_dir
+printf '%s\n' "TRASHED MARKER" > swapb_dir/marker.txt
+"$BETTER_RM" -r swapb_dir
+mkdir -p swapb_dir
+printf '%s\n' "LOCAL MARKER" > swapb_dir/marker.txt
+mkdir -p precious_swapb
+printf '%s\n' "PRECIOUS SENTINEL" > precious_swapb/sentinel.txt
+printf '%s\n' "PRECIOUS SECOND" > precious_swapb/second.txt
+swapb_status=0
+swapb_output=$(BETTER_RM_SWAP_KEY="./swapb_dir" \
+BETTER_RM_SWAP_AT=2 \
+BETTER_RM_SWAP_COUNT="$TEST_WORK_DIR/swapb-count" \
+BETTER_RM_SWAP_DEST="$TEST_WORK_DIR/swapb_dir" \
+BETTER_RM_SWAP_KIDNAP="$TEST_WORK_DIR/swapb_kidnapped" \
+BETTER_RM_SWAP_PRECIOUS="$TEST_WORK_DIR/precious_swapb" \
+BETTER_RM_REAL_STAT="$(command -v stat)" \
 BETTER_RM_REAL_MV="$(command -v mv)" \
-PATH="$swap_bin:$PATH" \
-    "$BETTER_RM" -f --restore swap_dir >/dev/null 2>&1 ||
-    swap_status=$?
+PATH="$swapb_bin:$PATH" \
+    "$BETTER_RM" -f --restore swapb_dir 2>&1) ||
+    swapb_status=$?
 
-if [ "$swap_status" -eq 2 ] && \
-   [ "$(cat swap_dir/marker.txt 2>/dev/null)" = "TRASHED MARKER" ] && \
-   [ "$(cat kidnapped_dir/marker.txt 2>/dev/null)" = "LOCAL MARKER" ] && \
-   [ "$(count_precious_sentinels)" -eq 1 ]; then
-    test_pass "讓位物被掉包時拒絕刪除、保留他人資料，並以 2 回報部分成功"
+swapb_sentinel=$(find "$TEST_WORK_DIR" "$TEST_TRASH_DIR" -type f -name sentinel.txt \
+    -exec grep -lFx "PRECIOUS SENTINEL" {} + 2>/dev/null | head -1)
+swapb_second=$(find "$TEST_WORK_DIR" "$TEST_TRASH_DIR" -type f -name second.txt \
+    -exec grep -lFx "PRECIOUS SECOND" {} + 2>/dev/null | head -1)
+swapb_fired=$(cat "$TEST_WORK_DIR/swapb-count" 2>/dev/null || echo 0)
+if [ "$swapb_fired" -ge 2 ] && \
+   [ -n "$swapb_sentinel" ] && [ -n "$swapb_second" ] && \
+   [ "${swapb_sentinel#$TEST_TRASH_DIR/}" != "$swapb_sentinel" ] && \
+   [ "$(cat swapb_dir/marker.txt 2>/dev/null)" = "TRASHED MARKER" ] && \
+   [[ "$swapb_output" == *"--restore"* ]]; then
+    test_pass "讓位窗口被掉包時對方資料整份進垃圾桶，未被刪除且訊息指出取回方式"
 else
-    test_fail "讓位物被掉包時刪到他人資料或回報成功 (status=$swap_status)"
+    test_fail "讓位窗口被掉包時他人資料遭銷毀或去向未被說明 (status=$swapb_status, fired=$swapb_fired)"
+fi
+
+# rename(真目錄, 非目錄) 是 ENOTDIR，Linux 的 mv -T 同樣如此。只讓「目的地是真目錄」
+# 走讓位路徑，就會讓「還原目錄到既有檔案/symlink 上」整個失敗。
+# rename(real dir, non-dir) is ENOTDIR, and Linux's mv -T behaves the same. Giving
+# only a real-directory destination the set-aside path makes restoring a directory
+# onto an existing file or symlink fail outright.
+for dir_over_kind in file symlink symlink-to-dir; do
+    test_item "還原：垃圾桶裡的目錄可以還原到既有的 $dir_over_kind 上"
+    setup
+    cd "$TEST_WORK_DIR" || exit 1
+    mkdir -p over_dir
+    printf '%s\n' "TRASHED MARKER" > over_dir/marker.txt
+    "$BETTER_RM" -r over_dir
+    case "$dir_over_kind" in
+        file)
+            printf '%s\n' "LOCAL FILE" > over_dir
+            ;;
+        symlink)
+            printf '%s\n' "LINK TARGET" > over_target.txt
+            ln -s over_target.txt over_dir
+            ;;
+        symlink-to-dir)
+            mkdir -p over_target_dir
+            printf '%s\n' "LINK TARGET DIR" > over_target_dir/inside.txt
+            ln -s over_target_dir over_dir
+            ;;
+    esac
+    over_status=0
+    "$BETTER_RM" -f --restore over_dir >/dev/null 2>&1 || over_status=$?
+    over_litter=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'over_dir.better-rm-restore-*' | wc -l | tr -d ' ')
+    # 被覆蓋掉的舊目的地必須進垃圾桶，而不是被銷毀。
+    # The overwritten destination must go to the trash, not be destroyed.
+    if [ "$dir_over_kind" = "file" ]; then
+        over_kept=$(find "$TEST_TRASH_DIR" -type f -exec grep -lFx "LOCAL FILE" {} + 2>/dev/null | head -1)
+    else
+        over_kept=$(find "$TEST_TRASH_DIR" -type l | head -1)
+    fi
+    if [ "$over_status" -eq 0 ] && \
+       [ -d over_dir ] && [ ! -L over_dir ] && \
+       [ "$(cat over_dir/marker.txt 2>/dev/null)" = "TRASHED MARKER" ] && \
+       [ "$over_litter" -eq 0 ] && \
+       [ -n "$over_kept" ]; then
+        test_pass "目錄還原到既有 $dir_over_kind 上成功，舊目的地進了垃圾桶"
+    else
+        test_fail "目錄無法還原到既有 $dir_over_kind 上或舊目的地被銷毀 (status=$over_status)"
+    fi
+done
+
+# 跨裝置時 mv 會退化成「複製後刪除」，inode 必然改變。若把「inode 相等」當成取出
+# 成功的唯一條件，每一次跨裝置還原都必定失敗，而且垃圾桶來源已被消耗 —— 使用者的
+# 檔案只剩暫存目錄裡那一份，日誌卻仍指向已不存在的垃圾桶路徑。
+# 這裡用兩支 shim 精確重現該情境的兩個決定性性質，不需要真的掛載第二個檔案系統：
+#   stat shim -> 垃圾桶子樹回報不同的 device 編號
+#   mv shim   -> 來源在垃圾桶裡時改以 copy+unlink 執行（inode 因此必然改變）
+# Across devices mv degrades into copy-then-unlink and the inode necessarily
+# changes. Treating inode equality as the only acceptance test makes every
+# cross-device restore fail after the trash source has already been consumed: the
+# user's only copy is left in the staging directory while the log still points at
+# a trash path that no longer exists. Two shims reproduce the two decisive
+# properties without mounting a second filesystem:
+#   stat shim -> the trash subtree reports a different device number
+#   mv shim   -> a source inside the trash is moved by copy+unlink (new inode)
+make_xdev_stat_shim() {
+    local shim_bin="$1"
+    mkdir -p "$shim_bin"
+    cat > "$shim_bin/stat" <<'EOF'
+#!/bin/sh
+last=""
+for arg in "$@"; do last="$arg"; done
+case "$last" in
+  "$BETTER_RM_XDEV_TRASH"/*)
+    real=$("$BETTER_RM_REAL_STAT" -f '%d:%i' "$last" 2>/dev/null) || exit 1
+    printf '99:%s\n' "${real#*:}"
+    exit 0
+    ;;
+esac
+exec "$BETTER_RM_REAL_STAT" "$@"
+EOF
+    chmod +x "$shim_bin/stat"
+}
+
+test_item "還原：垃圾桶與目的地不在同一個檔案系統時仍能還原且不遺失檔案"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+xdev_bin="$TEST_WORK_DIR/restore-xdev-bin"
+make_xdev_stat_shim "$xdev_bin"
+cat > "$xdev_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+dst=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+    if [ "$i" -eq "$count" ]; then dst="$a"; fi
+done
+case "$src" in
+  "$BETTER_RM_XDEV_TRASH"/*) ;;
+  *) exec "$BETTER_RM_REAL_MV" "$@" ;;
+esac
+if [ -e "$dst" ] || [ -L "$dst" ]; then exec "$BETTER_RM_REAL_MV" "$@"; fi
+cp -R "$src" "$dst" || exit 1
+"$BETTER_RM_REAL_RM" -rf "$src" || exit 1
+exit 0
+EOF
+chmod +x "$xdev_bin/mv"
+
+printf '%s\n' "XDEV CONTENT" > xdev_target.txt
+"$BETTER_RM" xdev_target.txt
+xdev_trash_item=$(find "$TEST_TRASH_DIR" -type f -name 'xdev_target.txt__*' | head -1)
+xdev_status=0
+BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_REAL_STAT="$(command -v stat)" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_REAL_RM="$(command -v rm)" \
+PATH="$xdev_bin:$PATH" \
+    "$BETTER_RM" --restore xdev_target.txt >/dev/null 2>&1 ||
+    xdev_status=$?
+xdev_litter=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'xdev_target.txt.better-rm-restore-*' | wc -l | tr -d ' ')
+
+if [ -n "$xdev_trash_item" ] && \
+   [ "$xdev_status" -eq 0 ] && \
+   [ -f xdev_target.txt ] && [ ! -L xdev_target.txt ] && \
+   [ "$(cat xdev_target.txt)" = "XDEV CONTENT" ] && \
+   [ "$xdev_litter" -eq 0 ]; then
+    test_pass "跨裝置還原成功，檔案回到原處且不殘留暫存目錄"
+else
+    test_fail "跨裝置還原失敗或把檔案留在暫存目錄 (status=$xdev_status, litter=$xdev_litter)"
+fi
+
+test_item "還原：跨裝置中止時要把項目確實放回垃圾桶，且不得謊稱它被卡在暫存區"
+# 跨裝置的復原也是一次複製，inode 必然再次改變。若復原後仍以 inode 相等驗證「有沒有
+# 放回去」，就會在項目其實已經回到垃圾桶時謊報它卡在暫存區 —— 使用者會照著錯誤訊息
+# 去搬一個不存在的東西。這裡在取出完成之後才讓目的地出現，強迫走中止復原路徑。
+# The cross-device unwind is a copy too, so the inode changes again. Verifying the
+# put-back by inode equality then reports the item as stranded in staging when it
+# is actually back in the trash, sending the user after something that is not
+# there. Here the destination appears only after the extraction, forcing the
+# abort-and-unwind path.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+xdevunwind_bin="$TEST_WORK_DIR/restore-xdevunwind-bin"
+make_xdev_stat_shim "$xdevunwind_bin"
+cat > "$xdevunwind_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+dst=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+    if [ "$i" -eq "$count" ]; then dst="$a"; fi
+done
+case "$src" in
+  "$BETTER_RM_XDEV_TRASH"/*)
+    if [ -e "$dst" ] || [ -L "$dst" ]; then exec "$BETTER_RM_REAL_MV" "$@"; fi
+    cp -R "$src" "$dst" || exit 1
+    "$BETTER_RM_REAL_RM" -rf "$src" || exit 1
+    # 取出完成之後，目的地才出現：未經同意的覆蓋必須中止。
+    # The destination appears only after the extraction: an unauthorized
+    # overwrite must abort.
+    printf '%s\n' "LATE FILE" > "$BETTER_RM_XDEV_LATE_DEST"
+    exit 0
+    ;;
+esac
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$xdevunwind_bin/mv"
+
+printf '%s\n' "XDEV UNWIND CONTENT" > xdevunwind_target.txt
+"$BETTER_RM" xdevunwind_target.txt
+xdevunwind_trash_item=$(find "$TEST_TRASH_DIR" -type f -name 'xdevunwind_target.txt__*' | head -1)
+xdevunwind_status=0
+xdevunwind_output=$(BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_XDEV_LATE_DEST="$TEST_WORK_DIR/xdevunwind_target.txt" \
+BETTER_RM_REAL_STAT="$(command -v stat)" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_REAL_RM="$(command -v rm)" \
+PATH="$xdevunwind_bin:$PATH" \
+    "$BETTER_RM" --restore xdevunwind_target.txt 2>&1) ||
+    xdevunwind_status=$?
+xdevunwind_staging=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'xdevunwind_target.txt.better-rm-restore-*' -print -quit)
+# 沒有 shim 的第二次還原必須成功：這證明項目真的回到了日誌指向的垃圾桶路徑。
+# A second restore without the shims must succeed, proving the item really is back
+# at the trash path the log points to.
+xdevunwind_again=0
+rm -f xdevunwind_target.txt
+"$BETTER_RM" --restore xdevunwind_target.txt >/dev/null 2>&1 || xdevunwind_again=$?
+
+if [ "$xdevunwind_status" -eq 1 ] && \
+   [ -n "$xdevunwind_trash_item" ] && \
+   [ -z "$xdevunwind_staging" ] && \
+   [[ "$xdevunwind_output" != *"暫留"* ]] && \
+   [ "$xdevunwind_again" -eq 0 ] && \
+   [ "$(cat xdevunwind_target.txt 2>/dev/null)" = "XDEV UNWIND CONTENT" ]; then
+    test_pass "跨裝置中止把項目放回垃圾桶、沒有謊稱卡在暫存區，之後仍可正常還原"
+else
+    test_fail "跨裝置中止遺失項目或謊報其位置 (status=$xdevunwind_status, again=$xdevunwind_again)"
+fi
+
+test_item "還原：跨裝置取出失敗時，錯誤訊息必須指出資料實際在哪裡"
+# exit 1 的契約是「錯誤訊息會指名任何無法放回原位的東西」。跨裝置複製可能在來源已被
+# 消耗之後才失敗，此時沉默地回傳 1 會讓使用者以為檔案還在垃圾桶，而下一次 --restore
+# 只會說「找不到」。
+# The exit-1 contract is that the error names anything that could not be put back.
+# A cross-device copy can fail after the source has already been consumed, and
+# returning 1 silently would leave the user believing the file is still in the
+# trash while the next --restore only reports "not found".
+setup
+cd "$TEST_WORK_DIR" || exit 1
+xdevfail_bin="$TEST_WORK_DIR/restore-xdevfail-bin"
+make_xdev_stat_shim "$xdevfail_bin"
+# 複製完成、來源也已刪除，但 mv 最後仍回報失敗（例如複製後的收尾出錯）。
+# The copy completed and the source is already gone, but mv still reports failure
+# (the way a cross-device move can fail during its final steps).
+cat > "$xdevfail_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+dst=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+    if [ "$i" -eq "$count" ]; then dst="$a"; fi
+done
+case "$src" in
+  "$BETTER_RM_XDEV_TRASH"/*) ;;
+  *) exec "$BETTER_RM_REAL_MV" "$@" ;;
+esac
+if [ -e "$dst" ] || [ -L "$dst" ]; then exec "$BETTER_RM_REAL_MV" "$@"; fi
+cp -R "$src" "$dst" || exit 1
+"$BETTER_RM_REAL_RM" -rf "$src" || exit 1
+exit 1
+EOF
+chmod +x "$xdevfail_bin/mv"
+
+printf '%s\n' "XDEV FAIL CONTENT" > xdevfail_target.txt
+"$BETTER_RM" xdevfail_target.txt
+xdevfail_status=0
+xdevfail_output=$(BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_REAL_STAT="$(command -v stat)" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_REAL_RM="$(command -v rm)" \
+PATH="$xdevfail_bin:$PATH" \
+    "$BETTER_RM" --restore xdevfail_target.txt 2>&1) ||
+    xdevfail_status=$?
+xdevfail_survivor=$(find "$TEST_WORK_DIR" -type f \
+    -exec grep -lFx "XDEV FAIL CONTENT" {} + 2>/dev/null | head -1)
+
+if [ "$xdevfail_status" -eq 1 ] && \
+   [ -n "$xdevfail_survivor" ] && \
+   [[ "$xdevfail_output" == *"$xdevfail_survivor"* ]]; then
+    test_pass "跨裝置取出失敗時資料仍在，且訊息直接指出它的實際路徑"
+else
+    test_fail "跨裝置取出失敗時資料遺失或訊息沒有指出位置 (status=$xdevfail_status, survivor='$xdevfail_survivor')"
 fi
 
 test_item "含 | 的檔名可完整刪除並還原"

@@ -388,6 +388,15 @@ move_to_trash() (
     local source="$1"
     local source_label="$1"
     local verbose="$2"
+    # 可選的第三個參數：呼叫端已經證明過的 device:inode。給了就代表「只准移動這一個
+    # 物件」，來源在這之間被掉包或消失一律中止。--restore 讓位時用得到：它先驗證過
+    # 目的地，之後這裡的每一次比對都綁在同一個 inode 上。
+    # Optional third argument: a device:inode the caller has already proven. When
+    # given it means "move only this exact object"; a swapped or vanished source
+    # aborts instead. --restore uses it when clearing a destination out of the
+    # way: it proves the destination first, and every check here is then bound to
+    # that same inode.
+    local expected_identity="${3:-}"
     local invocation_cwd="$PWD"
     local trash_root="$TRASH_DIR"
     if [[ "$trash_root" != /* ]]; then
@@ -411,6 +420,16 @@ move_to_trash() (
     # 檢查檔案或目錄是否存在
     # Check if file or directory exists
     if [ ! -e "$source" ] && [ ! -L "$source" ]; then
+        # 呼叫端指名了要移動哪一個 inode，就不能套用 force_mode 的「不存在視同成功」：
+        # 那會讓呼叫端以為指定物件已進垃圾桶，實際上什麼都沒發生。
+        # When the caller named the exact inode to move, force_mode's "missing is
+        # success" shortcut must not apply: it would tell the caller the named
+        # object is in the trash when nothing happened at all.
+        if [ -n "$expected_identity" ]; then
+            error_msg "'$source_label' 在移入垃圾桶前已消失；未移動"
+            error_msg "'$source_label' disappeared before it could be trashed; not moved"
+            return 1
+        fi
         if [ "$force_mode" != "1" ]; then
             error_msg "無法移除 '$source': 沒有此一檔案或目錄"
             error_msg "cannot remove '$source': No such file or directory"
@@ -434,6 +453,11 @@ move_to_trash() (
     if [ -z "$source_identity" ]; then
         error_msg "無法確認 '$source_label' 的 inode 身分；未移動"
         error_msg "Could not verify source inode identity for '$source_label'; not moved"
+        return 1
+    fi
+    if [ -n "$expected_identity" ] && [ "$source_identity" != "$expected_identity" ]; then
+        error_msg "'$source_label' 已不是呼叫端驗證過的那個物件；未移動"
+        error_msg "'$source_label' is no longer the object the caller verified; not moved"
         return 1
     fi
     source_basename=$(basename "$source")
@@ -948,8 +972,8 @@ restore_file() {
         fi
     fi
     
-    # 還原的不變式：better-rm 只能刪掉「它自己讓出來、且經 inode 證明仍是同一個」的
-    # 物件。舊寫法先把垃圾桶項目 mv 到目的地，再對讓位路徑 /bin/rm -rf。即使讓位落點
+    # 還原的不變式：better-rm 不會遞迴刪除任何讓位物件。舊寫法先把垃圾桶項目 mv 到
+    # 目的地，再對讓位路徑 /bin/rm -rf。即使讓位落點
     # 改用 mktemp -d（名稱不可預測、建立為獨佔），同 UID 的並行行程仍可枚舉父目錄找到
     # 它，搶先在 $staging/<name> 建立自己的目錄：讓位那次 mv 於是變成「搬進去」，成功
     # 路徑的 rm -rf 便連同對方的內容一起刪掉，而 --restore 依然回報 exit 0。實測一支
@@ -958,10 +982,9 @@ restore_file() {
     # （跨裝置的複製發生在這一步，目的地全程沒被碰過），再用同一檔案系統內的一次
     # rename 就位。rename(2) 取代既有的檔案或 symlink 是原子的，舊目的地由核心解除
     # 連結 —— 覆蓋路徑上根本沒有「依路徑刪除」這個步驟，也就沒有可被搶佔的空窗。
-    # 只有「目的地是真目錄」時 rename 無法取代它，才仍需讓位並刪除；那條路徑上每一步
-    # 都以 inode 綁定，刪除前再驗證一次，任何不符一律中止且不刪任何東西。
-    # The invariant: better-rm may only delete an object it set aside itself and
-    # has proven by inode to still be that same object. The old shape moved the
+    # rename 無法取代目的地時（目的地是真目錄，或取出的項目是真目錄而目的地不是）
+    # 才需要讓位，而讓位一律是「把舊目的地移入垃圾桶」：可還原、有 log、絕不 rm -rf。
+    # The invariant: better-rm never recursively deletes a displaced object. The old shape moved the
     # trashed item onto the destination and then /bin/rm -rf'd the move-aside
     # path. Even with mktemp -d (unpredictable name, atomic exclusive creation) a
     # same-UID concurrent process can enumerate the parent directory, find the
@@ -975,16 +998,29 @@ restore_file() {
     # untouched) and is then put in place by a single same-filesystem rename.
     # rename(2) replaces an existing file or symlink atomically and the kernel
     # unlinks the old destination as part of it — there is no delete-by-path step
-    # on the overwrite path, hence no window to hijack. Only a real directory at
-    # the destination still needs a set-aside and a delete, and there every step
-    # is bound to an inode and re-verified immediately before the delete; any
-    # mismatch aborts without deleting anything.
+    # on the overwrite path, hence no window to hijack. When rename cannot replace
+    # the destination at all — it is a real directory, or the staged item is a
+    # real directory and it is not — the destination is set aside by moving it
+    # INTO THE TRASH: recoverable, logged, never rm -rf'd.
     local trash_identity=""
     local staging_dir=""
     local staging_identity=""
     local incoming=""
-    local displaced=""
     local dest_identity=""
+    # 取出後，暫存區裡那個物件的身分。同一裝置時它就是垃圾桶項目的 inode；跨裝置時
+    # mv 是複製，inode 必然是新的，之後每一步都必須跟「暫存區這一份」比對，而不是跟
+    # 已經不存在的原 inode 比對。
+    # Identity of the object sitting in staging after extraction. Within one
+    # device it is the trashed item's own inode; across devices mv copied it, so
+    # the inode is necessarily new and every later step must be checked against
+    # the staged copy rather than against an inode that no longer exists.
+    local staged_identity=""
+    # 暫存目錄一律建立在目的地的 parent 裡，所以 staging <-> 目的地永遠是同裝置的
+    # rename；只有 staging <-> 垃圾桶這一段才可能跨裝置。
+    # The staging directory always lives in the destination's parent, so
+    # staging <-> destination is always a same-device rename. Only the
+    # staging <-> trash leg can cross devices.
+    local cross_device=0
     local clobber_policy="-n"
     if [ "$dest_existed" = "1" ]; then
         # 使用者已同意覆蓋（-f 或互動確認）才允許取代既有目的地；否則一律不覆蓋，
@@ -1009,6 +1045,10 @@ restore_file() {
     fi
     staging_identity=$(path_identity "$staging_dir")
     incoming="$staging_dir/$dest_filename"
+    staged_identity="$trash_identity"
+    if [ "${trash_identity%%:*}" != "${staging_identity%%:*}" ]; then
+        cross_device=1
+    fi
     if [ -z "$staging_identity" ]; then
         rmdir "$staging_dir" 2>/dev/null
         error_msg "還原失敗：無法確認暫存目錄的 inode 身分"
@@ -1016,28 +1056,39 @@ restore_file() {
         return 1
     fi
 
-    # 中止時的復原：把取出的項目放回垃圾桶、把讓位的目的地放回原處，兩者都以 inode
-    # 驗證。任何一步不成立就把「東西實際在哪裡」講清楚，但絕不刪除任何東西。
-    # Unwind on abort: put the extracted item back in the trash and the displaced
-    # destination back in place, both verified by inode. Whatever cannot be put
-    # back is named explicitly — but nothing is ever deleted to make it fit.
+    # 中止時的復原：把取出的項目放回垃圾桶。任何一步不成立就把「東西實際在哪裡」
+    # 講清楚，但絕不刪除任何東西。既有目的地的讓位是「移入垃圾桶」，本身就已經是
+    # 可還原狀態，所以不在這裡搬回來——由呼叫端明講一句 `rm --restore` 即可。
+    # Unwind on abort: put the extracted item back in the trash. Whatever cannot
+    # be put back is named explicitly — but nothing is ever deleted to make it
+    # fit. An existing destination is set aside by moving it INTO the trash,
+    # which is already a recoverable state, so it is not pulled back here; the
+    # caller says so and names the `rm --restore` that recovers it.
     restore_unwind() {
         local sunk="$dest_path/$dest_filename"
-        if [ "$(path_identity "$sunk")" = "$trash_identity" ]; then
+        if [ "$(path_identity "$sunk")" = "$staged_identity" ]; then
             move_exact -n "$sunk" "$incoming" 2>/dev/null || true
         fi
-        if [ "$(path_identity "$incoming")" = "$trash_identity" ]; then
-            if ! move_exact -n "$incoming" "$trash_path" 2>/dev/null ||
-               [ "$(path_identity "$trash_path")" != "$trash_identity" ]; then
+        if [ "$(path_identity "$incoming")" = "$staged_identity" ]; then
+            # 放回垃圾桶這一段可能跨裝置：那是一次複製，inode 一定不同，因此只能
+            # 驗證「垃圾桶原路徑確實又有東西了」。同裝置時仍以 inode 嚴格驗證。
+            # Putting it back can cross devices: that is a copy, so the inode is
+            # necessarily different and only "something is at the trash path
+            # again" can be verified. Within one device keep the strict check.
+            local put_back=1
+            if ! move_exact -n "$incoming" "$trash_path" 2>/dev/null; then
+                put_back=0
+            elif [ "$cross_device" = "1" ]; then
+                if { [ ! -e "$trash_path" ] && [ ! -L "$trash_path" ]; } ||
+                   { [ -e "$incoming" ] || [ -L "$incoming" ]; }; then
+                    put_back=0
+                fi
+            elif [ "$(path_identity "$trash_path")" != "$trash_identity" ]; then
+                put_back=0
+            fi
+            if [ "$put_back" != "1" ]; then
                 error_msg "垃圾桶項目暫留於 '$incoming'"
                 error_msg "The trashed item is left at '$incoming'"
-            fi
-        fi
-        if [ -n "$displaced" ] && [ "$(path_identity "$displaced")" = "$dest_identity" ]; then
-            if ! move_exact -n "$displaced" "$dest_path" 2>/dev/null ||
-               [ "$(path_identity "$dest_path")" != "$dest_identity" ]; then
-                error_msg "既有的 '$dest_filename' 暫留於 '$displaced'"
-                error_msg "The existing '$dest_filename' is left at '$displaced'"
             fi
         fi
         rmdir "$staging_dir" 2>/dev/null || true
@@ -1045,49 +1096,168 @@ restore_file() {
 
     # 取出垃圾桶項目到暫存目錄。跨裝置時 mv 退化成「複製後刪除」，那段較長、較容易
     # 失敗的過程在這裡完成，此刻目的地仍原封不動。
-    # Extract the trashed item into the staging directory. On a cross-device move
-    # this is where mv degrades into copy-then-delete; that long, failure-prone
-    # part now happens while the destination is still untouched.
-    if ! move_exact -n "$trash_path" "$incoming" 2>/dev/null ||
-       [ "$(path_identity "$incoming")" != "$trash_identity" ]; then
+    #
+    # 驗收條件必須依「是否同一個檔案系統」分開寫。同一裝置時 mv 就是 rename，inode
+    # 必然保留，所以 inode 相等是可用的證明。跨裝置時 mv 是「複製後刪除」，inode
+    # 必然改變 —— 若仍要求 inode 相等，等於讓每一次跨裝置還原都必定失敗（外接碟、
+    # 網路磁碟、另一個 APFS volume 搭配預設的 $HOME/.Trash 都會走到這裡）。
+    # Split the acceptance test by filesystem. Within one device mv is a rename,
+    # so the inode is necessarily preserved and inode equality is a usable proof.
+    # Across devices mv is copy-then-unlink, so the inode necessarily CHANGES;
+    # demanding equality there makes every cross-device restore fail by
+    # construction — an external drive, a network mount or a second APFS volume
+    # combined with the default $HOME/.Trash all take this path.
+    local trash_basename
+    trash_basename=$(basename "$trash_path")
+    local buried="$incoming/$trash_basename"
+    local extracted=0
+    local incoming_identity=""
+    if move_exact -n "$trash_path" "$incoming" 2>/dev/null; then
+        incoming_identity=$(path_identity "$incoming")
+        if [ "$cross_device" = "0" ]; then
+            if [ "$incoming_identity" = "$trash_identity" ]; then
+                extracted=1
+            fi
+        elif [ -n "$incoming_identity" ] &&
+             { [ ! -e "$trash_path" ] && [ ! -L "$trash_path" ]; } &&
+             { [ ! -e "$buried" ] && [ ! -L "$buried" ]; }; then
+            # 跨裝置的驗收：來源已被 mv 消耗、暫存落點確實有東西，且該落點不是
+            # 「並行行程先建好的目錄、項目被搬進去」的形狀。inode 在這裡不可用，
+            # 這三個條件是本平台上 shell 能取得的最強證據。
+            # Cross-device acceptance: the source was consumed by mv, something
+            # exists at the staging path, and that path is not the "a concurrent
+            # process pre-created a directory and the item was moved inside it"
+            # shape. Inode identity is unusable here; these three conditions are
+            # the strongest evidence available to a shell on this platform.
+            extracted=1
+        fi
+    fi
+    if [ "$extracted" = "1" ]; then
+        staged_identity="$incoming_identity"
+    fi
+    if [ "$extracted" != "1" ]; then
         # 暫存目錄雖為獨佔建立，同 UID 的並行行程仍可能枚舉後搶先佔用 $incoming；
-        # BSD mv 此時會把項目搬「進」對方的目錄，必須撈回垃圾桶再中止。
+        # BSD mv 此時會把項目搬「進」對方的目錄，必須撈回垃圾桶再中止。同一裝置時
+        # 以 inode 證明；跨裝置時無法比 inode，但「垃圾桶來源已消失且 $buried 存在」
+        # 只可能是這次 mv 造成的：若 $buried 事先就存在，mv -n 會什麼都不做並讓來源
+        # 留在原地。
         # The staging directory is created exclusively, but a same-UID process can
         # still enumerate it and occupy $incoming first; BSD mv then moves the
         # item INTO that directory, so pull it back to the trash before aborting.
-        local buried="$incoming/$(basename "$trash_path")"
-        if [ "$(path_identity "$buried")" = "$trash_identity" ]; then
+        # Same device proves it by inode. Across devices inode comparison is
+        # impossible, but "the trash source is gone AND $buried exists" can only
+        # have been produced by this mv: had $buried pre-existed, mv -n would have
+        # done nothing and left the source in place.
+        if { [ -e "$buried" ] || [ -L "$buried" ]; } &&
+           { [ ! -e "$trash_path" ] && [ ! -L "$trash_path" ]; } &&
+           { [ "$(path_identity "$buried")" = "$trash_identity" ] ||
+             [ "$cross_device" = "1" ]; }; then
             move_exact -n "$buried" "$trash_path" 2>/dev/null || true
         fi
-        rmdir "$staging_dir" 2>/dev/null
+        # 中止時「什麼東西實際在哪裡」必須講出來。跨裝置的複製可能已經消耗了垃圾桶
+        # 來源，此時使用者的資料就只剩暫存目錄裡那一份；沉默地回傳 1 會讓使用者以為
+        # 檔案還在垃圾桶，而下一次 --restore 只會說「找不到」。
+        # An abort must name what is actually where. A cross-device copy may
+        # already have consumed the trash source, leaving the staging copy as the
+        # only surviving instance of the user's data; returning 1 silently would
+        # let the user believe it is still in the trash while the next --restore
+        # only reports "not found".
+        if ! rmdir "$staging_dir" 2>/dev/null; then
+            if { [ ! -e "$trash_path" ] && [ ! -L "$trash_path" ]; } &&
+               { [ -e "$incoming" ] || [ -L "$incoming" ]; }; then
+                # 垃圾桶來源已經不在，暫存區這一份就是僅存的一份，必須指名。
+                # The trash source is gone, so the staged copy is the only
+                # surviving instance and has to be named outright.
+                error_msg "'$dest_filename' 的資料目前留在 '$incoming'"
+                error_msg "The data for '$dest_filename' is currently left at '$incoming'"
+            else
+                error_msg "暫存目錄 '$staging_dir' 非空，未刪除；請檢查其內容"
+                error_msg "The staging directory '$staging_dir' is not empty and was left in place; inspect it"
+            fi
+        fi
         error_msg "還原失敗：無法將檔案移回目前資料夾"
         error_msg "Restore failed: cannot move file back to current folder"
         return 1
     fi
 
-    # rename 不能用別的東西取代一個真目錄，所以目的地是真目錄時仍得先讓位。
-    # A rename cannot replace a real directory, so a directory destination still
-    # has to be set aside first.
-    if [ -d "$dest_path" ] && [ ! -L "$dest_path" ]; then
-        dest_identity=$(path_identity "$dest_path")
-        displaced="$staging_dir/.better-rm-displaced"
-        if [ -z "$dest_identity" ] ||
-           ! move_exact -n "$dest_path" "$displaced" 2>/dev/null ||
-           [ "$(path_identity "$displaced")" != "$dest_identity" ]; then
-            # 讓位落點被搶佔時，既有目錄可能被搬進對方目錄，先撈回原位再中止。
-            # If the set-aside path was occupied, the existing directory may have
-            # been moved into it; pull it back before aborting.
-            local nested="$displaced/$dest_filename"
-            if [ -n "$dest_identity" ] &&
-               [ "$(path_identity "$nested")" = "$dest_identity" ] &&
-               { [ ! -e "$dest_path" ] && [ ! -L "$dest_path" ]; }; then
-                move_exact -n "$nested" "$dest_path" 2>/dev/null || true
+    # 同意檢查時目的地不存在，就沒有任何覆蓋授權。取出期間才出現的東西不是合法的
+    # 覆蓋對象：把項目放回垃圾桶並原封不動地留下它。
+    # 這道閘門與下面 publish 的 `-n` 是重複的保護，但兩者擋的不是同一件事：`-n` 只
+    # 保證「不覆蓋」，BSD mv 仍會把項目搬「進」那個目錄再由 unwind 撈出來。撈得回來
+    # 是運氣；撈不回來項目就卡在別人的樹裡。這裡的契約更強 —— 未經授權的目的地，
+    # 連一次 mv 的落點都不可以是它。
+    # No overwrite was authorized when the destination was absent at the consent
+    # check, so anything that appeared during the extraction is not a legal
+    # overwrite target: put the item back and leave the newcomer untouched.
+    # This gate overlaps the `-n` on the publish below, but they do not stop the
+    # same thing: `-n` only guarantees "do not clobber", and BSD mv still moves
+    # the item INTO such a directory for the unwind to pull back out. Getting it
+    # back is luck; failing to leaves the item stranded in someone else's tree.
+    # The contract here is stronger — an unauthorized destination must never be
+    # the target of even one mv.
+    if [ "$dest_existed" = "0" ] &&
+       { [ -e "$dest_path" ] || [ -L "$dest_path" ]; }; then
+        restore_unwind
+        error_msg "還原失敗：目的地 '$dest_filename' 在還原期間出現，未經同意不得覆蓋"
+        error_msg "Restore failed: destination '$dest_filename' appeared during restore and overwrite was not authorized"
+        return 1
+    fi
+
+    # rename(2) 只有在「目的地不是真目錄」且「來源不是真目錄」時才能原子取代目的地：
+    #   rename(檔案, 真目錄)  -> EISDIR / ENOTEMPTY
+    #   rename(真目錄, 非目錄) -> ENOTDIR      <- 還原一個目錄到既有檔案/symlink 上
+    # 這兩種形狀都得先把目的地移開。Linux 的 `mv -T` 一樣是 rename(2)，所以這不是
+    # macOS 專屬。
+    #
+    # 移開的方式是「送進垃圾桶」，不是 rm -rf。覆蓋等於刪除，而 better-rm 的全部價值
+    # 就是刪除必須可還原；先前用 rm -rf 讓位，等於在這個工具內部做了它存在的理由要
+    # 禁止的事。走 move_to_trash 還一併拿到它已經硬化過的邏輯：pin 住 parent、
+    # 唯一化目標路徑、寫入 deletion log，於是舊目的地用 `rm --restore` 就能取回。
+    # rename(2) can only replace the destination atomically when neither side is
+    # a real directory:
+    #   rename(file, real dir)  -> EISDIR / ENOTEMPTY
+    #   rename(real dir, non-dir) -> ENOTDIR   <- restoring a directory onto an
+    #                                             existing file or symlink
+    # Both shapes need the destination moved out of the way first. Linux's
+    # `mv -T` is rename(2) as well, so this is not macOS-specific.
+    #
+    # It is moved out of the way by going INTO THE TRASH, not by rm -rf. An
+    # overwrite is a deletion, and better-rm's entire point is that deletions are
+    # recoverable; clearing the way with rm -rf did inside the tool exactly what
+    # the tool exists to prevent. Routing it through move_to_trash also inherits
+    # that function's hardening — pinned parent, uniquified target, deletion-log
+    # record — so the old destination comes back with `rm --restore`.
+    local displaced_trashed=0
+    if [ "$dest_existed" = "1" ] &&
+       { [ -e "$dest_path" ] || [ -L "$dest_path" ]; }; then
+        local dest_is_real_dir=0
+        local staged_is_real_dir=0
+        if [ -d "$dest_path" ] && [ ! -L "$dest_path" ]; then
+            dest_is_real_dir=1
+        fi
+        if [ -d "$incoming" ] && [ ! -L "$incoming" ]; then
+            staged_is_real_dir=1
+        fi
+        if [ "$dest_is_real_dir" = "1" ] || [ "$staged_is_real_dir" = "1" ]; then
+            dest_identity=$(path_identity "$dest_path")
+            if [ -z "$dest_identity" ]; then
+                restore_unwind
+                error_msg "還原失敗：無法確認既有 '$dest_filename' 的 inode 身分"
+                error_msg "Restore failed: cannot confirm the inode identity of the existing '$dest_filename'"
+                return 1
             fi
-            displaced=""
-            restore_unwind
-            error_msg "還原失敗：無法安全讓出既有的 '$dest_filename'"
-            error_msg "Restore failed: cannot safely set aside the existing '$dest_filename'"
-            return 1
+            # 把驗證過的 inode 交給 move_to_trash：從這裡到實際移動之間若被掉包，
+            # 它會中止而不是移動別人的東西。
+            # Hand the proven inode to move_to_trash: if the path is swapped
+            # between here and the actual move it aborts instead of moving an
+            # unrelated object.
+            if ! move_to_trash "$dest_path" 0 "$dest_identity"; then
+                restore_unwind
+                error_msg "還原失敗：無法把既有的 '$dest_filename' 移入垃圾桶讓位"
+                error_msg "Restore failed: cannot move the existing '$dest_filename' into the trash to make room"
+                return 1
+            fi
+            displaced_trashed=1
         fi
     fi
 
@@ -1097,28 +1267,30 @@ restore_file() {
     # an existing file or symlink the kernel replaces it atomically and unlinks
     # the old inode as part of the same call — no delete-by-path anywhere.
     if ! move_exact "$clobber_policy" "$incoming" "$dest_path" 2>/dev/null ||
-       [ "$(path_identity "$dest_path")" != "$trash_identity" ]; then
+       [ "$(path_identity "$dest_path")" != "$staged_identity" ]; then
         restore_unwind
+        if [ "$displaced_trashed" = "1" ]; then
+            # 讓位已經發生：舊的目的地此刻在垃圾桶裡，而且 deletion log 記的是它
+            # 原本的路徑。exit 1 的契約要求指名任何回不了原位的東西 —— 這裡就是。
+            # The set-aside already happened: the old destination is in the trash
+            # and the deletion log holds its original path. The exit-1 contract
+            # requires naming anything that could not be put back; this is it.
+            error_msg "既有的 '$dest_filename' 已移入垃圾桶且未放回，請用 rm --restore '$dest_filename' 取回"
+            error_msg "The existing '$dest_filename' was moved into the trash and not put back; recover it with rm --restore '$dest_filename'"
+        fi
         error_msg "還原失敗：無法將檔案就位到 '$dest_path'"
         error_msg "Restore failed: cannot put the item in place at '$dest_path'"
         return 1
     fi
 
-    # 還原本身已完成。只有先前讓位過真目錄時才需要刪除，且刪除前必須再驗證一次：
-    # 暫存目錄與讓位物件都仍是本行程當初建立／讓出的那一個。
-    # The restore itself is complete. Only a previously displaced real directory
-    # still needs deleting, and only after re-verifying that both the staging
-    # directory and the displaced object are still the ones this process made and
-    # set aside.
-    if [ -n "$displaced" ]; then
-        if [ "$(path_identity "$staging_dir")" = "$staging_identity" ] &&
-           [ "$(path_identity "$displaced")" = "$dest_identity" ]; then
-            /bin/rm -rf -- "$displaced"
-        else
-            error_msg "已還原 '$dest_filename'，但讓位路徑遭並行修改，拒絕刪除；請檢查 '$staging_dir'"
-            error_msg "Restored '$dest_filename', but the staging path was modified concurrently; refusing to delete. Inspect '$staging_dir'"
-            return 2
-        fi
+    if [ "$displaced_trashed" = "1" ]; then
+        # 使用者同意的是「覆蓋」，不是「銷毀」。舊目的地去了哪裡必須主動說，否則
+        # 使用者無從得知它還救得回來。
+        # The user consented to an overwrite, not to destruction. Where the old
+        # destination went has to be stated, or the user has no way to know it is
+        # still recoverable.
+        warn_msg "既有的 '$dest_filename' 已移入垃圾桶讓位，可用 rm --restore '$dest_filename' 取回"
+        warn_msg "The existing '$dest_filename' was moved into the trash to make room; recover it with rm --restore '$dest_filename'"
     fi
 
     if ! rmdir "$staging_dir" 2>/dev/null; then
