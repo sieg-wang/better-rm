@@ -1210,6 +1210,49 @@ else
     test_fail "舊格式日誌紀錄無法還原 (status=$old_format_status)"
 fi
 
+test_item "長日誌的還原掃描不得退化（效能護欄）"
+# 日誌只增不減，還原舊項目要掃過全部紀錄。若每一筆都付出解碼／fork 成本，
+# 成本會隨日誌長度單調惡化。門檻刻意放寬，只攔「數量級」等級的退化：
+# 同樣的 2000 筆 / 450 字元路徑，退化版本要 17 秒，修好後約 0.2 秒。
+# The log is append-only, so restoring an old item scans every record. Paying a
+# decode or a fork per record degrades monotonically with log length. The budget
+# is deliberately loose: it only catches an order-of-magnitude regression
+# (17s versus roughly 0.2s for the same 2000 records with 450-char paths).
+setup
+mkdir -p "$TEST_TRASH_DIR" "$TEST_STATE_DIR"
+cd "$TEST_WORK_DIR"
+perf_prefix="/perf/scan/deeply/nested/workspace/module/component/service/handler/internal/pkg/adapters/persistence/repository/generated/artifacts/build/output/cache/segments/shards"
+while [ ${#perf_prefix} -lt 420 ]; do perf_prefix="$perf_prefix/more"; done
+perf_target="perf-scan-target.txt"
+perf_trash="$TEST_TRASH_DIR/${perf_target}__oldest"
+printf '%s\n' "PERF SCAN CONTENT" > "$perf_trash"
+{
+    printf '%s\n' "# Better-RM Deletion Log"
+    # 最舊的一筆放最前面：掃描由尾端往回，因此這筆最後才被讀到。
+    # Oldest record first: the scan walks backwards, so this one is reached last.
+    printf '%s | v2 | %s | %s | %s | %s\n' \
+        "20260101_000000_000000000" "$perf_prefix/$perf_target" "$perf_trash" \
+        "deadbeefdeadbeefdeadbeefdeadbeef" "file"
+    awk -v prefix="$perf_prefix" -v trash="$TEST_TRASH_DIR" 'BEGIN {
+        for (i = 1; i < 2000; i++) {
+            name = sprintf("perf-filler-%06d.txt", i)
+            printf "20260102_%06d_000000000 | v2 | %s/%s | %s/%s__%d__missing | %s | file\n", \
+                i, prefix, name, trash, name, i, "0123456789abcdef0123456789abcdef"
+        }
+    }'
+} > "$TEST_STATE_DIR/deletion.log"
+perf_start=$SECONDS
+perf_status=0
+"$BETTER_RM" --restore "$perf_target" >/dev/null 2>&1 || perf_status=$?
+perf_elapsed=$((SECONDS - perf_start))
+if [ "$perf_status" -eq 0 ] && [ -f "$perf_target" ] && \
+   [ "$(cat "$perf_target")" = "PERF SCAN CONTENT" ] && \
+   [ "$perf_elapsed" -le 10 ]; then
+    test_pass "2000 筆長路徑日誌的全掃描還原在門檻內完成 (${perf_elapsed}s)"
+else
+    test_fail "長日誌還原退化或失敗 (status=$perf_status, elapsed=${perf_elapsed}s)"
+fi
+
 # 清理測試產生的檔案
 rm -f test_restore.txt
 

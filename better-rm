@@ -105,6 +105,15 @@ encode_log_field() {
 # strip a trailing newline that belongs to the filename.
 decode_log_field() {
     local value="$1"
+    # 沒有反斜線就沒有任何轉義序列，直接原樣回傳：還原時每筆掃過的紀錄都會呼叫
+    # 這個函式，逐字元迴圈跑在正常路徑上會讓長日誌的掃描慢上數倍。
+    # No backslash means no escape sequence, so the value is already decoded.
+    # Restore calls this for every record it scans; running the per-character
+    # loop on ordinary paths made scanning a long log several times slower.
+    if [[ "$value" != *\\* ]]; then
+        LOG_FIELD_DECODED="$value"
+        return 0
+    fi
     local out=""
     local index=0
     local length=${#value}
@@ -753,6 +762,18 @@ restore_file() {
     local lines=()
     local found=0
     local i
+
+    # 便宜的預先排除：能匹配的紀錄，其原始路徑一定含有目標名稱，因此整行也一定
+    # 含有它（或它的轉義形式）。先用字串比對刷掉絕大多數紀錄，就不必為它們付出
+    # 切欄位、trim 與解碼的成本 —— 日誌只增不減，掃描成本會隨時間單調變差。
+    # Cheap pre-rejection: any record that can match contains the target name in
+    # its original path, so the whole line must contain it (or its escaped
+    # form). Filtering on the raw line first avoids paying for field splitting,
+    # trims and decoding on records that cannot match — the log is append-only,
+    # so that cost grows monotonically over the tool's lifetime.
+    local needle="${target_name#./}"
+    local needle_encoded
+    needle_encoded=$(encode_log_field "$needle")
     for log_file in "${log_files[@]}"; do
         lines=()
         if ! {
@@ -767,16 +788,40 @@ restore_file() {
 
         for ((i=${#lines[@]}-1; i>=0; i--)); do
             local line="${lines[i]}"
+            # 先做便宜排除（見上方說明）：兩種寫法都不含目標名稱就不可能匹配。
+            # Cheap rejection first: a line holding neither spelling of the
+            # target name cannot match, so it never needs parsing.
+            if [[ "$line" != *"$needle"* && "$line" != *"$needle_encoded"* ]]; then
+                continue
+            fi
             # 解析日誌行：
             # v2  → TIMESTAMP | v2 | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE（路徑已轉義）
             # 舊版 → TIMESTAMP | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE
             # 舊紀錄是升級前寫下的，必須照樣讀得懂，否則已在垃圾桶的項目會還原不了。
+            # 判別依據：單行的舊紀錄第 2 欄一定是絕對路徑，不可能等於 "v2"。
+            # 但檔名含換行的舊紀錄本來就會被拆成多個實體行，其中一行仍可能剛好
+            # 有 6 欄且第 2 欄是 "v2"；那種紀錄在此修正前後同樣無法正確解析
+            # （這正是 v2 要解決的問題），不是新的破口。
             # Legacy records predate the v2 marker and must keep working, or
             # items already in the trash become unrestorable after an upgrade.
+            # The discriminator holds for SINGLE-LINE legacy records: their
+            # second field is an absolute path and can never be "v2". A legacy
+            # record whose filename contains a newline was already split across
+            # physical lines, and such a fragment can carry six fields with "v2"
+            # in the second one; those records were unparseable before this
+            # change too — that is the very defect v2 exists to fix.
             local parts=()
             IFS='|' read -r -a parts <<< "$line"
 
-            if [ ${#parts[@]} -ge 6 ] && [ "$(trim "${parts[1]}")" = "v2" ]; then
+            # 版本標記用參數展開判斷，不呼叫 trim：那是命令替換，等於每掃一行就
+            # fork 一次子行程，長日誌會被這個成本主導。
+            # Test the version marker with parameter expansion rather than trim:
+            # trim runs in a command substitution, i.e. one fork per scanned
+            # line, which dominates the cost on a long log.
+            local marker="${parts[1]-}"
+            marker="${marker# }"
+            marker="${marker% }"
+            if [ ${#parts[@]} -ge 6 ] && [ "$marker" = "v2" ]; then
                 # 只剝掉分隔符兩側各一個空白，保留檔名本身的前後空白
                 # Strip only the single delimiter space on each side so spaces
                 # that belong to the filename survive.
