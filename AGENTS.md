@@ -165,38 +165,91 @@ the child path better-rm is about to use. Measured against that version, a
 fork-free glob-polling attacker destroyed unrelated data in 9 of 10 runs, 7 of
 them while `--restore` returned exit 0.
 
-The overwrite no longer deletes anything by path. The trashed item is moved into
-a staging directory this process created exclusively, and is then put in place by
-a single same-filesystem `rename`, which replaces an existing file or symlink
-atomically — the kernel unlinks the old destination as part of that call. Every
-move is verified afterwards by `device:inode`, because a landing spot cannot be
-trusted to flags alone (BSD `mv -h` still treats a real directory as a container,
-and BSD `mv -n` returns 0 without doing anything when the target exists).
+**`--restore` never deletes anything, by path or otherwise.** The trashed item is
+moved into a staging directory this process created exclusively, and is then put
+in place by a single same-filesystem `rename`, which replaces an existing file or
+symlink atomically — the kernel unlinks the old destination as part of that call.
+Landing spots are verified afterwards rather than trusted to flags, because BSD
+`mv -h` still treats a real directory as a container and BSD `mv -n` returns 0
+without doing anything when the target exists.
 
-**Closed:** every destination that is not a real directory. There is no
-delete-by-path step at all on that route, so there is no window to hijack. The
-same attacker now scores 0 of 10, aborting fail-closed with the local file, the
-trashed item and the other process's data all intact.
+`rename` cannot replace a destination in two shapes: the destination is a real
+directory (`EISDIR`/`ENOTEMPTY`), or the staged item is a real directory and the
+destination is not (`ENOTDIR`). Linux's `mv -T` is `rename(2)` as well, so this is
+not macOS-specific. In both shapes the destination is cleared out of the way by
+**moving it into the trash** through `move_to_trash`, never by `rm -rf`. An
+overwrite *is* a deletion, and the whole point of this tool is that deletions are
+recoverable; the previous shape did inside `--restore` exactly what the tool
+exists to prevent. The old destination therefore lands in the trash with its own
+deletion-log record and comes back with `rm --restore <name>`, which the success
+message says out loud.
 
-**Narrowed, not closed:** a destination that *is* a real directory. A `rename`
-cannot replace one, so that directory still has to be set aside and deleted. Both
-the staging directory and the set-aside object are re-verified by inode
-immediately before `/bin/rm -rf`, and any mismatch refuses to delete. What
-remains is the interval between that last `stat` and the `unlink` inside
-`/bin/rm` — about **2 ms** on this machine (measured: 2.2 ms per `/bin/rm`
-fork+exec). To exploit it a same-UID process must swap the set-aside path inside
-that interval *and* not have tripped either earlier guard, since any swap landing
-before the final check aborts the restore. A spinning attacker that renames its
-own directory over the set-aside path as fast as it can scored 0 data loss in 30
-runs (28 aborted at exit 1, 2 never got in). It cannot be closed in POSIX shell:
-there is no way to bind a name to an inode for `unlink`, i.e. no way to delete
-through a handle only this process can produce.
+`move_to_trash` takes an optional third argument: a `device:inode` the caller has
+already proven. `--restore` passes the destination's identity, so the clearing
+step is bound to the object that was verified rather than to a pathname.
+
+**Closed:** no destination shape can lose data to a recursive delete any more,
+because there is no recursive delete on the route. A same-UID process that swaps
+the destination between the identity proof and the clearing step is detected and
+the restore aborts at exit 1 with nothing moved (measured: deterministic
+injection, 1 of 1 aborted, all three parties intact).
+
+**Narrowed, not closed:** the interval inside `move_to_trash` between its last
+`stat` of the source and its `mv`. A same-UID process that swaps the destination
+pathname inside that interval gets *its own* directory moved into the trash.
+This cannot be closed in POSIX shell: there is no way to bind a name to an inode
+for `rename`, i.e. no way to act through a handle only this process can produce.
+What changed is the consequence, not the probability: the worst case is now a
+logged, reversible move into the trash instead of an irreversible `rm -rf`.
+Measured with deterministic injection at that exact window: 1 of 1 swapped, the
+unrelated directory intact in the trash and restorable, `0` bytes destroyed. Note
+the residual is *misfiled*, not lost — the log records the destination's path, so
+the unrelated directory comes back under the destination's name. This is the same
+window every ordinary `rm` through this tool already has; `--restore` is no longer
+worse than the tool's own baseline.
+
+**Not a promise:** when `rename` *can* replace the destination atomically (both
+sides are non-directories), the kernel unlinks the old destination and it is gone,
+exactly as `mv -f` would leave it. Only the shapes that need clearing get the
+trash treatment.
 
 Exit contract, because "partially successful" must not read as success:
 `0` = restored and nothing unintended was touched; `1` = the restore did not
-happen and the error names anything that could not be put back; `2` = the item
-*was* restored but the cleanup was refused after detecting interference, and the
-leftover path is printed.
+happen and the error names anything that could not be put back — including a
+cross-device copy that already consumed the trash source, whose staging path is
+printed outright; `2` = the item *was* restored but a leftover could not be
+cleaned up, and the leftover path is printed.
+
+### Cross-device restores
+
+The trash and the destination are often on different filesystems: an external
+drive, a network mount or a second APFS volume combined with the default
+`$HOME/.Trash`. There `mv` degrades into copy-then-unlink, so the inode
+**necessarily** changes and inode equality cannot be the acceptance test — using
+it made every cross-device restore fail after the trash source had already been
+consumed, leaving the user's only copy in the staging directory while the log
+still pointed at a trash path that no longer existed.
+
+The acceptance test is therefore split by device. Same device: `mv` is a `rename`,
+the inode must be preserved, strict equality applies. Different device: the source
+must be gone, something must exist at the staging path, and that path must not be
+the "a concurrent process pre-created a directory and the item was moved inside
+it" shape. That last condition is sound rather than heuristic — had the staging
+path pre-existed, `mv -n` would have done nothing and left the source in place.
+Inode identity is unusable across devices; these three conditions are the
+strongest evidence a shell has on this platform.
+
+Note that only the staging↔trash leg can cross devices. The staging directory is
+created inside the destination's own parent, so staging↔destination is always a
+same-device `rename` and the publish step keeps its strict inode check — against
+the *staged* object's identity, not against an inode that no longer exists.
+
+The suite reproduces both decisive properties with a `stat` shim (the trash
+subtree reports a different device number) and an `mv` shim (a source inside the
+trash moves by copy+unlink), so CI covers this without mounting a second
+filesystem. Both were cross-checked against a real 40 MB HFS+ disk image: the
+pre-fix binary fails and the fixed binary succeeds, identically under the shims
+and on the real second device.
 
 ## Suggested Future Enhancements
 
