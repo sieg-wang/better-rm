@@ -361,6 +361,32 @@ const dynamicExecutableAllowed = [
   "echo '$(which rm) -rf /'",
 ];
 
+// Every row of the false-denial tables in README.md and CHANGELOG.md. The docs
+// claim these verdicts were measured rather than reasoned about; pinning them
+// here is what keeps that true, and stops the tables drifting from the parser.
+const documentedDenials = [
+  '$(which docker) run -v $(pwd):/work img ls',
+  '"$(which docker)" run -v $(pwd):/work img ls',  // double quotes do not exempt
+  '$(brew --prefix)/bin/rg "$PATTERN" src/',
+  '$(which git) -C $(pwd) status',                 // separated from its option
+  '$(which cat) $HOME/.zshrc',
+  '$(which echo) $USER',
+  '$(which echo) /etc',                            // operand need not be dynamic
+  '$(which echo) ~',                               // bare ~ IS the protected home
+  '`which git` status',                            // backtick with whitespace
+  '`command -v ls`',                               // ... even with no operands
+];
+const documentedAllowances = [
+  'docker run -v $(pwd):/work img ls',             // static executable
+  '$(command -v python3) ./build.py',
+  '$(which make) -j$(nproc) all',                  // adjacent to its option
+  '$(which git) -C$(pwd) status',
+  "$(which cat) '$HOME/.zshrc'",                   // single quotes are literal
+  '$(which cat) ~/.zshrc',
+  '`pwd` status',                                  // backtick without whitespace
+  'cd $(git rev-parse --show-toplevel)',
+];
+
 let stdinChecks = 0;
 for (const command of dynamicExecutableBlocked) {
   const { status, stdout } = runHookOverStdin(claude(command));
@@ -380,15 +406,36 @@ for (const command of dynamicExecutableAllowed) {
   assert.equal(stdout, '', `benign command must stay allowed: ${command}`);
   stdinChecks += 1;
 }
+for (const command of documentedDenials) {
+  const { status, stdout } = runHookOverStdin(claude(command));
+  assert.equal(status, 0, `${command} (exit)`);
+  let parsed = null;
+  try { parsed = JSON.parse(stdout); } catch (_) { parsed = null; }
+  assert.equal(
+    parsed?.hookSpecificOutput?.permissionDecision,
+    'deny',
+    `documented as denied, but allowed: ${command}`
+  );
+  stdinChecks += 1;
+}
+for (const command of documentedAllowances) {
+  const { status, stdout } = runHookOverStdin(claude(command));
+  assert.equal(status, 0, `${command} (exit)`);
+  assert.equal(stdout, '', `documented as allowed, but denied: ${command}`);
+  stdinChecks += 1;
+}
 
-// A truncated or 0-byte hook file cannot be told apart from a hook that allows:
-// an empty program exits 0 and prints nothing, and every agent contract above
-// reads "exit 0, no output" as allow. Nothing inside the hook can change that,
-// so the property has to be owned by whoever writes the file — install-hooks.sh
-// verifies the freshly written hook still denies, and otherwise leaves a stub
-// that exits 2. These assertions pin both halves: that the hazard is real (so
-// the installer-side guarantee is not dead weight someone may delete), and that
-// the fail-closed stub shape is never read as an allow.
+// A truncated or 0-byte hook file cannot be told apart from a hook that allows,
+// under the two contracts where allow IS the absence of output: Claude Code and
+// Copilot both receive null from evaluate() and therefore no stdout. (Cursor,
+// Grok and Antigravity expect an explicit allow object instead, so empty output
+// is not a valid allow for them and their handling of it is not measured here.)
+// Nothing inside the hook can change that, so the property has to be owned by
+// whoever writes the file — install-hooks.sh proves the freshly written hook
+// still denies, and otherwise leaves a stub that exits 2. These assertions pin
+// both halves: that the hazard is real (so the installer-side guarantee is not
+// dead weight someone may delete), and that the stub the installer actually
+// writes is never read as an allow.
 const fs = require('fs');
 const os = require('os');
 const denyPayload = JSON.stringify(claude('rm -rf /', '/'));
@@ -405,16 +452,86 @@ fs.writeFileSync(emptyHook, '');
 const emptyResult = spawnSync('node', [emptyHook], { input: denyPayload, encoding: 'utf8' });
 assert.equal(emptyResult.status, 0, 'a 0-byte hook exits 0');
 assert.equal(emptyResult.stdout, '', 'a 0-byte hook prints nothing');
-// Same shape as an explicit allow: this is the disarmed state the installer
-// must never leave behind.
-assert.equal(evaluate(claude('ls'), env), null, 'allow is expressed as no output');
+// Same shape as an explicit allow under both no-output contracts: this is the
+// disarmed state the installer must never leave behind.
+assert.equal(evaluate(claude('ls'), env), null, 'Claude Code allow is no output');
+assert.equal(evaluate(copilot('ls'), env), null, 'Copilot allow is no output');
 hookShapeChecks += 1;
 
-const stubHook = `${scratch}/stub.js`;
-fs.writeFileSync(stubHook, "console.error('hook is not installed correctly');\nprocess.exit(2);\n");
+// Read the stub the installer really writes rather than restating it here: a
+// literal copy would keep passing after write_fail_closed_hook_stub was changed
+// to exit 0, which is the exact failure this is meant to catch.
+const stubHook = `${scratch}/stub-from-installer.js`;
+const stubExtraction = spawnSync('bash', [
+  '-c',
+  'eval "$(sed -n "/^write_fail_closed_hook_stub()/,/^}/p" "$1")"; write_fail_closed_hook_stub "$2"',
+  'extract-stub',
+  `${__dirname}/install-hooks.sh`,
+  stubHook,
+], { encoding: 'utf8' });
+assert.equal(stubExtraction.status, 0, `extracting the installer's stub writer failed: ${stubExtraction.stderr}`);
+assert.ok(fs.statSync(stubHook).size > 0, "the installer's stub must not be empty");
 const stubResult = spawnSync('node', [stubHook], { input: denyPayload, encoding: 'utf8' });
-assert.equal(stubResult.status, 2, 'the fail-closed stub exits 2 (blocking for PreToolUse)');
-assert.equal(stubResult.stdout, '', 'the fail-closed stub prints no allow');
+assert.equal(stubResult.status, 2, "the installer's stub exits 2 (blocking for PreToolUse)");
+assert.equal(stubResult.stdout, '', "the installer's stub prints no allow");
+hookShapeChecks += 1;
+
+// The installer's own probe, extracted from install-hooks.sh and exercised
+// directly. Driving it through a real install cannot pin these properties: when
+// the source hook is itself bad, the probe's positive control (which asks
+// whether the SOURCE denies) cannot tell that apart from a broken probe. So the
+// three properties are pinned here, on the function itself.
+function runInstallerProbe(hookFile) {
+  return spawnSync('bash', [
+    '-c',
+    'eval "$(sed -n "/^hook_denies_protected_deletion()/,/^}/p" "$1")"; hook_denies_protected_deletion "$2"',
+    'installer-probe',
+    `${__dirname}/install-hooks.sh`,
+    hookFile,
+  ], { encoding: 'utf8', timeout: 120000 });
+}
+
+assert.equal(runInstallerProbe(`${__dirname}/hooks/protect-important-paths.js`).status, 0,
+  "the installer's probe must accept the real hook");
+hookShapeChecks += 1;
+
+// Denying the first payload only. One payload proves the file is not truncated;
+// it does not prove the hook protects anything, so the probe must use several.
+const selectiveHook = `${scratch}/selective.js`;
+fs.writeFileSync(selectiveHook, `
+const chunks = [];
+process.stdin.on('data', (c) => chunks.push(c));
+process.stdin.on('end', () => {
+  const payload = JSON.parse(chunks.join(''));
+  if (payload.tool_input.command === 'rm -rf /') {
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny' } }));
+  }
+  process.exit(0);
+});
+`);
+assert.notEqual(runInstallerProbe(selectiveHook).status, 0,
+  'a hook that denies only the first payload must be rejected');
+hookShapeChecks += 1;
+
+// Printing deny while exiting 1: for Claude Code PreToolUse exit 1 is a
+// NON-blocking error, so the tool would run despite the deny on stdout.
+const denyButExit1 = `${scratch}/deny-exit1.js`;
+fs.writeFileSync(denyButExit1, `
+process.stdout.write(JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny' } }));
+process.exit(1);
+`);
+assert.notEqual(runInstallerProbe(denyButExit1).status, 0,
+  'a hook that denies but exits 1 must be rejected');
+hookShapeChecks += 1;
+
+// A hook that never terminates must not hang the installer forever.
+const hangingHook = `${scratch}/hanging.js`;
+fs.writeFileSync(hangingHook, 'setInterval(() => {}, 1000);\n');
+const hangStarted = Date.now();
+const hangResult = runInstallerProbe(hangingHook);
+const hangElapsed = Date.now() - hangStarted;
+assert.notEqual(hangResult.status, 0, 'a hook that never terminates must be rejected');
+assert.ok(hangElapsed < 60000, `the probe must time out, took ${hangElapsed}ms`);
 hookShapeChecks += 1;
 
 fs.rmSync(scratch, { recursive: true, force: true });
