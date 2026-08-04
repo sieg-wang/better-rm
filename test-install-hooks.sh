@@ -857,6 +857,221 @@ assert_file "missing shared hook installs local runtime" "$MISSING_HOME/.claude/
 assert_contains "the release download went through the stubbed boundary" \
     "$(cat "$RELEASE_DOWNLOAD_LOG")" "releases/latest/download/protect-important-paths.js"
 
+# PreToolUse 的完整契約：只有 exit 2、或 exit 0 且印出 deny，才算「擋下」。
+# 其餘一律是放行 —— 包含 SyntaxError 這種非零結束，本專案自己的註解就說那是
+# 「非阻擋錯誤」，工具照樣執行。hook_is_permissive 只認得 exit 0 那一種形狀，
+# 所以驗「下載回來的 HTML」時會誤判成安全，這裡需要完整的契約。
+# The full PreToolUse contract: only exit 2, or exit 0 with a deny, blocks.
+# Everything else allows, including a SyntaxError's non-zero exit, which this
+# repo's own comments call a NON-blocking error. hook_is_permissive only knows
+# the exit-0 shape, so it would call a downloaded HTML page safe.
+hook_allows_protected_deletion() {
+    local out status
+    out=$(printf '%s' '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"},"cwd":"/"}' | node "$1" 2>/dev/null)
+    status=$?
+    if [ "$status" -eq 2 ]; then
+        return 1
+    fi
+    if [ "$status" -eq 0 ] && printf '%s' "$out" | grep -q '"permissionDecision":"deny"'; then
+        return 1
+    fi
+    return 0
+}
+
+# 下載回來的 hook 完全沒有被驗證。captive portal 的登入頁、被截斷的回應、CDN 的
+# 錯誤頁，都會原封不動被裝成 runtime SAFETY hook：安裝 exit 0、毫無警告，之後每
+# 次呼叫都 SyntaxError，也就是安靜地放行一切。
+# The downloaded hook is not verified at all. A captive-portal page, a truncated
+# body or a CDN error page is installed verbatim as the runtime SAFETY hook: the
+# install exits 0 with no warning and every later invocation SyntaxErrors, which
+# is a silent allow-everything.
+CAPTIVE_SOURCE="$TMP_ROOT/captive-portal-source"
+mkdir -p "$CAPTIVE_SOURCE"
+cp "$INSTALLER" "$CAPTIVE_SOURCE/install-hooks.sh"
+chmod +x "$CAPTIVE_SOURCE/install-hooks.sh"
+CAPTIVE_HOME="$TMP_ROOT/captive-portal-home"
+CAPTIVE_HOOK="$CAPTIVE_HOME/.claude/protect-important-paths.js"
+CAPTIVE_STATUS=0
+CAPTIVE_OUTPUT=$(
+    env PATH="$RELEASE_STUB_BIN:$PATH" \
+        BETTER_RM_TEST_RELEASE_DIR="$RELEASE_ASSET_DIR" \
+        BETTER_RM_TEST_RELEASE_BODY='<html><head><title>Sign in to continue</title></head><body>Wi-Fi login required</body></html>' \
+        HOME="$CAPTIVE_HOME" CLAUDE_CONFIG_DIR= "$CAPTIVE_SOURCE/install-hooks.sh" -a claude --global 2>&1
+) || CAPTIVE_STATUS=$?
+if [ "$CAPTIVE_STATUS" -ne 0 ]; then
+    pass "a tampered release download aborts the install"
+else
+    fail "a tampered release download aborts the install"
+fi
+# 訊息必須指出是「下載回來的東西不會擋」，而不是含糊的失敗：這條路徑上使用者能做
+# 的補救（換網路重試）完全取決於他看不看得懂發生什麼事。
+# The message has to name the actual problem — the download does not block —
+# because the only remedy on this path (change network, retry) depends on it.
+assert_contains "a tampered release download says why it aborted" \
+    "$CAPTIVE_OUTPUT" "does not block protected deletions"
+if [ -f "$CAPTIVE_HOOK" ] && grep -q 'Wi-Fi login required' "$CAPTIVE_HOOK"; then
+    fail "a tampered release download is never installed as the runtime hook"
+else
+    pass "a tampered release download is never installed as the runtime hook"
+fi
+if [ ! -f "$CAPTIVE_HOME/.claude/settings.json" ]; then
+    pass "a tampered release download never leaves an allow-everything hook registered"
+elif [ -f "$CAPTIVE_HOOK" ] && ! hook_allows_protected_deletion "$CAPTIVE_HOOK"; then
+    pass "a tampered release download never leaves an allow-everything hook registered"
+else
+    fail "a tampered release download never leaves an allow-everything hook registered"
+fi
+
+# 第一次安裝（目的地不存在）走的是純 cp，完全沒有信任探測；hook_is_trustworthy
+# 只服務 refresh 路徑。cp 回報成功不代表寫進去的是完整內容：磁碟滿或檔案系統錯誤
+# 會留下 0 byte 的檔案，而那在契約上就是「放行一切」。
+# The first install (destination absent) is a plain cp with no trust probe;
+# hook_is_trustworthy only covers the refresh path. cp reporting success does not
+# mean the bytes landed — a full disk leaves a 0-byte file, which the contract
+# reads as allow-everything.
+FIRST_INSTALL_CP_BIN="$TMP_ROOT/first-install-cp-bin"
+mkdir -p "$FIRST_INSTALL_CP_BIN"
+cat > "$FIRST_INSTALL_CP_BIN/cp" <<'EOF'
+#!/bin/sh
+# 只讓「第一次把共用 hook 複製到目的地」變成靜默截斷：回報成功、留下空檔。
+for arg in "$@"; do
+    case "$arg" in
+        */.claude/protect-important-paths.js)
+            : > "$arg"
+            exit 0
+            ;;
+    esac
+done
+exec /bin/cp "$@"
+EOF
+chmod +x "$FIRST_INSTALL_CP_BIN/cp"
+FIRST_INSTALL_HOME="$TMP_ROOT/first-install-truncated-home"
+FIRST_INSTALL_HOOK="$FIRST_INSTALL_HOME/.claude/protect-important-paths.js"
+FIRST_INSTALL_STATUS=0
+FIRST_INSTALL_OUTPUT=$(
+    cd "$TMP_ROOT"
+    PATH="$FIRST_INSTALL_CP_BIN:$PATH" HOME="$FIRST_INSTALL_HOME" CLAUDE_CONFIG_DIR= \
+        "$INSTALLER" -a claude --global 2>&1
+) || FIRST_INSTALL_STATUS=$?
+if [ "$FIRST_INSTALL_STATUS" -ne 0 ]; then
+    pass "a truncated first install aborts instead of reporting success"
+else
+    fail "a truncated first install aborts instead of reporting success"
+fi
+if [ -f "$FIRST_INSTALL_HOOK" ] && hook_is_permissive "$FIRST_INSTALL_HOOK"; then
+    fail "a truncated first install never leaves an allow-everything hook"
+else
+    pass "a truncated first install never leaves an allow-everything hook"
+fi
+assert_contains "a truncated first install says the hook now fails closed" \
+    "$FIRST_INSTALL_OUTPUT" "fails closed"
+
+# CLEANUP_DIRS 是以空白串接的字串，trap 用未加引號的 $CLEANUP_DIRS 迴圈，於是
+# 只要 mktemp -d 交回含空白的路徑，rm -rf 就會打在被切開的目標上。GNU 的
+# mktemp -d 會沿用 TMPDIR（含空白的 TMPDIR 就會產生這種路徑），BSD 的不會，
+# 所以直接在 mktemp 這個邊界注入：測的是「不管 mktemp 交回什麼路徑，清理都不得
+# 打錯目標」。這是 rm 打在被切開的路徑上，照高後果處理 —— 誘餌目錄就放在第一個
+# 切片會落下的位置。
+# CLEANUP_DIRS is a whitespace-joined string iterated unquoted, so any temp path
+# containing whitespace makes the trap's rm -rf hit split targets. GNU mktemp -d
+# honours TMPDIR (a TMPDIR with whitespace produces exactly such a path) while
+# BSD's does not, so the injection happens at the mktemp boundary itself. The
+# decoy sits exactly where the first split lands.
+WHITESPACE_MKTEMP_BIN="$TMP_ROOT/whitespace-mktemp-bin"
+mkdir -p "$WHITESPACE_MKTEMP_BIN"
+cat > "$WHITESPACE_MKTEMP_BIN/mktemp" <<EOF
+#!/bin/sh
+if [ "\$1" != "-d" ] || [ \$# -ne 1 ]; then
+    exec "$(command -v mktemp)" "\$@"
+fi
+candidate="\$BETTER_RM_TEST_TMP_PARENT/space dir/tmp.\$\$"
+mkdir -p "\$candidate" || exit 1
+printf '%s\n' "\$candidate"
+EOF
+chmod +x "$WHITESPACE_MKTEMP_BIN/mktemp"
+WHITESPACE_PARENT="$TMP_ROOT/whitespace-parent"
+mkdir -p "$WHITESPACE_PARENT"
+WHITESPACE_DECOY="$WHITESPACE_PARENT/space"
+mkdir -p "$WHITESPACE_DECOY"
+printf '%s\n' "DECOY" > "$WHITESPACE_DECOY/decoy.txt"
+WHITESPACE_SOURCE="$TMP_ROOT/whitespace-source"
+mkdir -p "$WHITESPACE_SOURCE"
+cp "$INSTALLER" "$WHITESPACE_SOURCE/install-hooks.sh"
+chmod +x "$WHITESPACE_SOURCE/install-hooks.sh"
+WHITESPACE_HOME="$TMP_ROOT/whitespace-home"
+assert_success "a whitespace temp path still installs" \
+    env PATH="$WHITESPACE_MKTEMP_BIN:$RELEASE_STUB_BIN:$PATH" \
+        BETTER_RM_TEST_RELEASE_DIR="$RELEASE_ASSET_DIR" \
+        BETTER_RM_TEST_TMP_PARENT="$WHITESPACE_PARENT" \
+        HOME="$WHITESPACE_HOME" CLAUDE_CONFIG_DIR= "$WHITESPACE_SOURCE/install-hooks.sh" -a claude --global
+assert_file "the cleanup trap never rm -rf's a split path" "$WHITESPACE_DECOY/decoy.txt"
+assert_equal "the whitespace temp dir is still cleaned up" "0" \
+    "$(find "$WHITESPACE_PARENT/space dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+
+# OpenCode 的插件與 runtime 更新路徑仍用 BSD 優先的 `stat -f '%Lp' || stat -c '%a'`。
+# 在 GNU userland，`-f` 是「檔案系統狀態」，'%Lp' 被當成另一個 operand：stderr 報錯、
+# 結束碼 1，但仍把該檔案的檔案系統資訊印到 stdout，命令替換於是把兩段 stdout 一起
+# 收下，chmod 吃到垃圾而失敗，安裝在寫到一半的狀態下中止。
+# Same class already fixed for the shared hook: on GNU userland `-f` means FILE
+# SYSTEM status, so the mode capture picks up unexpected stdout and chmod aborts
+# the install midway.
+REAL_STAT=$(command -v stat)
+if "$REAL_STAT" -f '%Lp' "$INSTALLER" >/dev/null 2>&1; then
+    STAT_MODE_ARGS="-f %Lp"
+else
+    STAT_MODE_ARGS="-c %a"
+fi
+GNU_STAT_BIN="$TMP_ROOT/gnu-stat-bin"
+mkdir -p "$GNU_STAT_BIN"
+cat > "$GNU_STAT_BIN/stat" <<EOF
+#!/bin/sh
+# 模擬 GNU coreutils 的 stat：-f 是檔案系統狀態，格式字串被當成另一個 operand。
+if [ "\$1" = "-f" ]; then
+    shift
+    fmt="\$1"; shift
+    echo "stat: cannot read file system information for '\$fmt': No such file or directory" >&2
+    for f in "\$@"; do
+        echo "  File: \"\$f\""
+        echo "    ID: 0        Namelen: 255     Type: apfs"
+    done
+    exit 1
+fi
+if [ "\$1" = "-c" ]; then
+    shift
+    shift
+    for f in "\$@"; do
+        "$REAL_STAT" $STAT_MODE_ARGS "\$f"
+    done
+    exit 0
+fi
+exec "$REAL_STAT" "\$@"
+EOF
+chmod +x "$GNU_STAT_BIN/stat"
+GNU_STAT_PROJECT="$TMP_ROOT/gnu-stat-opencode-project"
+make_repo "$GNU_STAT_PROJECT"
+mkdir -p "$GNU_STAT_PROJECT/.opencode/plugins" "$GNU_STAT_PROJECT/hooks"
+GNU_STAT_PLUGIN="$GNU_STAT_PROJECT/.opencode/plugins/protect-important-paths.ts"
+GNU_STAT_RUNTIME="$GNU_STAT_PROJECT/hooks/protect-important-paths.js"
+printf 'stale plugin that must be replaced\n' > "$GNU_STAT_PLUGIN"
+printf '// stale runtime hook that must be replaced\n' > "$GNU_STAT_RUNTIME"
+chmod 640 "$GNU_STAT_PLUGIN" "$GNU_STAT_RUNTIME"
+if (
+    cd "$GNU_STAT_PROJECT"
+    PATH="$GNU_STAT_BIN:$PATH" "$INSTALLER" -a opencode >/dev/null 2>&1
+); then
+    pass "opencode install survives a GNU-userland stat"
+else
+    fail "opencode install survives a GNU-userland stat"
+fi
+assert_equal "opencode plugin is updated under a GNU-userland stat" \
+    "$(file_hash "$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts")" \
+    "$(file_hash "$GNU_STAT_PLUGIN")"
+assert_equal "opencode runtime hook is updated under a GNU-userland stat" \
+    "$(file_hash "$SCRIPT_DIR/hooks/protect-important-paths.js")" \
+    "$(file_hash "$GNU_STAT_RUNTIME")"
+assert_equal "opencode plugin keeps its original mode" "640" "$(file_mode "$GNU_STAT_PLUGIN")"
+assert_equal "opencode runtime hook keeps its original mode" "640" "$(file_mode "$GNU_STAT_RUNTIME")"
+
 echo ""
 echo "========================================"
 echo "Passed: $PASSED"

@@ -114,26 +114,31 @@ This project uses GitHub Copilot, Google Antigravity, Pi, Grok Build, and AI-ass
 Recorded during the 2026-08 hook review. Each was reproduced; none is fixed
 here, so nobody has to rediscover them.
 
-- **The release download has no integrity check.** `download_release_file`
-  (used when `hooks/` is missing from the checkout) is a bare `curl -fsSL`
-  followed only by `[ -f ]` and `[ -r ]`. A captive portal that answers with an
-  HTML page installs that page as the runtime hook: the install exits 0 with no
-  warning, and the hook then throws a SyntaxError on every invocation — which is
-  a non-blocking exit for PreToolUse, i.e. it silently allows everything. A
-  checksum or a "does this file actually deny" probe on the downloaded file
-  would close it. Note this also limits the claim made in
-  `install-hooks.sh`'s `hook_is_trustworthy`: validating the source is normally
-  `test-hooks.js`'s job, but a network accident can supply a source that never
-  passed through it.
-- **First install is not probed.** `resolve_shared_hook_for_settings` copies the
-  hook when the destination is missing, and no trust probe runs on that path;
-  `hook_is_trustworthy` is only used by the refresh. A corrupted first install is
-  therefore accepted silently.
-- **`install-hooks.sh:1199` and `:1225`** (OpenCode plugin and runtime) still use
-  `stat -f '%Lp' || stat -c '%a'`, which yields concatenated garbage on GNU
-  userland and aborts the install mid-write. The shared-hook path no longer reads
-  the mode at all; these two were left alone as a separate change. No test
-  reaches that branch today, which is why CI never caught it.
+The three that used to head this list — the unverified release download, the
+unprobed first install, and the OpenCode `stat -f || stat -c` portability bug —
+were fixed on 2026-08-04 and are no longer open. What replaced them:
+
+- The downloaded hook now goes through `require_verified_downloaded_hook`, which
+  runs the real deny probe against the download and uses a *synthesised*
+  known-good / known-bad pair as its control (the download cannot be its own
+  positive control). Failing either way aborts the install.
+- The first install runs `hook_is_trustworthy` on the freshly copied file and,
+  on failure, writes the fail-closed stub and exits non-zero.
+- `install-hooks.sh` no longer invokes `stat` at all; `cp` onto an existing file
+  already preserves its inode and mode, which made the `chmod` redundant.
+
+- **The OpenCode plugin download is still unverified.** The runtime hook
+  (`protect-important-paths.js`) is now probed behaviourally, but
+  `opencode-protect-important-paths.ts` — downloaded from the same release by
+  `resolve_opencode_plugin` when `.opencode/plugins/` is missing from the
+  checkout — is not. It is the bridge that makes OpenCode call the verified
+  runtime hook, so a corrupted plugin means no protection under OpenCode.
+  Probing it needs a TypeScript runtime (`bun`, or OpenCode itself), which the
+  installer does not otherwise require; a content sniff would only narrow the
+  window, so nothing was added rather than something that looks like a check and
+  is not. `resolve_opencode_plugin`'s *runtime hook* download branch was left
+  alone for a different reason: `resolve_source_paths` already guarantees
+  `HOOK_SOURCE_PATH` is readable before it runs, so that branch is unreachable.
 - **A broken `sed` extraction would misdirect.** `test-hooks.js` extracts
   `hook_denies_protected_deletion` and `write_fail_closed_hook_stub` from
   `install-hooks.sh` with a `sed` range ending at `/^}/`. Re-indenting the

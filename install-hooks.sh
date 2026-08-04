@@ -32,7 +32,7 @@ VERSION="1.5.0"
 RELEASE_BASE_URL="https://github.com/doggy8088/better-rm/releases/latest/download"
 RELEASE_HOOK_ASSET_NAME="protect-important-paths.js"
 RELEASE_OPENCODE_PLUGIN_ASSET_NAME="opencode-protect-important-paths.ts"
-CLEANUP_DIRS=""
+CLEANUP_DIRS=()
 
 # 取得可用 Agent 列表字串
 # Return supported agents as a comma-separated string.
@@ -90,9 +90,16 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# 逐一刪除暫存目錄。目標必須逐項保留原樣：舊版把路徑以空白串成字串再用未加引號
+# 的迴圈展開，含空白的暫存路徑（GNU 的 mktemp -d 會沿用 TMPDIR）會被切成好幾個
+# 詞，rm -rf 於是打在不存在或不相干的目標上。這是 rm 打錯目標，不是清不乾淨而已。
+# Remove each temp directory. The targets must survive verbatim: joining them
+# into a whitespace-separated string and expanding it unquoted splits a temp path
+# containing whitespace (GNU mktemp -d honours TMPDIR) into several words, so
+# rm -rf lands on unrelated targets — a wrong-target rm, not merely a missed one.
 cleanup_release_dirs() {
     local directory
-    for directory in $CLEANUP_DIRS; do
+    for directory in ${CLEANUP_DIRS[@]+"${CLEANUP_DIRS[@]}"}; do
         rm -rf -- "$directory"
     done
 }
@@ -206,13 +213,17 @@ parse_arguments() {
 # 取得安裝腳本與 hook 的實體路徑
 # Resolve physical paths for the installer and shared hook
 resolve_source_paths() {
+    # trap 必須在任何 mktemp 之前就位，否則後續任何一條中止路徑都會留下暫存目錄。
+    # The trap has to be armed before any mktemp, or an abort leaks the temp dir.
+    trap cleanup_release_dirs EXIT
+
     SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
     HOOK_SOURCE_PATH="$SCRIPT_DIR/hooks/protect-important-paths.js"
 
     if [ ! -f "$HOOK_SOURCE_PATH" ] || [ ! -r "$HOOK_SOURCE_PATH" ]; then
         local release_dir
         release_dir="$(mktemp -d)"
-        CLEANUP_DIRS="$CLEANUP_DIRS $release_dir"
+        CLEANUP_DIRS+=("$release_dir")
         HOOK_SOURCE_PATH="$release_dir/hooks/protect-important-paths.js"
         info "本機未找到共用 hook，改用最新 Release"
         info "Shared hook not found locally; downloading from latest release"
@@ -223,9 +234,9 @@ resolve_source_paths() {
             error "Failed to download shared hook: $HOOK_SOURCE_PATH"
             exit 1
         fi
-    fi
 
-    trap cleanup_release_dirs EXIT
+        require_verified_downloaded_hook "$HOOK_SOURCE_PATH"
+    fi
 }
 
 resolve_shared_hook_for_settings() {
@@ -238,6 +249,35 @@ resolve_shared_hook_for_settings() {
     if [ ! -f "$HOOK_PATH" ] || [ ! -r "$HOOK_PATH" ]; then
         mkdir -p -- "$(dirname -- "$HOOK_PATH")"
         cp "$HOOK_SOURCE_PATH" "$HOOK_PATH"
+        # 第一次安裝同樣要驗。cp 回報成功不代表寫進去的是完整內容：磁碟滿或檔案
+        # 系統錯誤會留下 0 byte／截斷的檔案，而那種 hook 以 exit 0、空輸出結束，
+        # 在 Claude Code／Copilot 契約下就是「允許一切」。過去只有 refresh 路徑
+        # 走 hook_is_trustworthy，第一次安裝完全沒被驗過，等於整條路徑上最沒有
+        # 防護的一步就是「全新安裝」。
+        # 這裡沒有前一份可以還原，所以驗不過就寫 fail-closed stub 再中止 —— 留下
+        # 空檔或乾脆刪掉都一樣是放行（settings 指向不存在的檔案時，PreToolUse 的
+        # 非零結束屬於「非阻擋錯誤」，工具照樣執行）。
+        # The first install needs the same verification. cp reporting success does
+        # not mean the bytes landed: a full disk or a filesystem error leaves a
+        # 0-byte or truncated file, and such a hook exits 0 with no output, which
+        # the Claude Code and Copilot contracts read as allow-everything. Only the
+        # refresh path went through hook_is_trustworthy, so a brand-new install was
+        # the least protected step of all.
+        # There is no predecessor to restore here, so a failure writes the
+        # fail-closed stub and aborts: leaving an empty file — or deleting it — is
+        # equally an allow, because a missing hook makes PreToolUse exit non-zero,
+        # which is a NON-blocking error and the tool still runs.
+        HOOK_PROBE_UNAVAILABLE=false
+        if ! hook_is_trustworthy "$HOOK_PATH"; then
+            if write_fail_closed_hook_stub "$HOOK_PATH"; then
+                error "第一次安裝的共用 hook 無法通過驗證，已改為 fail-closed（拒絕所有工具呼叫）：$HOOK_PATH"
+                error "The freshly installed shared hook could not be verified; it now fails closed (every tool call is denied): $HOOK_PATH"
+            else
+                error "第一次安裝的共用 hook 無法通過驗證，連 fail-closed stub 也寫不進去：$HOOK_PATH 目前的內容可能會放行所有刪除"
+                error "The freshly installed shared hook could not be verified and the stub could not be written either; what is at $HOOK_PATH may allow everything"
+            fi
+            exit 1
+        fi
     elif ! cmp -s "$HOOK_SOURCE_PATH" "$HOOK_PATH"; then
         # 保留可讀但過期的 runtime hook，等於讓 hook 的安全修補停在原始碼樹裡，
         # 永遠到不了 agent 實際執行的檔案，因此內容不同時必須更新。
@@ -318,6 +358,66 @@ hook_denies_protected_deletion() {
     }
     process.exit(0);
 ' "$1" 2>/dev/null
+}
+
+# 驗證「剛從網路下載回來的」hook，驗不過就中止安裝。
+# 為什麼不能沿用 hook_is_trustworthy：那個函式拿 HOOK_SOURCE_PATH 當正對照，而在
+# 這裡待驗的檔案「就是」HOOK_SOURCE_PATH —— 自己驗自己，任何壞檔案都會被判成「探
+# 測工具壞了」而放行。所以正對照必須另外造：一份必定 deny 的合成 hook 證明探測跑
+# 得起來，再加一份必定放行的空檔當負對照，證明探測不是「什麼都說 OK」。
+# 為什麼不是 checksum：checksum 檔會走同一條被汙染的通道（captive portal 兩個請求
+# 都回 HTML），而且只擋得住位元組層級的意外。行為驗證擋得住同一批情境（HTML 登入
+# 頁、截斷的 body、CDN 錯誤頁全都測不出 deny），還多擋一種 checksum 擋不到的：語法
+# 正確、但根本不保護任何東西的檔案。
+# 驗不過就 exit：此時什麼都還沒註冊、也沒有前一份可以還原，中止是唯一 fail-closed
+# 的結果。把來路不明的網路內容裝成 SAFETY hook，比裝不起來危險得多。
+# Verify a hook that just came off the network; abort the install if it fails.
+# hook_is_trustworthy cannot be reused here: it uses HOOK_SOURCE_PATH as its
+# positive control, and here the file under test IS HOOK_SOURCE_PATH, so a bad
+# download would be indistinguishable from a broken probe and get accepted. The
+# control therefore has to be synthesised — a known-good hook that always denies
+# proves the probe runs, and a known-bad empty file proves the probe is not just
+# saying yes to everything.
+# Why not a checksum: the checksum asset travels the same poisoned channel (a
+# captive portal answers both requests with HTML) and only catches byte-level
+# accidents. The behavioural probe catches that same set (login page, truncated
+# body, CDN error page all fail to deny) plus one a checksum cannot: a
+# syntactically valid file that protects nothing.
+# Failing means exiting: nothing is registered yet and there is no predecessor to
+# fall back to, so aborting is the only fail-closed outcome. Installing
+# unverified network content as the SAFETY hook is far worse than not installing.
+require_verified_downloaded_hook() {
+    local candidate="$1"
+
+    if hook_denies_protected_deletion "$candidate"; then
+        return 0
+    fi
+
+    local control_good="${candidate}.better-rm-control-good.js"
+    local control_bad="${candidate}.better-rm-control-bad.js"
+    printf '%s\n' \
+        '#!/usr/bin/env node' \
+        'process.stdin.resume();' \
+        'process.stdin.on("end", () => {' \
+        '    process.stdout.write("{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\"}}");' \
+        '});' \
+        > "$control_good" 2>/dev/null || true
+    : > "$control_bad" 2>/dev/null || true
+
+    if hook_denies_protected_deletion "$control_good" &&
+       ! hook_denies_protected_deletion "$control_bad"; then
+        error "從 Release 下載的 hook 無法擋下受保護的刪除，已中止安裝：$RELEASE_BASE_URL"
+        error "The hook downloaded from the release does not block protected deletions; install aborted: $RELEASE_BASE_URL"
+        error "下載內容可能被中途攔截（captive portal、CDN 錯誤頁）或不完整；請檢查網路後重試"
+        error "The download may have been intercepted (captive portal, CDN error page) or truncated; check the network and retry"
+        exit 1
+    fi
+
+    error "無法驗證從 Release 下載的 hook：自我檢測本身跑不起來（需要可執行的 node）"
+    error "Cannot verify the hook downloaded from the release: the self-check itself could not run (a working node is required)"
+    error "未經驗證的網路內容不會被裝成 SAFETY hook，安裝已中止"
+    error "Unverified network content is not installed as the SAFETY hook; install aborted"
+    exit 1
 }
 
 # 判斷磁碟上這份 hook 能不能信任。
@@ -632,7 +732,7 @@ resolve_opencode_plugin() {
     if [ ! -f "$PLUGIN_SOURCE_PATH" ] || [ ! -r "$PLUGIN_SOURCE_PATH" ]; then
         local plugin_release_dir
         plugin_release_dir="$(mktemp -d)"
-        CLEANUP_DIRS="$CLEANUP_DIRS $plugin_release_dir"
+        CLEANUP_DIRS+=("$plugin_release_dir")
         PLUGIN_SOURCE_PATH="$plugin_release_dir/.opencode/plugins/protect-important-paths.ts"
     fi
     PLUGIN_PATH="$project_root/.opencode/plugins/protect-important-paths.ts"
@@ -1324,11 +1424,24 @@ install_opencode_hooks() {
                 backup_path="$PLUGIN_PATH.better-rm.bak.$(date -u +%Y%m%dT%H%M%SZ).${suffix}"
                 suffix=$((suffix + 1))
             done
-            local plugin_mode
-            plugin_mode=$(stat -f '%Lp' "$PLUGIN_PATH" 2>/dev/null || stat -c '%a' "$PLUGIN_PATH")
             cp "$PLUGIN_PATH" "$backup_path"
+            # 不讀原本的 mode，也就完全不必用 stat：`cp` 覆寫既有檔案時保留目的地
+            # 的 inode 與 mode，所以那個 chmod 本來就是多餘的。stat 的旗標在 BSD
+            # 與 GNU userland 並不相容（GNU 的 `-f` 是「檔案系統狀態」，會把 '%Lp'
+            # 當成另一個 operand：stderr 報錯、結束碼 1，但仍把該檔案的檔案系統資訊
+            # 印到 stdout；`||` 後援確實會執行，命令替換卻把兩段 stdout 一起收下，
+            # chmod 吃到垃圾而失敗，安裝就停在寫到一半的狀態）。共用 hook 的路徑
+            # 早已用同樣的理由拿掉 stat。
+            # The original mode is never read, so stat is not needed: cp onto an
+            # existing file preserves the destination's inode and mode, which made
+            # that chmod redundant anyway. stat's flags are not portable between
+            # BSD and GNU userland (GNU `-f` means FILE SYSTEM status and treats
+            # '%Lp' as another operand: it errors on stderr and exits 1 but still
+            # prints that file's filesystem info on stdout, so the `||` fallback
+            # runs and the command substitution captures BOTH outputs, feeding
+            # chmod garbage and aborting the install midway). The shared-hook path
+            # dropped stat for the same reason.
             cp "$PLUGIN_SOURCE_PATH" "$PLUGIN_PATH"
-            chmod "$plugin_mode" "$PLUGIN_PATH"
             success "已更新 OpenCode 插件：$PLUGIN_PATH"
             success "Updated OpenCode plugin: $PLUGIN_PATH"
             info "備份檔案 / Backup: $backup_path"
@@ -1350,11 +1463,11 @@ install_opencode_hooks() {
                 runtime_backup_path="$OPENCODE_RUNTIME_PATH.better-rm.bak.$(date -u +%Y%m%dT%H%M%SZ).${runtime_suffix}"
                 runtime_suffix=$((runtime_suffix + 1))
             done
-            local runtime_mode
-            runtime_mode=$(stat -f '%Lp' "$OPENCODE_RUNTIME_PATH" 2>/dev/null || stat -c '%a' "$OPENCODE_RUNTIME_PATH")
             cp "$OPENCODE_RUNTIME_PATH" "$runtime_backup_path"
+            # 同上：cp 覆寫既有檔案會保留 mode 與 inode，因此不需要（也不能）用 stat。
+            # As above: cp onto an existing file preserves mode and inode, so no
+            # stat is needed — and stat here is not portable.
             cp "$OPENCODE_RUNTIME_SOURCE_PATH" "$OPENCODE_RUNTIME_PATH"
-            chmod "$runtime_mode" "$OPENCODE_RUNTIME_PATH"
             success "已更新 OpenCode 共享 hook：$OPENCODE_RUNTIME_PATH"
             success "Updated OpenCode runtime hook: $OPENCODE_RUNTIME_PATH"
             info "備份檔案 / Backup: $runtime_backup_path"
