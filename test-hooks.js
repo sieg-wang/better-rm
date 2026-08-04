@@ -327,6 +327,24 @@ const dynamicExecutableBlocked = [
   // An unresolvable command word may also be a shell carrier.
   "CMD=bash; $CMD -c 'rm -rf /'",
   'CMD=rm; $CMD -rf .git',
+  // A command substitution in the executable position is just as unresolvable.
+  // These parsed as the word `$` followed by a `(` separator, which both hid
+  // the executable and truncated the operand scan before the target.
+  '$(which rm) -rf /',
+  '`which rm` -rf /',
+  '$(echo rm) -rf /',
+  '$(echo $(echo rm)) -rf /',
+  '"$(which rm)" -rf /',
+  '$(which rmdir) /etc',
+  'sudo $(which rm) -rf /etc',
+  '/bin/$(echo rm) -rf /',
+  '$(echo /bin)/rm -rf /',
+  '$((0))$(echo rm) -rf /boot',
+  'nohup $(which rm) -rf /',
+  'env SAFE=1 $(which rm) -rf /',
+  'true && $(which rm) -rf /',
+  'true | $(which rm) -rf /',
+  '$(which bash) -c "rm -rf /"',
 ];
 
 const dynamicExecutableAllowed = [
@@ -338,6 +356,9 @@ const dynamicExecutableAllowed = [
   'cat /etc/hosts',
   '$EDITOR notes.txt',
   'CMD=ls; $CMD build',
+  '$(which ls) build',
+  '$(npm bin)/eslint src',
+  "echo '$(which rm) -rf /'",
 ];
 
 let stdinChecks = 0;

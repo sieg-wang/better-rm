@@ -118,6 +118,21 @@ function shellWords(command) {
     } else if (char === '$' && input[index + 1] === "'") {
       quote = 'ansi-c';
       index += 1;
+    } else if (char === '$' && input[index + 1] === '(') {
+      // A command substitution belongs to the word it sits in, exactly like a
+      // parameter expansion. Splitting it on the parentheses made
+      // `$(which rm) -rf /` tokenize as the word `$` followed by a `(`
+      // separator: the executable vanished and the operand scan stopped at that
+      // separator before ever reaching the target.
+      const substitution = readParenthesized(input, index + 1);
+      wordHasDynamicExpansion = true;
+      if (substitution) {
+        word += input.slice(index, substitution.end + 1);
+        index = substitution.end;
+      } else {
+        // Unbalanced '(': keep the old character-by-character behaviour.
+        word += char;
+      }
     } else if (char === '"' || char === "'") {
       quote = char;
     } else if (';&|()<>\n'.includes(char)) {
@@ -136,44 +151,47 @@ function shellWords(command) {
   return words;
 }
 
+// Find the ')' that closes the '(' at openIndex, honouring nesting and quotes.
+// Shared by the tokenizer and the substitution scanner so both agree on where a
+// command substitution ends.
+function readParenthesized(input, openIndex) {
+  let depth = 1;
+  let innerQuote = '';
+  let innerEscaped = false;
+  for (let i = openIndex + 1; i < input.length; i += 1) {
+    const char = input[i];
+    if (innerEscaped) {
+      innerEscaped = false;
+    } else if (char === '\\' && innerQuote !== "'") {
+      innerEscaped = true;
+    } else if (innerQuote) {
+      if (char === innerQuote) innerQuote = '';
+      else if (innerQuote === '"' && char === '$' && input[i + 1] === '(') {
+        depth += 1;
+        i += 1;
+      }
+    } else if (char === '"' || char === "'") {
+      innerQuote = char;
+    } else if (char === '$' && input[i + 1] === '(') {
+      depth += 1;
+      i += 1;
+    } else if (char === '(') {
+      depth += 1;
+    } else if (char === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        return { command: input.slice(openIndex + 1, i), end: i };
+      }
+    }
+  }
+  return null;
+}
+
 function commandSubstitutions(command) {
   const input = String(command || '');
   const commands = [];
   let quote = '';
   let escaped = false;
-
-  function readParenthesized(openIndex) {
-    let depth = 1;
-    let innerQuote = '';
-    let innerEscaped = false;
-    for (let i = openIndex + 1; i < input.length; i += 1) {
-      const char = input[i];
-      if (innerEscaped) {
-        innerEscaped = false;
-      } else if (char === '\\' && innerQuote !== "'") {
-        innerEscaped = true;
-      } else if (innerQuote) {
-        if (char === innerQuote) innerQuote = '';
-        else if (innerQuote === '"' && char === '$' && input[i + 1] === '(') {
-          depth += 1;
-          i += 1;
-        }
-      } else if (char === '"' || char === "'") {
-        innerQuote = char;
-      } else if (char === '$' && input[i + 1] === '(') {
-        depth += 1;
-        i += 1;
-      } else if (char === '(') {
-        depth += 1;
-      } else if (char === ')') {
-        depth -= 1;
-        if (depth === 0) {
-          return { command: input.slice(openIndex + 1, i), end: i };
-        }
-      }
-    }
-    return null;
-  }
 
   for (let i = 0; i < input.length; i += 1) {
     const char = input[i];
@@ -198,7 +216,7 @@ function commandSubstitutions(command) {
       continue;
     }
     if (char === '$' && input[i + 1] === '(') {
-      const nested = readParenthesized(i + 1);
+      const nested = readParenthesized(input, i + 1);
       if (nested) {
         commands.push(nested.command);
         i = nested.end;
@@ -206,7 +224,7 @@ function commandSubstitutions(command) {
       continue;
     }
     if ((char === '<' || char === '>') && input[i + 1] === '(') {
-      const nested = readParenthesized(i + 1);
+      const nested = readParenthesized(input, i + 1);
       if (nested) {
         commands.push(nested.command);
         i = nested.end;
