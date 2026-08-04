@@ -681,6 +681,10 @@ rm --restore LICENSE
 mv ~/.Trash/home/user/projects/myapp/file.txt__20251209_143052_123456789__hash /home/user/projects/myapp/file.txt
 ```
 
+> ⚠️ 標有 `v2` 的紀錄中，兩個路徑欄位是**轉義過的**：`\\` 代表反斜線、`\p` 代表 `|`、`\n` 代表換行、`\r` 代表歸位。
+> 若檔名含有這些字元，請勿直接把日誌裡的字串貼給 `mv`，要先還原轉義；
+> 這種情況建議直接用 `rm --restore`，它會自動處理。
+
 ## 技術細節
 
 ### 相容性
