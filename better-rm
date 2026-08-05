@@ -725,12 +725,21 @@ move_to_trash() (
     fi
 
     rmdir "$reservation" 2>/dev/null || true
-    # 記錄刪除操作到日誌
-    # Log the deletion operation
-    log_deletion "$abs_path" "$target" "$file_hash" "$timestamp" "$file_type"
+    # 記錄刪除操作到日誌。寫不進去時的實情是「東西已經在垃圾桶裡，但 --restore 找不到
+    # 它」；這句話只有呼叫端有辦法講清楚，所以用獨立的結束碼 3 傳出去，而不是混進 0
+    # （謊稱一切正常）或 1（謊稱東西沒被移走）。
+    # Log the deletion. When that write fails, the truth is "the item IS in the
+    # trash but --restore cannot find it" — wording that only the caller can
+    # supply, so it leaves as its own exit code 3 instead of being folded into 0
+    # (claiming all is well) or 1 (claiming nothing was moved).
+    local logged=0
+    log_deletion "$abs_path" "$target" "$file_hash" "$timestamp" "$file_type" || logged=$?
 
     if [ "$verbose" = "1" ]; then
         success_msg "已移除 '$source_label' (moved to trash: $target)"
+    fi
+    if [ "$logged" -ne 0 ]; then
+        return 3
     fi
     return 0
 )
@@ -1314,6 +1323,7 @@ restore_file() {
     # space at all, so route 2 still works on a full volume — measure first, then
     # pick the route.
     local displaced_trashed=0
+    local displaced_unlogged=0
     local displaced_dir=""
     local displaced_local=""
 
@@ -1420,6 +1430,14 @@ restore_file() {
                 local displace_status=$?
                 if [ "$displace_status" -eq 0 ]; then
                     displaced_trashed=1
+                elif [ "$displace_status" -eq 3 ]; then
+                    # 東西進了垃圾桶，但刪除日誌沒寫成功——rm --restore 找不到它，
+                    # 訊息不能照抄成功版本。
+                    # It is in the trash but the deletion log was not written, so
+                    # rm --restore cannot find it and the message must not claim
+                    # otherwise.
+                    displaced_trashed=1
+                    displaced_unlogged=1
                 elif [ "$displaceable" = "1" ] &&
                      [ "$(path_identity "$dest_path")" = "$dest_identity" ]; then
                     # 沒能移入垃圾桶，但舊目的地確實還是那個已驗證的物件（例如空間在
@@ -1463,8 +1481,13 @@ restore_file() {
             # The set-aside already happened: the old destination is in the trash
             # and the deletion log holds its original path. The exit-1 contract
             # requires naming anything that could not be put back; this is it.
-            error_msg "既有的 '$dest_filename' 已移入垃圾桶且未放回，請用 rm --restore '$dest_filename' 取回"
-            error_msg "The existing '$dest_filename' was moved into the trash and not put back; recover it with rm --restore '$dest_filename'"
+            if [ "$displaced_unlogged" = "1" ]; then
+                error_msg "既有的 '$dest_filename' 已移入垃圾桶且未放回，但刪除日誌沒寫成功，rm --restore 取不回它；請在垃圾桶 '$TRASH_DIR' 底下依原路徑尋找"
+                error_msg "The existing '$dest_filename' was moved into the trash and not put back, and the deletion log was not written, so rm --restore cannot find it; look under the trash root '$TRASH_DIR' at its original path"
+            else
+                error_msg "既有的 '$dest_filename' 已移入垃圾桶且未放回，請用 rm --restore '$dest_filename' 取回"
+                error_msg "The existing '$dest_filename' was moved into the trash and not put back; recover it with rm --restore '$dest_filename'"
+            fi
         fi
         if [ -n "$displaced_local" ]; then
             # 就地讓位是同裝置的 rename，放回去一樣不需要空間：能放回就放回，狀態
@@ -1488,12 +1511,19 @@ restore_file() {
 
     if [ "$displaced_trashed" = "1" ]; then
         # 使用者同意的是「覆蓋」，不是「銷毀」。舊目的地去了哪裡必須主動說，否則
-        # 使用者無從得知它還救得回來。
+        # 使用者無從得知它還救得回來。日誌沒寫成功時尤其不能照抄成功版本的話術：
+        # 那句 `rm --restore` 會直接回「找不到刪除記錄」。
         # The user consented to an overwrite, not to destruction. Where the old
         # destination went has to be stated, or the user has no way to know it is
-        # still recoverable.
-        warn_msg "既有的 '$dest_filename' 已移入垃圾桶讓位，可用 rm --restore '$dest_filename' 取回"
-        warn_msg "The existing '$dest_filename' was moved into the trash to make room; recover it with rm --restore '$dest_filename'"
+        # still recoverable. When the log write failed the success wording must
+        # not be reused: that `rm --restore` answers "no deletion record found".
+        if [ "$displaced_unlogged" = "1" ]; then
+            warn_msg "既有的 '$dest_filename' 已移入垃圾桶讓位，但刪除日誌沒寫成功，rm --restore 取不回它；請在垃圾桶 '$TRASH_DIR' 底下依原路徑尋找"
+            warn_msg "The existing '$dest_filename' was moved into the trash to make room, but the deletion log was not written, so rm --restore cannot find it; look under the trash root '$TRASH_DIR' at its original path"
+        else
+            warn_msg "既有的 '$dest_filename' 已移入垃圾桶讓位，可用 rm --restore '$dest_filename' 取回"
+            warn_msg "The existing '$dest_filename' was moved into the trash to make room; recover it with rm --restore '$dest_filename'"
+        fi
     fi
 
     if [ -n "$displaced_local" ]; then
@@ -1719,9 +1749,16 @@ main() {
             fi
         fi
         
-        # 移動到垃圾桶
-        # Move to trash
-        if ! move_to_trash "$file" "$verbose"; then
+        # 移動到垃圾桶。結束碼 3 是「已移入垃圾桶，但刪除日誌沒寫成功」——刪除本身
+        # 成功了（警告已經印出來），所以刪除的結束狀態維持 0，一如日誌不可用時的
+        # 既有行為。
+        # Move to trash. Exit code 3 means "moved into the trash, but the deletion
+        # log could not be written": the removal itself succeeded and already
+        # warned, so the removal's exit status stays 0, exactly as it did before
+        # when the log was unavailable.
+        local move_status=0
+        move_to_trash "$file" "$verbose" || move_status=$?
+        if [ "$move_status" -ne 0 ] && [ "$move_status" -ne 3 ]; then
             status=1
         fi
     done

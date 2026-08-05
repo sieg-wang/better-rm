@@ -1944,6 +1944,46 @@ else
     test_fail "讓位到垃圾桶失敗時整個中止或遺失舊目的地 (status=$trashfail_status, aside='$trashfail_aside')"
 fi
 
+test_item "還原：讓位進了垃圾桶但日誌沒寫成功時，不得叫使用者去跑一個註定失敗的 --restore"
+# 讓位成功、deletion log 卻寫不進去，是可以判定的狀態（前一行已經印出「無法寫入刪除
+# 日誌」）。此時照抄成功版本的話術，會叫使用者去跑 `rm --restore '<名字>'`，而那一定
+# 回「找不到刪除記錄」——東西真的在垃圾桶裡，指示卻是假的。
+# A set-aside that succeeded while the deletion log did not is a decidable state:
+# the preceding line already said the log could not be written. Reusing the
+# success wording then tells the user to run `rm --restore '<name>'`, which is
+# guaranteed to answer "no deletion record found" — the data really is in the
+# trash but the instruction is false.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+printf '%s\n' "UNLOGGED ORIGINAL" > unlogged.txt
+"$BETTER_RM" unlogged.txt
+# 把紀錄搬到舊版垃圾桶日誌，再把主日誌的路徑換成一個目錄：還原仍找得到紀錄，但讓位
+# 這一步寫不進任何日誌。
+# Move the record to the legacy trash log and replace the primary log path with a
+# directory: the restore still finds its record while the set-aside cannot log.
+grep -v '^#' "$TEST_STATE_DIR/deletion.log" > "$TEST_TRASH_DIR/.deletion_log"
+rm -f "$TEST_STATE_DIR/deletion.log"
+mkdir -p "$TEST_STATE_DIR/deletion.log"
+mkdir -p unlogged.txt
+printf '%s\n' "UNLOGGED DESTINATION" > unlogged.txt/keep.txt
+unlogged_status=0
+unlogged_output=$("$BETTER_RM" -f --restore unlogged.txt 2>&1) || unlogged_status=$?
+unlogged_trashed=$(find "$TEST_TRASH_DIR" -type f -name 'keep.txt' 2>/dev/null | head -1)
+unlogged_again=0
+rm -f unlogged.txt
+"$BETTER_RM" -f --restore unlogged.txt >/dev/null 2>&1 || unlogged_again=$?
+
+if [ "$unlogged_status" -eq 0 ] && \
+   [ -n "$unlogged_trashed" ] && \
+   grep -qFx "UNLOGGED DESTINATION" "$unlogged_trashed" && \
+   [[ "$unlogged_output" == *"刪除日誌沒寫成功"* ]] && \
+   [[ "$unlogged_output" != *"可用 rm --restore"* ]] && \
+   [ "$unlogged_again" -ne 0 ]; then
+    test_pass "日誌沒寫成功時說出實情，沒有給出那句註定失敗的 --restore 指示"
+else
+    test_fail "日誌沒寫成功時仍宣稱可用 --restore 取回或漏講 (status=$unlogged_status, again=$unlogged_again)"
+fi
+
 test_item "還原：受保護的目的地不得因為垃圾桶裝不下就繞過保護、被移到旁邊讓位"
 # 就地讓位是為了「垃圾桶磁碟裝不下」而存在的退路，不是繞過保護的後門。move_to_trash
 # 拒絕受保護路徑是原則問題，不是空間問題；若空間不足就改用就地讓位，等於自己把
