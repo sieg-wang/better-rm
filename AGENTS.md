@@ -291,10 +291,25 @@ Same-device destinations are untouched by all of this: that clearing step is a
 `rename`, which never needed space. The measurement is a decision input, not a
 guarantee — `du` and `df` can both be wrong about a compressed, sparse or
 hard-linked tree, and space can disappear between the measurement and the copy.
-That residual is what the fallback above exists for; what remains after both is
-an `ENOSPC` mid-copy whose partial copy `mv` leaves in the trash, which is the
-tool's own pre-existing behaviour for an ordinary `rm` of a file too large for
-the trash volume (same on `main`, unchanged here).
+That residual is what the fallback above exists for, and it was measured by
+lying to the check with a `df` shim while the real 20 MB volume stayed full: the
+copy starts, dies of `ENOSPC`, the fallback sets the destination aside in place,
+and the restore still completes at exit 0 with the destination intact.
+
+What a failed cross-device copy leaves behind is handled where it happens, in
+`move_to_trash`, because an ordinary `rm` has exactly the same problem and never
+had a check at all. `mv` leaves what it had written at the target, and the
+retry loop used to read that as a name collision and try again under another
+name — up to 1000 times. On the 20 MB volume, `rm -r` of a 41 MB directory ended
+on `main` with the volume 100% full of a 20 MB half-copy nothing mentioned and a
+message blaming a name collision. That debris is now removed and the retry stops,
+under three preconditions: the move failed, the source is still the same inode,
+and the target is under the trash root. The name was verified free only after the
+reservation was taken and the reservation is this tool's mutex, so what sits
+there can only be what this process just wrote; if any precondition fails the old
+behaviour stands, because a leftover is better than a wrong delete. Clearing the
+debris *without* stopping the retry would be the worst of the three — it frees
+exactly the space that lets the next attempt copy the whole tree again.
 
 ### Disclosed, not fixed
 
