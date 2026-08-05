@@ -782,6 +782,71 @@ move_exact() {
     esac
 }
 
+# 解析出垃圾桶根目錄的絕對路徑（TRASH_DIR 允許是相對路徑）
+# Absolute path of the trash root (TRASH_DIR may be relative).
+absolute_trash_root() {
+    if [[ "$TRASH_DIR" = /* ]]; then
+        printf '%s' "$TRASH_DIR"
+    else
+        printf '%s/%s' "$PWD" "$TRASH_DIR"
+    fi
+}
+
+# 往上找到最近一個確實存在的祖先路徑。垃圾桶目錄常常還沒建立，但它所在的檔案系統
+# 已經可以由某個祖先問出來。都問不到時輸出空字串。
+# The nearest ancestor that actually exists. The trash directory is often still
+# to be created, yet the filesystem it will live on can already be probed through
+# an ancestor. Outputs the empty string when nothing can be probed.
+nearest_existing_path() {
+    local probe="$1"
+    while [ -n "$probe" ] && [ ! -e "$probe" ]; do
+        local parent="${probe%/*}"
+        if [ "$parent" = "$probe" ]; then
+            break
+        fi
+        probe="${parent:-/}"
+    done
+    if [ -e "$probe" ]; then
+        printf '%s' "$probe"
+    fi
+}
+
+# 回報路徑所在檔案系統的可用空間（KB）。無法判斷時輸出空字串，呼叫端必須把空字串
+# 當成「不知道」，不可當成 0。
+# Free space in KB on the filesystem holding a path. An empty result means
+# "unknown" and callers must treat it as such, never as zero.
+filesystem_free_kb() {
+    df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $4; exit}'
+}
+
+# 要量「垃圾桶裝不裝得下」，就得量東西真正會落下去的那個目錄所在的檔案系統，而不是
+# 垃圾桶根目錄——根目錄底下可能掛著別的卷宗。落點目錄通常還不存在，所以往上找最近的
+# 既有祖先，但絕不允許走到垃圾桶根目錄外面（那已經是另一顆磁碟了，量了也沒有意義）。
+# Measuring "does the trash have room" means measuring the filesystem holding the
+# directory the object will actually land in, not the trash root — another volume
+# can be mounted below it. That directory usually does not exist yet, so the
+# nearest existing ancestor is used, but never one above the trash root: that is
+# already a different disk and measuring it would answer the wrong question.
+trash_landing_probe() {
+    local root="$1"
+    local landing="$2"
+    local probe
+    probe=$(nearest_existing_path "$root$landing")
+    case "$probe" in
+        "$root"|"$root"/*)
+            printf '%s' "$probe"
+            return 0
+            ;;
+    esac
+    nearest_existing_path "$root"
+}
+
+# 回報路徑實際佔用的空間（KB）。無法判斷時輸出空字串。
+# Disk usage of a path in KB; empty when it cannot be determined.
+path_size_kb() {
+    du -sk "$1" 2>/dev/null | awk 'NR==1 {print $1; exit}'
+}
+
 # 還原檔案
 # Restore file
 restore_file() {
@@ -1227,7 +1292,56 @@ restore_file() {
     # the tool exists to prevent. Routing it through move_to_trash also inherits
     # that function's hardening — pinned parent, uniquified target, deletion-log
     # record — so the old destination comes back with `rm --restore`.
+    #
+    # 讓位有兩條路：
+    #   1. 移入垃圾桶（預設）：有 deletion log，可用 rm --restore 取回。
+    #   2. 就地讓位：在目的地旁邊獨佔建立一個目錄，用同裝置的 rename 把它搬進去。
+    # 跨裝置時第 1 條會退化成一次完整複製，需要垃圾桶那顆磁碟真的裝得下。實測的迴歸：
+    # 20MB 的垃圾桶卷宗配 41MB 的舊目的地，第 1 條在 ENOSPC 半途死掉，留下一份 20MB
+    # 的半成品複本永久佔著垃圾桶磁碟（而且沒有任何訊息提到它），使用者的檔案停在暫存
+    # 目錄裡沒還原，日誌指向的垃圾桶來源也已被消耗。rename 完全不需要額外空間，所以
+    # 第 2 條在磁碟全滿時仍然成立——先量再決定要走哪一條。
+    # Two routes clear the old destination out of the way:
+    #   1. into the trash (default): it gets a deletion-log record and comes back
+    #      with rm --restore;
+    #   2. aside in place: an exclusively created directory next to the
+    #      destination, reached by a same-filesystem rename.
+    # Across devices route 1 degrades into a full copy and needs the trash volume
+    # to actually have room. Measured regression: a 20MB trash volume and a 41MB
+    # destination make route 1 die of ENOSPC half way, leaving a permanent 20MB
+    # half-copy nothing mentions, while the user's file is never restored and the
+    # trash source the log points at has already been consumed. A rename needs no
+    # space at all, so route 2 still works on a full volume — measure first, then
+    # pick the route.
     local displaced_trashed=0
+    local displaced_dir=""
+    local displaced_local=""
+
+    # 就地讓位：把已驗證身分的舊目的地搬進獨佔建立的同層目錄。成功時 $displaced_local
+    # 就是它的新位置；失敗時不留下任何東西（除非落點被別人佔走，那就明講）。
+    # Set the destination aside in place: move the object whose identity was
+    # already proven into an exclusively created sibling directory. On success
+    # $displaced_local names its new location; on failure nothing is left behind
+    # unless another process occupied the landing spot, which is then named.
+    displace_destination_locally() {
+        local dir
+        if ! dir=$(mktemp -d "${dest_path}.better-rm-displaced-XXXXXX" 2>/dev/null); then
+            return 1
+        fi
+        local landing="$dir/$dest_filename"
+        if ! move_exact -n "$dest_path" "$landing" 2>/dev/null ||
+           [ "$(path_identity "$landing")" != "$dest_identity" ]; then
+            if ! rmdir "$dir" 2>/dev/null; then
+                error_msg "讓位落點 '$dir' 非空，未刪除；請檢查其內容"
+                error_msg "The set-aside directory '$dir' is not empty and was left in place; inspect it"
+            fi
+            return 1
+        fi
+        displaced_dir="$dir"
+        displaced_local="$landing"
+        return 0
+    }
+
     if [ "$dest_existed" = "1" ] &&
        { [ -e "$dest_path" ] || [ -L "$dest_path" ]; }; then
         local dest_is_real_dir=0
@@ -1246,18 +1360,92 @@ restore_file() {
                 error_msg "Restore failed: cannot confirm the inode identity of the existing '$dest_filename'"
                 return 1
             fi
-            # 把驗證過的 inode 交給 move_to_trash：從這裡到實際移動之間若被掉包，
-            # 它會中止而不是移動別人的東西。
-            # Hand the proven inode to move_to_trash: if the path is swapped
-            # between here and the actual move it aborts instead of moving an
-            # unrelated object.
-            if ! move_to_trash "$dest_path" 0 "$dest_identity"; then
+            # 受保護的路徑不適用就地讓位：那是 move_to_trash 的拒絕理由，不是空間
+            # 問題，繞過去等於自己拆掉保護。
+            # A protected path never takes the in-place route: move_to_trash
+            # refuses it on principle rather than for lack of space, and routing
+            # around that refusal would dismantle the protection.
+            local displace_in_place=0
+            local displaceable=1
+            if is_protected "$dest_path" >/dev/null 2>&1; then
+                displaceable=0
+            fi
+            if [ "$displaceable" = "1" ]; then
+                local trash_probe=""
+                local trash_device=""
+                local trash_free_kb=""
+                local dest_size_kb=""
+                # 落點目錄要用「解析過 symlink 的 parent」算，move_to_trash 自己就是
+                # 這樣決定垃圾桶路徑的（abs_path 走 readlink -f / pwd -P）。用未解析
+                # 的 pwd 會算出一個不存在的落點，於是退回去量垃圾桶根目錄——在根目錄
+                # 底下掛了別的卷宗時，那量到的是另一顆磁碟。
+                # The landing directory has to be derived from the symlink-resolved
+                # parent, because that is how move_to_trash itself builds the trash
+                # path (abs_path goes through readlink -f / pwd -P). An unresolved
+                # pwd yields a landing that does not exist, falling back to the
+                # trash root — which is the wrong disk whenever another volume is
+                # mounted below it.
+                local dest_parent_real
+                dest_parent_real=$(cd "$(dirname "$dest_path")" 2>/dev/null && pwd -P)
+                if [ -z "$dest_parent_real" ]; then
+                    dest_parent_real=$(dirname "$dest_path")
+                fi
+                trash_probe=$(trash_landing_probe "$(absolute_trash_root)" "$dest_parent_real")
+                if [ -n "$trash_probe" ]; then
+                    trash_device=$(path_identity "$trash_probe")
+                    trash_device="${trash_device%%:*}"
+                fi
+                # 量不出來就照舊走垃圾桶那條路：不知道並不等於裝不下。
+                # An unmeasurable filesystem keeps the trash route: "unknown" is
+                # not "does not fit".
+                if [ -n "$trash_device" ] &&
+                   [ "$trash_device" != "${dest_identity%%:*}" ]; then
+                    trash_free_kb=$(filesystem_free_kb "$trash_probe")
+                    dest_size_kb=$(path_size_kb "$dest_path")
+                    if [ -n "$trash_free_kb" ] && [ -n "$dest_size_kb" ] &&
+                       [ "$dest_size_kb" -ge "$trash_free_kb" ] 2>/dev/null; then
+                        displace_in_place=1
+                        warn_msg "垃圾桶所在磁碟只剩 ${trash_free_kb}KB，裝不下 ${dest_size_kb}KB 的既有 '$dest_filename'；不移入垃圾桶"
+                        warn_msg "The trash volume has ${trash_free_kb}KB free, too little for the existing '$dest_filename' (${dest_size_kb}KB); it is not going into the trash"
+                    fi
+                fi
+            fi
+            if [ "$displace_in_place" = "0" ]; then
+                # 把驗證過的 inode 交給 move_to_trash：從這裡到實際移動之間若被掉包，
+                # 它會中止而不是移動別人的東西。
+                # Hand the proven inode to move_to_trash: if the path is swapped
+                # between here and the actual move it aborts instead of moving an
+                # unrelated object.
+                move_to_trash "$dest_path" 0 "$dest_identity"
+                local displace_status=$?
+                if [ "$displace_status" -eq 0 ]; then
+                    displaced_trashed=1
+                elif [ "$displaceable" = "1" ] &&
+                     [ "$(path_identity "$dest_path")" = "$dest_identity" ]; then
+                    # 沒能移入垃圾桶，但舊目的地確實還是那個已驗證的物件（例如空間在
+                    # 量完之後才不夠、或垃圾桶暫時寫不進去）：改走就地讓位，使用者同意
+                    # 的覆蓋仍然完成，而舊目的地一樣不會被銷毀。身分不符就不是它了，
+                    # 一律中止。
+                    # The trash route failed but the old destination really is
+                    # still the object that was verified (space ran out after the
+                    # measurement, the trash is momentarily unwritable, …): fall
+                    # back to the in-place route so the consented overwrite still
+                    # completes and the old destination still is not destroyed. A
+                    # mismatching identity is a different object; abort instead.
+                    displace_in_place=1
+                else
+                    restore_unwind
+                    error_msg "還原失敗：無法把既有的 '$dest_filename' 移入垃圾桶讓位"
+                    error_msg "Restore failed: cannot move the existing '$dest_filename' into the trash to make room"
+                    return 1
+                fi
+            fi
+            if [ "$displace_in_place" = "1" ] && ! displace_destination_locally; then
                 restore_unwind
-                error_msg "還原失敗：無法把既有的 '$dest_filename' 移入垃圾桶讓位"
-                error_msg "Restore failed: cannot move the existing '$dest_filename' into the trash to make room"
+                error_msg "還原失敗：無法把既有的 '$dest_filename' 移到旁邊讓位"
+                error_msg "Restore failed: cannot set the existing '$dest_filename' aside to make room"
                 return 1
             fi
-            displaced_trashed=1
         fi
     fi
 
@@ -1278,6 +1466,21 @@ restore_file() {
             error_msg "既有的 '$dest_filename' 已移入垃圾桶且未放回，請用 rm --restore '$dest_filename' 取回"
             error_msg "The existing '$dest_filename' was moved into the trash and not put back; recover it with rm --restore '$dest_filename'"
         fi
+        if [ -n "$displaced_local" ]; then
+            # 就地讓位是同裝置的 rename，放回去一樣不需要空間：能放回就放回，狀態
+            # 回到呼叫前；放不回去就指名它現在在哪裡。
+            # The in-place set-aside is a same-filesystem rename, so putting it
+            # back needs no space either: do that and the state is the one the
+            # call started from. If it cannot go back, name where it now is.
+            if { [ ! -e "$dest_path" ] && [ ! -L "$dest_path" ]; } &&
+               move_exact -n "$displaced_local" "$dest_path" 2>/dev/null &&
+               [ "$(path_identity "$dest_path")" = "$dest_identity" ]; then
+                rmdir "$displaced_dir" 2>/dev/null || true
+            else
+                error_msg "既有的 '$dest_filename' 仍留在 '$displaced_local'"
+                error_msg "The existing '$dest_filename' is still at '$displaced_local'"
+            fi
+        fi
         error_msg "還原失敗：無法將檔案就位到 '$dest_path'"
         error_msg "Restore failed: cannot put the item in place at '$dest_path'"
         return 1
@@ -1291,6 +1494,14 @@ restore_file() {
         # still recoverable.
         warn_msg "既有的 '$dest_filename' 已移入垃圾桶讓位，可用 rm --restore '$dest_filename' 取回"
         warn_msg "The existing '$dest_filename' was moved into the trash to make room; recover it with rm --restore '$dest_filename'"
+    fi
+
+    if [ -n "$displaced_local" ]; then
+        # 就地讓位的東西不在垃圾桶裡，`rm --restore` 對它無效，所以必須指名實際路徑。
+        # An in-place set-aside is not in the trash and `rm --restore` does not
+        # reach it, so the actual path has to be named.
+        warn_msg "既有的 '$dest_filename' 已移到 '$displaced_local' 讓位；它不在垃圾桶裡，rm --restore 取不回，請自行搬回或刪除"
+        warn_msg "The existing '$dest_filename' was set aside at '$displaced_local'; it is not in the trash, rm --restore cannot reach it, so move it back or remove it yourself"
     fi
 
     if ! rmdir "$staging_dir" 2>/dev/null; then

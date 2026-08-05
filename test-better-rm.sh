@@ -1816,6 +1816,201 @@ else
     test_fail "跨裝置取出失敗時資料遺失或訊息沒有指出位置 (status=$xdevfail_status, survivor='$xdevfail_survivor')"
 fi
 
+test_item "還原：垃圾桶磁碟裝不下舊目的地時，不得開始那次跨裝置複製"
+# 迴歸（在真實的 20MB HFS+ 卷宗上重現過）：垃圾桶在另一顆磁碟、舊目的地又大過它的
+# 剩餘空間時，「讓位＝移入垃圾桶」會退化成一次完整複製並在 ENOSPC 半途死掉：垃圾桶
+# 磁碟被一份沒人提起的半成品複本永久佔滿、使用者的檔案停在暫存目錄裡沒有還原、日誌
+# 指向的垃圾桶來源也已經被消耗。同裝置不受影響（rename 不需要空間）。
+# 這裡用兩支 shim 精確重現決定性的兩個性質：垃圾桶在別的 device，且它的可用空間
+# 小於舊目的地。正確行為是「先量再決定」——量到裝不下就不要開始複製，改用同裝置的
+# rename 把舊目的地移到旁邊，還原照樣完成，兩份資料都在。
+# Regression, reproduced on a real 20MB HFS+ volume: with the trash on another
+# device and the old destination larger than its free space, clearing the way by
+# moving into the trash degrades into a full copy that dies of ENOSPC half way —
+# the trash volume ends up permanently filled with a half-copy nothing mentions,
+# the user's file is never restored, and the trash source the log points at has
+# already been consumed. Same-device is unaffected: a rename needs no space.
+# Two shims reproduce the decisive properties: the trash is on another device and
+# reports less free space than the destination. The correct behaviour is to
+# measure first and never start that copy, setting the old destination aside with
+# a same-device rename instead, so the restore still completes with both objects
+# intact.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+nospace_bin="$TEST_WORK_DIR/restore-nospace-bin"
+make_xdev_stat_shim "$nospace_bin"
+cat > "$nospace_bin/df" <<'EOF'
+#!/bin/sh
+last=""
+for arg in "$@"; do last="$arg"; done
+case "$last" in
+  "$BETTER_RM_XDEV_TRASH"*)
+    printf 'Filesystem 1024-blocks Used Available Capacity Mounted-on\n'
+    printf 'shimfs 1024 1023 1 100%% %s\n' "$last"
+    exit 0
+    ;;
+esac
+exec "$BETTER_RM_REAL_DF" "$@"
+EOF
+chmod +x "$nospace_bin/df"
+
+printf '%s\n' "NOSPACE ORIGINAL" > nospace.txt
+"$BETTER_RM" nospace.txt
+# 舊目的地必須大到 du 量得出來（否則量到 0 就談不上「裝不下」）
+# The destination must be large enough for du to see it; a 0 KB destination
+# cannot be "too big" for anything.
+mkdir -p nospace.txt
+dd if=/dev/zero of=nospace.txt/payload.bin bs=1024 count=64 >/dev/null 2>&1
+printf '%s\n' "NOSPACE DESTINATION" > nospace.txt/keep.txt
+nospace_status=0
+nospace_output=$(BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_REAL_STAT="$(command -v stat)" \
+BETTER_RM_REAL_DF="$(command -v df)" \
+PATH="$nospace_bin:$PATH" \
+    "$BETTER_RM" -f --restore nospace.txt 2>&1) || nospace_status=$?
+nospace_aside=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'nospace.txt.better-rm-displaced-*' -print -quit)
+nospace_trashed=$(find "$TEST_TRASH_DIR" -name 'nospace.txt__*' 2>/dev/null | wc -l | tr -d ' ')
+
+if [ "$nospace_status" -eq 0 ] && \
+   [ -f nospace.txt ] && [ ! -L nospace.txt ] && \
+   [ "$(cat nospace.txt)" = "NOSPACE ORIGINAL" ] && \
+   [ -n "$nospace_aside" ] && \
+   [ -f "$nospace_aside/nospace.txt/keep.txt" ] && \
+   grep -qFx "NOSPACE DESTINATION" "$nospace_aside/nospace.txt/keep.txt" && \
+   [ "$nospace_trashed" -eq 0 ] && \
+   [[ "$nospace_output" == *"$nospace_aside"* ]]; then
+    test_pass "垃圾桶磁碟裝不下時改用同裝置 rename 讓位，還原完成且舊目的地完好並被指名"
+else
+    test_fail "垃圾桶磁碟裝不下時仍走複製、遺失舊目的地或沒說它去了哪裡 (status=$nospace_status, aside='$nospace_aside', trashed=$nospace_trashed)"
+fi
+
+test_item "還原：讓位到垃圾桶失敗但舊目的地完好時，改用就地讓位而不是整個中止"
+# 空間是在量完之後才不夠、垃圾桶暫時寫不進去⋯⋯「移入垃圾桶」還是可能失敗。此時舊
+# 目的地若確實還是那個已驗證的物件，就沒有理由讓使用者同意過的覆蓋整個失敗：改用
+# 同裝置 rename 讓位即可，舊目的地一樣不會被銷毀。身分不符則必須中止（另有測試）。
+# The trash route can still fail after the measurement — space ran out, the trash
+# is momentarily unwritable. When the old destination really is still the object
+# that was verified there is no reason to fail the overwrite the user consented
+# to: set it aside with a same-device rename instead, still destroying nothing.
+# A mismatching identity must abort, which a separate test covers.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+trashfail_bin="$TEST_WORK_DIR/restore-trashfail-bin"
+mkdir -p "$trashfail_bin"
+cat > "$trashfail_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+dst=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+    if [ "$i" -eq "$count" ]; then dst="$a"; fi
+done
+# 只讓「把東西搬進垃圾桶」這一次失敗；從垃圾桶取出不受影響。
+# Fail only the move INTO the trash; taking things out of it is unaffected.
+case "$dst" in
+  "$BETTER_RM_TRASHFAIL_TRASH"/*)
+    case "$src" in
+      "$BETTER_RM_TRASHFAIL_TRASH"/*) exec "$BETTER_RM_REAL_MV" "$@" ;;
+      *) exit 1 ;;
+    esac
+    ;;
+esac
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$trashfail_bin/mv"
+
+printf '%s\n' "TRASHFAIL ORIGINAL" > trashfail.txt
+"$BETTER_RM" trashfail.txt
+mkdir -p trashfail.txt
+printf '%s\n' "TRASHFAIL DESTINATION" > trashfail.txt/keep.txt
+trashfail_status=0
+trashfail_output=$(BETTER_RM_TRASHFAIL_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$trashfail_bin:$PATH" \
+    "$BETTER_RM" -f --restore trashfail.txt 2>&1) || trashfail_status=$?
+trashfail_aside=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'trashfail.txt.better-rm-displaced-*' -print -quit)
+
+if [ "$trashfail_status" -eq 0 ] && \
+   [ -f trashfail.txt ] && [ ! -L trashfail.txt ] && \
+   [ "$(cat trashfail.txt)" = "TRASHFAIL ORIGINAL" ] && \
+   [ -n "$trashfail_aside" ] && \
+   grep -qFx "TRASHFAIL DESTINATION" "$trashfail_aside/trashfail.txt/keep.txt" 2>/dev/null && \
+   [[ "$trashfail_output" == *"$trashfail_aside"* ]]; then
+    test_pass "讓位到垃圾桶失敗時改用就地讓位，還原完成且舊目的地完好並被指名"
+else
+    test_fail "讓位到垃圾桶失敗時整個中止或遺失舊目的地 (status=$trashfail_status, aside='$trashfail_aside')"
+fi
+
+test_item "還原：受保護的目的地不得因為垃圾桶裝不下就繞過保護、被移到旁邊讓位"
+# 就地讓位是為了「垃圾桶磁碟裝不下」而存在的退路，不是繞過保護的後門。move_to_trash
+# 拒絕受保護路徑是原則問題，不是空間問題；若空間不足就改用就地讓位，等於自己把
+# .git 這類保護拆掉——東西雖然沒被銷毀，但保護的目的地照樣被搬走了。
+# The in-place route exists for "the trash volume cannot hold it", not as a way
+# around the protected-path rule. move_to_trash refuses those on principle rather
+# than for lack of space, so routing around the refusal when space runs short
+# dismantles the .git protection: nothing is destroyed, but the protected
+# destination is moved out of the way all the same.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+protected_bin="$TEST_WORK_DIR/restore-protected-bin"
+make_xdev_stat_shim "$protected_bin"
+cat > "$protected_bin/df" <<'EOF'
+#!/bin/sh
+last=""
+for arg in "$@"; do last="$arg"; done
+case "$last" in
+  "$BETTER_RM_XDEV_TRASH"*)
+    printf 'Filesystem 1024-blocks Used Available Capacity Mounted-on\n'
+    printf 'shimfs 1024 1023 1 100%% %s\n' "$last"
+    exit 0
+    ;;
+esac
+exec "$BETTER_RM_REAL_DF" "$@"
+EOF
+chmod +x "$protected_bin/df"
+
+# better-rm 自己不會把 .git 移入垃圾桶（那正是保護的用意），所以紀錄與垃圾桶項目
+# 直接造出來，才能測到「還原一個受保護名稱到既有的同名目錄上」。
+# better-rm will not trash a .git itself — that is the protection — so the record
+# and the trashed item are fabricated to reach "restore a protected name over an
+# existing directory of the same name".
+mkdir -p "$TEST_TRASH_DIR$TEST_WORK_DIR"
+protected_trash="$TEST_TRASH_DIR$TEST_WORK_DIR/.git__20260101_000000_000000000__nohash"
+printf '%s\n' "PROTECTED ORIGINAL" > "$protected_trash"
+mkdir -p "$TEST_STATE_DIR"
+{
+    printf '%s\n' "# Better-RM Deletion Log"
+    printf '%s | %s | %s | %s | %s\n' \
+        "20260101_000000_000000000" \
+        "$TEST_WORK_DIR/.git" \
+        "$protected_trash" \
+        "nohash" \
+        "file"
+} > "$TEST_STATE_DIR/deletion.log"
+mkdir -p .git
+dd if=/dev/zero of=.git/payload.bin bs=1024 count=64 >/dev/null 2>&1
+printf '%s\n' "PROTECTED DESTINATION" > .git/keep.txt
+protected_status=0
+BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_REAL_STAT="$(command -v stat)" \
+BETTER_RM_REAL_DF="$(command -v df)" \
+PATH="$protected_bin:$PATH" \
+    "$BETTER_RM" -f --restore .git >/dev/null 2>&1 || protected_status=$?
+protected_aside=$(find "$TEST_WORK_DIR" -maxdepth 1 -name '.git.better-rm-displaced-*' -print -quit)
+
+if [ "$protected_status" -ne 0 ] && \
+   [ -d .git ] && [ ! -L .git ] && \
+   grep -qFx "PROTECTED DESTINATION" .git/keep.txt 2>/dev/null && \
+   [ -z "$protected_aside" ] && \
+   [ -f "$protected_trash" ]; then
+    test_pass "受保護的目的地沒有被就地讓位，垃圾桶項目也回到原處"
+else
+    test_fail "空間不足時繞過了保護、把受保護的目的地搬走 (status=$protected_status, aside='$protected_aside')"
+fi
+
 test_item "含 | 的檔名可完整刪除並還原"
 # 日誌以 | 分隔且還原時逐一切開，合法檔名裡的 | 會讓紀錄無法被解析。
 # The pipe-delimited log cannot represent a legal filename containing '|',
