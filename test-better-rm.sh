@@ -1984,6 +1984,387 @@ else
     test_fail "日誌沒寫成功時仍宣稱可用 --restore 取回或漏講 (status=$unlogged_status, again=$unlogged_again)"
 fi
 
+test_item "還原：跨裝置時暫存落點被目錄佔走、項目被搬了進去，不得當成取出成功"
+# 跨裝置沒有 inode 可比，驗收只剩三個條件。少了「落點不是那個吞了項目的目錄」這一
+# 條，攻擊者先建好的目錄就會被當成取出結果：它會被 publish 到使用者的路徑上、使用者
+# 的檔案埋在裡面，而舊目的地還被送進垃圾桶，全程 exit 0。
+# 少了復原時的「$buried 真的是我們的項目（或跨裝置無從比對）」判斷，則是項目撈不
+# 回垃圾桶，日誌指向一個已經不存在的來源。
+# Across devices there is no inode to compare and the acceptance test is down to
+# three conditions. Without "the landing spot is not the directory that swallowed
+# the item", a directory a concurrent process created first is taken for the
+# extraction result: it gets published to the user's path with the user's file
+# buried inside it, the old destination goes to the trash, and the whole thing
+# exits 0. Without the recovery check that $buried really is our item, the item
+# never gets pulled back to the trash and the log points at a source that is gone.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+buried_bin="$TEST_WORK_DIR/restore-buried-bin"
+make_xdev_stat_shim "$buried_bin"
+cat > "$buried_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+dst=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+    if [ "$i" -eq "$count" ]; then dst="$a"; fi
+done
+case "$src" in
+  "$BETTER_RM_XDEV_TRASH"/*) ;;
+  *) exec "$BETTER_RM_REAL_MV" "$@" ;;
+esac
+if [ -e "$dst" ] || [ -L "$dst" ]; then exec "$BETTER_RM_REAL_MV" "$@"; fi
+# 並行行程搶先在暫存落點建好自己的目錄，跨裝置的 mv 於是把項目複製「進去」。
+# A concurrent process created its own directory at the staging landing first, so
+# the cross-device mv copies the item INTO it.
+mkdir -p "$dst" || exit 1
+printf '%s\n' "BURIED ATTACKER" > "$dst/attacker-marker"
+cp -R "$src" "$dst/" || exit 1
+"$BETTER_RM_REAL_RM" -rf "$src" || exit 1
+exit 0
+EOF
+chmod +x "$buried_bin/mv"
+
+printf '%s\n' "BURIED ORIGINAL" > buried.txt
+"$BETTER_RM" buried.txt
+printf '%s\n' "BURIED LOCAL" > buried.txt
+buried_status=0
+BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_REAL_STAT="$(command -v stat)" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_REAL_RM="$(command -v rm)" \
+PATH="$buried_bin:$PATH" \
+    "$BETTER_RM" -f --restore buried.txt >/dev/null 2>&1 || buried_status=$?
+buried_attacker=$(find "$TEST_WORK_DIR" -type f -name 'attacker-marker' -print -quit)
+# 沒有 shim 的第二次還原必須成功：這證明項目真的被撈回了日誌指向的垃圾桶路徑。
+# A second restore without the shims must succeed, proving the item really was
+# pulled back to the trash path the log points at.
+buried_again=0
+rm -rf buried.txt
+"$BETTER_RM" --restore buried.txt >/dev/null 2>&1 || buried_again=$?
+
+if [ "$buried_status" -eq 1 ] && \
+   [ -n "$buried_attacker" ] && \
+   [ "$buried_again" -eq 0 ] && \
+   [ -f buried.txt ] && [ ! -L buried.txt ] && \
+   [ "$(cat buried.txt)" = "BURIED ORIGINAL" ]; then
+    test_pass "被吞進佔位目錄的取出不算成功，項目回到垃圾桶且之後仍可正常還原"
+else
+    test_fail "把佔位目錄當成取出結果或沒把項目放回垃圾桶 (status=$buried_status, again=$buried_again)"
+fi
+
+test_item "還原：暫存落點先被別人建成檔案時，既不得採用它也不得覆蓋它"
+# BSD 的 mv -n 在落點已存在時「靜默不做事並回傳 0」。少了「垃圾桶來源確實已消失」
+# 這一條，那個先到的檔案就會被當成取出結果 publish 到使用者的路徑上（exit 0，內容
+# 是別人的）；把取出的 -n 換成 -f，則變成 better-rm 主動銷毀那個不屬於它的檔案。
+# BSD's mv -n does nothing and returns 0 when the landing spot exists. Without
+# "the trash source really is gone", the file that got there first is taken for
+# the extraction result and published to the user's path (exit 0, someone else's
+# content); switching the extraction's -n to -f instead makes better-rm destroy a
+# file it did not create.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+occupied_bin="$TEST_WORK_DIR/restore-occupied-bin"
+make_xdev_stat_shim "$occupied_bin"
+cat > "$occupied_bin/mv" <<'EOF'
+#!/bin/sh
+policy="$1"
+count=$#
+i=0
+src=""
+dst=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+    if [ "$i" -eq "$count" ]; then dst="$a"; fi
+done
+case "$src" in
+  "$BETTER_RM_XDEV_TRASH"/*) ;;
+  *) exec "$BETTER_RM_REAL_MV" "$@" ;;
+esac
+if [ ! -e "$BETTER_RM_OCCUPIED_FLAG" ]; then
+    : > "$BETTER_RM_OCCUPIED_FLAG"
+    printf '%s\n' "OCCUPIED ATTACKER" > "$dst"
+fi
+if { [ -e "$dst" ] || [ -L "$dst" ]; } && [ "$policy" = "-n" ]; then
+    exit 0
+fi
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$occupied_bin/mv"
+
+printf '%s\n' "OCCUPIED ORIGINAL" > occupied.txt
+"$BETTER_RM" occupied.txt
+printf '%s\n' "OCCUPIED LOCAL" > occupied.txt
+occupied_status=0
+BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_OCCUPIED_FLAG="$TEST_WORK_DIR/occupied-injected" \
+BETTER_RM_REAL_STAT="$(command -v stat)" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$occupied_bin:$PATH" \
+    "$BETTER_RM" -f --restore occupied.txt >/dev/null 2>&1 || occupied_status=$?
+occupied_attacker=$(find "$TEST_WORK_DIR" -type f \
+    -exec grep -lFx "OCCUPIED ATTACKER" {} + 2>/dev/null | head -1)
+occupied_again=0
+rm -f occupied.txt
+"$BETTER_RM" --restore occupied.txt >/dev/null 2>&1 || occupied_again=$?
+
+if [ "$occupied_status" -eq 1 ] && \
+   [ -n "$occupied_attacker" ] && \
+   [ "$occupied_again" -eq 0 ] && \
+   [ "$(cat occupied.txt)" = "OCCUPIED ORIGINAL" ]; then
+    test_pass "先佔走落點的檔案既沒被採用也沒被銷毀，垃圾桶項目之後仍可正常還原"
+else
+    test_fail "採用了別人的檔案或把它銷毀了 (status=$occupied_status, attacker='$occupied_attacker', again=$occupied_again)"
+fi
+
+test_item "還原：暫存落點根本沒有東西時不算取出成功，既有目的地必須留在原地"
+# 跨裝置的 mv 可能回報成功、消耗了來源，落點卻什麼也沒有（例如網路檔案系統中途失
+# 效）。少了「落點至少有個身分」這一條，空無一物會被當成取出成功：既有目的地被清進
+# 垃圾桶讓位，然後才發現沒有東西可以就位。使用者什麼也沒得到，卻少了原本的目的地。
+# A cross-device mv can report success and consume the source while leaving
+# nothing at the landing spot (a network filesystem dropping out mid-copy).
+# Without "the landing spot has an identity at all", nothing is taken for a
+# successful extraction: the existing destination is cleared into the trash to
+# make room and only then does the publish find there is nothing to put in place.
+# The user gains nothing and loses the destination they had.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+vanish_bin="$TEST_WORK_DIR/restore-vanish-bin"
+make_xdev_stat_shim "$vanish_bin"
+cat > "$vanish_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+done
+case "$src" in
+  "$BETTER_RM_XDEV_TRASH"/*) ;;
+  *) exec "$BETTER_RM_REAL_MV" "$@" ;;
+esac
+"$BETTER_RM_REAL_RM" -rf "$src" || exit 1
+exit 0
+EOF
+chmod +x "$vanish_bin/mv"
+
+printf '%s\n' "VANISH ORIGINAL" > vanish.txt
+"$BETTER_RM" vanish.txt
+mkdir -p vanish.txt
+printf '%s\n' "VANISH DESTINATION" > vanish.txt/keep.txt
+vanish_status=0
+BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_REAL_STAT="$(command -v stat)" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_REAL_RM="$(command -v rm)" \
+PATH="$vanish_bin:$PATH" \
+    "$BETTER_RM" -f --restore vanish.txt >/dev/null 2>&1 || vanish_status=$?
+
+if [ "$vanish_status" -ne 0 ] && \
+   [ -d vanish.txt ] && [ ! -L vanish.txt ] && \
+   grep -qFx "VANISH DESTINATION" vanish.txt/keep.txt 2>/dev/null; then
+    test_pass "落點沒有身分就不算取出成功，既有目的地原封不動"
+else
+    test_fail "把空無一物當成取出成功並清掉了既有目的地 (status=$vanish_status)"
+fi
+
+test_item "還原：同一裝置的取出必須以 inode 驗收，落點被掉包就不算成功"
+# 同一裝置的 mv 就是 rename，inode 必然保留，所以 inode 相等是可用的證明——這也是
+# 為什麼「是否跨裝置」必須真的判斷，而不是一律套用跨裝置那組較鬆的條件。若同裝置也
+# 走鬆的那條，攻擊者只要在 mv 與 stat 之間把落點換成自己的檔案，就會被當成取出結果
+# publish 到使用者的路徑上。
+# Within one device mv is a rename and the inode is necessarily preserved, so
+# inode equality is a usable proof — which is why "is this cross-device" has to be
+# determined rather than assumed. If the same device took the looser branch, an
+# attacker swapping the landing spot between the mv and the stat would have its
+# own file published as the restore result.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+swap_bin="$TEST_WORK_DIR/restore-swap-bin"
+mkdir -p "$swap_bin"
+cat > "$swap_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+dst=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+    if [ "$i" -eq "$count" ]; then dst="$a"; fi
+done
+case "$src" in
+  "$BETTER_RM_SWAP_TRASH"/*) ;;
+  *) exec "$BETTER_RM_REAL_MV" "$@" ;;
+esac
+"$BETTER_RM_REAL_MV" "$@" || exit $?
+# mv 已經完成、better-rm 還沒 stat：落點在這個窗口被換成攻擊者的檔案。
+# The mv is done and better-rm has not stat'd yet: the landing spot is swapped
+# for the attacker's file inside that window.
+"$BETTER_RM_REAL_MV" "$dst" "$BETTER_RM_SWAP_STASH" || exit 1
+printf '%s\n' "SWAP ATTACKER" > "$dst"
+exit 0
+EOF
+chmod +x "$swap_bin/mv"
+
+printf '%s\n' "SWAP ORIGINAL" > swap.txt
+"$BETTER_RM" swap.txt
+printf '%s\n' "SWAP LOCAL" > swap.txt
+swap_status=0
+BETTER_RM_SWAP_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_SWAP_STASH="$TEST_WORK_DIR/swap-stash.txt" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$swap_bin:$PATH" \
+    "$BETTER_RM" -f --restore swap.txt >/dev/null 2>&1 || swap_status=$?
+
+if [ "$swap_status" -ne 0 ] && \
+   [ -f swap.txt ] && [ ! -L swap.txt ] && \
+   [ "$(cat swap.txt)" = "SWAP LOCAL" ] && \
+   ! grep -qFx "SWAP ATTACKER" swap.txt 2>/dev/null; then
+    test_pass "同裝置落點被掉包時中止，既有檔案未被攻擊者的內容取代"
+else
+    test_fail "同裝置走了鬆的驗收，攻擊者的檔案被當成還原結果 (status=$swap_status)"
+fi
+
+test_item "還原：跨裝置復原時 mv 回報成功但東西沒回垃圾桶，必須說出它還在暫存區"
+# 跨裝置的復原是一次複製，無法用 inode 驗證，只能檢查「垃圾桶路徑真的又有東西了」。
+# 少了這個檢查，一次「回傳 0 卻什麼也沒做」的 mv 會讓 better-rm 相信項目已經回到垃圾
+# 桶而閉口不談——使用者的資料其實還在暫存目錄裡，而下一次 --restore 只會說找不到。
+# 這與既有的「不得謊稱卡在暫存區」是一體兩面：兩個方向都不能亂講。
+# The cross-device unwind is a copy and cannot be verified by inode; all that can
+# be checked is that something really is back at the trash path. Without that
+# check, an mv that returns 0 without doing anything convinces better-rm the item
+# is back in the trash and it says nothing — while the user's data is still in the
+# staging directory and the next --restore only reports "not found". This is the
+# mirror image of the existing "must not claim it is stranded" test: neither
+# direction may be misreported.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+nounwind_bin="$TEST_WORK_DIR/restore-nounwind-bin"
+make_xdev_stat_shim "$nounwind_bin"
+cat > "$nounwind_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+dst=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+    if [ "$i" -eq "$count" ]; then dst="$a"; fi
+done
+# 放回垃圾桶的那一次：回傳成功，但什麼也不做。
+# The put-back into the trash: report success, do nothing.
+case "$dst" in
+  "$BETTER_RM_XDEV_TRASH"/*)
+    case "$src" in
+      "$BETTER_RM_XDEV_TRASH"/*) ;;
+      *) exit 0 ;;
+    esac
+    ;;
+esac
+case "$src" in
+  "$BETTER_RM_XDEV_TRASH"/*) ;;
+  *) exec "$BETTER_RM_REAL_MV" "$@" ;;
+esac
+if [ -e "$dst" ] || [ -L "$dst" ]; then exec "$BETTER_RM_REAL_MV" "$@"; fi
+cp -R "$src" "$dst" || exit 1
+"$BETTER_RM_REAL_RM" -rf "$src" || exit 1
+# 取出完成之後目的地才出現：未經同意的覆蓋必須中止，於是走到復原路徑。
+# The destination appears only after the extraction, so the unauthorized
+# overwrite aborts and the unwind runs.
+printf '%s\n' "NOUNWIND LATE" > "$BETTER_RM_NOUNWIND_LATE"
+exit 0
+EOF
+chmod +x "$nounwind_bin/mv"
+
+printf '%s\n' "NOUNWIND ORIGINAL" > nounwind.txt
+"$BETTER_RM" nounwind.txt
+nounwind_status=0
+nounwind_output=$(BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_NOUNWIND_LATE="$TEST_WORK_DIR/nounwind.txt" \
+BETTER_RM_REAL_STAT="$(command -v stat)" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_REAL_RM="$(command -v rm)" \
+PATH="$nounwind_bin:$PATH" \
+    "$BETTER_RM" --restore nounwind.txt 2>&1) || nounwind_status=$?
+nounwind_survivor=$(find "$TEST_WORK_DIR" -type f \
+    -exec grep -lFx "NOUNWIND ORIGINAL" {} + 2>/dev/null | head -1)
+
+if [ "$nounwind_status" -eq 1 ] && \
+   [ -n "$nounwind_survivor" ] && \
+   [[ "$nounwind_output" == *"暫留"* ]] && \
+   [[ "$nounwind_output" == *"$nounwind_survivor"* ]]; then
+    test_pass "沒真的放回垃圾桶時說出項目還在暫存區，並指名它的路徑"
+else
+    test_fail "誤信項目已回垃圾桶而閉口不談 (status=$nounwind_status, survivor='$nounwind_survivor')"
+fi
+
+test_item "還原：取出失敗時，只有確定是自己的項目才可以放回垃圾桶"
+# 取出失敗後會嘗試把「被搬進佔位目錄的項目」撈回垃圾桶。同一裝置有 inode 可比，就
+# 必須比：少了這個判斷，撈回去的可能是別人放在那裡的東西，於是垃圾桶路徑與日誌紀錄
+# 從此指向攻擊者的內容，下一次 --restore 會把它當成使用者的檔案還原出來。
+# After a failed extraction the item that was moved into an occupying directory is
+# pulled back to the trash. Within one device there is an inode to compare, so it
+# must be compared: without that check whatever another process left there gets
+# pulled in instead, the trash path and its log record then point at the
+# attacker's content, and the next --restore hands it to the user as their file.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+recover_bin="$TEST_WORK_DIR/restore-recover-bin"
+mkdir -p "$recover_bin"
+cat > "$recover_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+dst=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+    if [ "$i" -eq "$count" ]; then dst="$a"; fi
+done
+case "$src" in
+  "$BETTER_RM_RECOVER_TRASH"/*) ;;
+  *) exec "$BETTER_RM_REAL_MV" "$@" ;;
+esac
+# 並行行程佔走了暫存落點，而且在裡面放了一個和垃圾桶項目同名、卻不是它的東西。
+# A concurrent process took the staging landing and put something of its own
+# there under the trashed item's name.
+"$BETTER_RM_REAL_MV" "$src" "$BETTER_RM_RECOVER_STASH" || exit 1
+mkdir -p "$dst" || exit 1
+printf '%s\n' "RECOVER ATTACKER" > "$dst/$(basename "$src")"
+exit 0
+EOF
+chmod +x "$recover_bin/mv"
+
+printf '%s\n' "RECOVER ORIGINAL" > recover.txt
+"$BETTER_RM" recover.txt
+recover_status=0
+BETTER_RM_RECOVER_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_RECOVER_STASH="$TEST_WORK_DIR/recover-stash.bin" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$recover_bin:$PATH" \
+    "$BETTER_RM" --restore recover.txt >/dev/null 2>&1 || recover_status=$?
+# 沒有 shim 的第二次還原：垃圾桶路徑上若被塞進攻擊者的內容，這裡就會把它當成使用者
+# 的檔案還原出來。
+# A second restore without the shims: anything pushed onto the trash path would be
+# handed back here as the user's file.
+"$BETTER_RM" --restore recover.txt >/dev/null 2>&1
+
+if [ "$recover_status" -eq 1 ] && \
+   ! grep -qFx "RECOVER ATTACKER" recover.txt 2>/dev/null && \
+   grep -qFx "RECOVER ORIGINAL" "$TEST_WORK_DIR/recover-stash.bin"; then
+    test_pass "身分不符的東西沒有被放回垃圾桶，之後的還原也拿不到攻擊者的內容"
+else
+    test_fail "把別人的東西放回垃圾桶並當成使用者的檔案還原 (status=$recover_status)"
+fi
+
 test_item "還原：受保護的目的地不得因為垃圾桶裝不下就繞過保護、被移到旁邊讓位"
 # 就地讓位是為了「垃圾桶磁碟裝不下」而存在的退路，不是繞過保護的後門。move_to_trash
 # 拒絕受保護路徑是原則問題，不是空間問題；若空間不足就改用就地讓位，等於自己把
