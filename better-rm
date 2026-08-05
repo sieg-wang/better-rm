@@ -1112,6 +1112,18 @@ restore_file() {
         return 1
     fi
 
+    # 還原硬性依賴 mktemp：整個覆蓋流程建立在「一個只有本行程能建立、名稱不可預測的
+    # 暫存目錄」上，沒有它就沒有安全的還原路徑，因此 fail closed。缺的是什麼要講出來，
+    # 否則使用者只會看到一句無從下手的「無法建立暫存目錄」。
+    # Restore hard-depends on mktemp: the whole overwrite path is built on a
+    # staging directory only this process can have created under an unpredictable
+    # name, and without it there is no safe route, so it fails closed. Say what is
+    # missing, or the user is left with an unactionable "cannot create it".
+    if ! command -v mktemp >/dev/null 2>&1; then
+        error_msg "還原失敗：找不到 mktemp，無法建立獨佔的暫存目錄（還原需要它）"
+        error_msg "Restore failed: mktemp was not found and the exclusive staging directory it creates is required by --restore"
+        return 1
+    fi
     if ! staging_dir=$(mktemp -d "${dest_path}.better-rm-restore-XXXXXX" 2>/dev/null); then
         error_msg "還原失敗：無法在目的地旁建立獨佔的暫存目錄"
         error_msg "Restore failed: cannot create an exclusive staging directory beside the destination"
