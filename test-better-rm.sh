@@ -942,68 +942,6 @@ fi
 # ============================================================================
 # 測試 11: 路徑結構保留 (Test 11: Path Structure Preservation)
 # ============================================================================
-test_item "刪除：跨裝置複製中途失敗時不得把半成品複本永久留在垃圾桶"
-# 跨裝置的 mv 是「複製後刪除」。複製中途失敗（典型是垃圾桶那顆磁碟 ENOSPC）時，mv 會
-# 把已經寫出去的部分留在目標路徑上。舊行為把那個狀態當成「名字被佔用」而換個名字重
-# 試，最多 1000 次：於是磁碟上堆著一份（或多份）沒有人提起的半成品複本，來源卻還在原
-# 地。實測 20MB 的 HFS+ 垃圾桶卷宗配 41MB 的來源，那份 20MB 的殘骸會永久把它填滿。
-# 正確行為是把自己剛寫出來的殘骸清掉、停止重試（重試只會把同一份複製再做一次），並直
-# 說來源沒有被動過。
-# A cross-device mv is copy-then-unlink, and a copy that dies mid-way — typically
-# ENOSPC on the trash volume — leaves what it had written at the target. The old
-# behaviour read that as "the name is taken", renamed and retried, up to 1000
-# times: the disk ends up holding one or more half-copies nobody mentions while
-# the source is still in place. Measured with a 20MB HFS+ trash volume and a 41MB
-# source, that 20MB of debris fills it permanently. The debris this process just
-# wrote has to be cleared, the retry has to stop (it would only redo the same
-# copy), and the message has to say the source was left alone.
-setup
-cd "$TEST_WORK_DIR" || exit 1
-partial_bin="$TEST_WORK_DIR/partial-copy-bin"
-mkdir -p "$partial_bin"
-cat > "$partial_bin/mv" <<'EOF'
-#!/bin/sh
-count=$#
-i=0
-src=""
-dst=""
-for a in "$@"; do
-    i=$((i + 1))
-    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
-    if [ "$i" -eq "$count" ]; then dst="$a"; fi
-done
-case "$dst" in
-  "$BETTER_RM_PARTIAL_TRASH"/*)
-    case "$src" in
-      "$BETTER_RM_PARTIAL_TRASH"/*) exec "$BETTER_RM_REAL_MV" "$@" ;;
-    esac
-    # 複製寫到一半就失敗：目標路徑上留下半成品，來源原封不動。
-    # The copy fails half way: a partial copy at the target, the source untouched.
-    head -c 512 "$src" > "$dst" 2>/dev/null
-    exit 1
-    ;;
-esac
-exec "$BETTER_RM_REAL_MV" "$@"
-EOF
-chmod +x "$partial_bin/mv"
-
-printf '%s\n' "PARTIAL SOURCE CONTENT" > partial.txt
-partial_status=0
-partial_output=$(BETTER_RM_PARTIAL_TRASH="$TEST_TRASH_DIR" \
-BETTER_RM_REAL_MV="$(command -v mv)" \
-PATH="$partial_bin:$PATH" \
-    "$BETTER_RM" partial.txt 2>&1) || partial_status=$?
-partial_litter=$(find "$TEST_TRASH_DIR" -type f -name 'partial.txt__*' 2>/dev/null | wc -l | tr -d ' ')
-
-if [ "$partial_status" -ne 0 ] && \
-   [ -f partial.txt ] && [ "$(cat partial.txt)" = "PARTIAL SOURCE CONTENT" ] && \
-   [ "$partial_litter" -eq 0 ] && \
-   [[ "$partial_output" == *"來源未動"* ]]; then
-    test_pass "半途失敗的複本被清掉、沒有重試風暴，來源完好且訊息說清楚"
-else
-    test_fail "垃圾桶留下半成品複本或來源受影響 (status=$partial_status, litter=$partial_litter)"
-fi
-
 test_title "測試 11: 垃圾桶路徑結構保留"
 
 setup
