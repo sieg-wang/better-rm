@@ -705,6 +705,51 @@ move_to_trash() (
             fi
             if { [ -e "$target" ] || [ -L "$target" ]; } &&
                { [ -e "$source" ] || [ -L "$source" ]; }; then
+                # mv 失敗、來源完好，目標路徑上卻有東西：那是這一次 mv 自己留下的半成品
+                # ——跨裝置的複製在 ENOSPC 之類的錯誤中途死掉。取得保留鎖之後我們才確認
+                # 過這個名字是空的，而保留鎖就是本工具的互斥，所以此刻那裡的東西只可能
+                # 是我們剛寫出去的那一份。實測（20MB 的 HFS+ 垃圾桶卷宗、41MB 的來源）：
+                # 不清掉它，一份 20MB 的半成品會永久佔滿垃圾桶那顆磁碟，而且沒有任何訊息
+                # 提到它。清掉之後也絕不能再重試：重試等於把同一份複製重做一次，磁碟滿的
+                # 情況下就是最多 1000 次無謂的整棵樹複製。
+                # 這裡的 rm -rf 不牴觸「不遞迴刪除讓位物件」：被刪的不是任何人的資料，而是
+                # 本行程幾秒前在自己保留的名字底下寫出的殘骸，且來源以 inode 證明仍完好。
+                # 三個前提有任何一個不成立就退回舊行為（留著、換名字重試），寧可留殘骸也
+                # 不刪不該刪的東西。
+                # The mv failed, the source is intact, and yet something is at the
+                # target: that is this mv's own half-copy — a cross-device copy
+                # that died mid-way, typically on ENOSPC. The name was verified
+                # free only after the reservation was taken, and the reservation
+                # is this tool's mutex, so what is there now can only be what we
+                # just wrote. Measured with a 20MB HFS+ trash volume and a 41MB
+                # source: leaving it permanently fills that volume with a 20MB
+                # half-copy nothing mentions. Retrying after clearing it is worse
+                # still — it redoes the same copy, up to 1000 whole-tree copies on
+                # a full disk. This rm -rf does not contradict "never recursively
+                # delete a displaced object": what it removes is nobody's data,
+                # only the debris this process wrote seconds ago under a name it
+                # reserved, with the source proven intact by inode. If any of the
+                # three preconditions fails, the old behaviour (leave it, retry
+                # under another name) stands: better a leftover than a wrong
+                # delete.
+                local post_move_identity
+                local partial_cleared=0
+                post_move_identity=$(stat -c '%d:%i' "$source" 2>/dev/null ||
+                    stat -f '%d:%i' "$source" 2>/dev/null || true)
+                if [ -n "$source_identity" ] &&
+                   [ "$post_move_identity" = "$source_identity" ] &&
+                   [[ "$target" = "$trash_root"/* ]]; then
+                    if /bin/rm -rf "$target" 2>/dev/null &&
+                       { [ ! -e "$target" ] && [ ! -L "$target" ]; }; then
+                        partial_cleared=1
+                    fi
+                fi
+                if [ "$partial_cleared" = "1" ]; then
+                    rmdir "$reservation" 2>/dev/null || true
+                    error_msg "無法把 '$source_label' 移入垃圾桶（垃圾桶所在檔案系統可能空間不足）；已清除半途的複本，來源未動"
+                    error_msg "Could not move '$source_label' into the trash (the trash filesystem may be out of space); the partial copy was removed and the source is untouched"
+                    return 1
+                fi
                 rmdir "$reservation" 2>/dev/null || true
                 reservation=""
                 attempt=$((attempt + 1))
