@@ -136,18 +136,35 @@ were fixed on 2026-08-04 and are no longer open. What replaced them:
 - `install-hooks.sh` no longer invokes `stat` at all; `cp` onto an existing file
   already preserves its inode and mode, which made the `chmod` redundant.
 
-- **The OpenCode plugin download is still unverified.** The runtime hook
-  (`protect-important-paths.js`) is now probed behaviourally, but
-  `opencode-protect-important-paths.ts` — downloaded from the same release by
-  `resolve_opencode_plugin` when `.opencode/plugins/` is missing from the
-  checkout — is not. It is the bridge that makes OpenCode call the verified
-  runtime hook, so a corrupted plugin means no protection under OpenCode.
-  Probing it needs a TypeScript runtime (`bun`, or OpenCode itself), which the
-  installer does not otherwise require; a content sniff would only narrow the
-  window, so nothing was added rather than something that looks like a check and
-  is not. `resolve_opencode_plugin`'s *runtime hook* download branch was left
-  alone for a different reason: `resolve_source_paths` already guarantees
-  `HOOK_SOURCE_PATH` is readable before it runs, so that branch is unreachable.
+- **The OpenCode plugin is no longer downloaded at all.** It used to be fetched
+  from the release by `resolve_opencode_plugin` whenever `.opencode/plugins/` was
+  missing from the distribution, and the only check on what came back was
+  "readable regular file" — so a captive-portal page, a truncated body, or
+  syntactically valid TypeScript that registers no hook was copied verbatim to
+  the executing location at exit 0. The plugin is the bridge that makes OpenCode
+  call the verified runtime hook, so that was silently no protection under
+  OpenCode. Verifying it the way the runtime hook is verified was rejected:
+  proving a plugin really registers a hook and blocks a deletion needs a
+  TypeScript runtime (`bun`, or OpenCode itself) that no other installer path
+  requires, and hard-failing installs on every machine without one trades a
+  silent hole for a loud regression; a string sniff would stop the HTML page but
+  not the valid-TypeScript-that-protects-nothing case, which is the dangerous
+  one. `write_bundled_opencode_plugin` therefore ships the plugin inside
+  `install-hooks.sh`: plugin and installer are one trusted distribution, the
+  poisoned channel is gone rather than inspected, and `-a opencode` no longer
+  needs the network for the plugin. The cost is that the bundled copy has to
+  track `.opencode/plugins/protect-important-paths.ts`; `test-install-hooks.sh`
+  pins it by asserting that a distribution without `.opencode/` installs a plugin
+  byte-identical to that file, so drift turns the suite red.
+  `resolve_opencode_plugin`'s *runtime hook* download branch was left alone for a
+  different reason: `resolve_source_paths` already guarantees `HOOK_SOURCE_PATH`
+  is readable before it runs, so that branch is unreachable.
+- **What the bundling does NOT cover.** It stops network content from becoming
+  the plugin; it does not check that the bytes reached the destination intact.
+  The plugin publish path is still a bare `cp` with no post-write comparison, so
+  a full disk or a filesystem error can still leave a truncated plugin at the
+  executing location with the install reporting success — the same shape the
+  runtime hook's first-install path already guards against and this one does not.
 - **A broken `sed` extraction would misdirect.** `test-hooks.js` extracts
   `hook_denies_protected_deletion` and `write_fail_closed_hook_stub` from
   `install-hooks.sh` with a `sed` range ending at `/^}/`. Re-indenting the

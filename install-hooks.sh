@@ -31,7 +31,13 @@ SUPPORTED_AGENTS=(claude codex cursor copilot antigravity qoder pi opencode grok
 VERSION="1.5.0"
 RELEASE_BASE_URL="https://github.com/doggy8088/better-rm/releases/latest/download"
 RELEASE_HOOK_ASSET_NAME="protect-important-paths.js"
-RELEASE_OPENCODE_PLUGIN_ASSET_NAME="opencode-protect-important-paths.ts"
+# OpenCode 外掛沒有對應的 RELEASE_*_ASSET_NAME：它由 write_bundled_opencode_plugin
+# 隨安裝程式一起出貨，不從網路取得（原因見該函式）。Release 仍然發佈
+# opencode-protect-important-paths.ts 供其他消費者使用，但這支安裝程式不再讀它。
+# The OpenCode plugin has no RELEASE_*_ASSET_NAME: write_bundled_opencode_plugin
+# ships it with the installer instead of fetching it (see that function for why).
+# The release still publishes opencode-protect-important-paths.ts for other
+# consumers; this installer no longer reads it.
 CLEANUP_DIRS=()
 
 # 取得可用 Agent 列表字串
@@ -735,6 +741,75 @@ resolve_grok_settings() {
     SCOPE="project"
 }
 
+# 寫出隨安裝程式一起出貨的 OpenCode 外掛。
+# 為什麼要內嵌，而不是像 runtime hook 那樣「下載完再驗」：外掛是 TypeScript，要驗
+# 它「真的會註冊 hook 並擋下刪除」就得有 TypeScript runtime（bun 或 OpenCode 本
+# 身），而安裝程式在其他任何路徑上都不需要那種東西；為了驗一個檔案而讓「本來裝得
+# 起來的機器」開始裝不起來，是把一個安靜的漏洞換成一個大聲的迴歸。
+# 只做字串嗅探（找 "tool.execute.before" 之類）則更糟：它擋得住 HTML 登入頁，卻擋
+# 不住「語法正確、export 名稱一樣、就是不註冊 hook」的內容，而那正是最危險的一種
+# ——看起來像檢查，實際上不是。
+# 所以改成拆掉那條通道本身：外掛與安裝程式屬於同一份可信發佈物。使用者執行這個
+# 檔案的時候就已經信任它的內容了，外掛跟著它走，網路上再也沒有東西能變成外掛。
+# 代價是這份內嵌副本必須跟 .opencode/plugins/protect-important-paths.ts 保持一致；
+# test-install-hooks.sh 用「發佈物裡沒有 .opencode 時裝出來的外掛必須與該檔完全相
+# 同」把這件事釘住，不一致就紅。
+# Write the OpenCode plugin that ships with this installer.
+# Why bundle instead of verifying a download the way the runtime hook does: the
+# plugin is TypeScript, and proving it really registers a hook and blocks a
+# deletion needs a TypeScript runtime (bun, or OpenCode itself) that no other
+# installer path requires. Making machines that could install stop installing, in
+# order to check one file, trades a silent hole for a loud regression.
+# A string sniff (grep for "tool.execute.before" and friends) would be worse: it
+# stops an HTML login page but not syntactically valid TypeScript that exports the
+# same names and registers nothing — the most dangerous shape, and the one that
+# makes the check look real when it is not.
+# So the channel itself is removed: the plugin and the installer are one trusted
+# distribution. Running this file already means trusting its contents, the plugin
+# rides along, and nothing on the network can become the plugin any more.
+# The cost is that this copy has to track
+# .opencode/plugins/protect-important-paths.ts; test-install-hooks.sh pins that by
+# asserting the plugin installed from a distribution without .opencode is
+# byte-identical to that file, so drift turns the suite red.
+# 與 write_fail_closed_hook_stub 相同的內嵌寫法：每一行都縮排，函式主體中沒有任何
+# 一行以 `}` 起始，測試若以 `sed -n '/^name()/,/^}/p'` 抽取也不會被截斷。
+# Same embedding style as write_fail_closed_hook_stub: every line is indented so no
+# line in the body starts with `}`, which a sed extraction ending at /^}/ would
+# otherwise truncate.
+write_bundled_opencode_plugin() {
+    local destination="$1"
+
+    mkdir -p -- "$(dirname -- "$destination")" || return 1
+    printf '%s\n' \
+        'import type { Plugin } from "@opencode-ai/plugin";' \
+        '// @ts-ignore' \
+        'import { evaluate } from "../../hooks/protect-important-paths";' \
+        '' \
+        'export const ProtectImportantPathsPlugin: Plugin = async (ctx) => {' \
+        '  return {' \
+        '    "tool.execute.before": async (input, output) => {' \
+        '      if (input.tool === "bash") {' \
+        '        const command = output.args.command;' \
+        '        const cwd = (ctx as any)?.directory || process.cwd();' \
+        '' \
+        '        const payload = {' \
+        '          tool_input: { command },' \
+        '          cwd' \
+        '        };' \
+        '' \
+        '        const result = evaluate(payload);' \
+        '        if (result && result.hookSpecificOutput?.permissionDecision === "deny") {' \
+        '          throw new Error(result.hookSpecificOutput.permissionDecisionReason);' \
+        '        }' \
+        '      }' \
+        '    },' \
+        '  };' \
+        '};' \
+        '' \
+        'export default ProtectImportantPathsPlugin;' \
+        > "$destination"
+}
+
 # 取得 OpenCode 外掛檔案位置 (Resolve OpenCode plugin path)
 resolve_opencode_plugin() {
     if [ "$GLOBAL_INSTALL" = true ]; then
@@ -746,17 +821,25 @@ resolve_opencode_plugin() {
     project_root="$(resolve_project_root)"
     PLUGIN_SOURCE_PATH="$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts"
     if [ ! -f "$PLUGIN_SOURCE_PATH" ] || [ ! -r "$PLUGIN_SOURCE_PATH" ]; then
-        local plugin_release_dir
-        plugin_release_dir="$(mktemp -d)"
-        CLEANUP_DIRS+=("$plugin_release_dir")
-        PLUGIN_SOURCE_PATH="$plugin_release_dir/.opencode/plugins/protect-important-paths.ts"
+        local plugin_bundle_dir
+        plugin_bundle_dir="$(mktemp -d)"
+        CLEANUP_DIRS+=("$plugin_bundle_dir")
+        PLUGIN_SOURCE_PATH="$plugin_bundle_dir/.opencode/plugins/protect-important-paths.ts"
     fi
     PLUGIN_PATH="$project_root/.opencode/plugins/protect-important-paths.ts"
     OPENCODE_RUNTIME_SOURCE_PATH="$HOOK_SOURCE_PATH"
     OPENCODE_RUNTIME_PATH="$project_root/hooks/protect-important-paths.js"
 
     if [ ! -f "$PLUGIN_SOURCE_PATH" ] || [ ! -r "$PLUGIN_SOURCE_PATH" ]; then
-        download_release_file "$RELEASE_OPENCODE_PLUGIN_ASSET_NAME" "$PLUGIN_SOURCE_PATH"
+        # `if !` 是刻意的：set -e 會讓寫檔失敗直接中止，什麼訊息都不印，而這條路徑
+        # 上使用者需要知道停在哪裡。
+        # The `if !` is deliberate: under set -e a failed write would abort with no
+        # message at all, and this path is one the user has to be able to act on.
+        if ! write_bundled_opencode_plugin "$PLUGIN_SOURCE_PATH"; then
+            error "無法寫出隨安裝程式內附的 OpenCode 外掛：$PLUGIN_SOURCE_PATH"
+            error "Failed to write the bundled OpenCode plugin: $PLUGIN_SOURCE_PATH"
+            exit 1
+        fi
     fi
 
     if [ ! -f "$PLUGIN_SOURCE_PATH" ] || [ ! -r "$PLUGIN_SOURCE_PATH" ]; then

@@ -47,6 +47,17 @@ assert_contains() {
     fi
 }
 
+assert_not_contains() {
+    local name="$1"
+    local haystack="$2"
+    local needle="$3"
+    if printf '%s\n' "$haystack" | grep -q "$needle"; then
+        fail "$name"
+    else
+        pass "$name"
+    fi
+}
+
 assert_failure() {
     local name="$1"
     shift
@@ -948,6 +959,151 @@ elif [ -f "$CAPTIVE_HOOK" ] && ! hook_allows_protected_deletion "$CAPTIVE_HOOK";
 else
     fail "a tampered release download never leaves an allow-everything hook registered"
 fi
+
+# ---------------------------------------------------------------------------
+# OpenCode plugin provenance
+# ---------------------------------------------------------------------------
+# 外掛是「讓 OpenCode 去呼叫已驗證 runtime hook」的橋接層：外掛壞掉等於 OpenCode
+# 底下完全沒有保護，而安裝程式照樣回報成功。發佈物裡沒有 `.opencode/` 時（單獨拿
+# 到 install-hooks.sh 的那種安裝方式），外掛以前是去 Release 下載的，而下載回來的
+# 東西只被檢查「是可讀的一般檔案」——captive portal 的 HTML、被截斷的 body、以及
+# 語法正確但根本不註冊任何 hook 的 TypeScript，全都會被原封不動複製到專案的執行
+# 位置，exit 0、毫無警告，之後也沒有任何刪除防護。
+# runtime hook 那條路已經有行為驗證，外掛這條沒有：外掛是 TypeScript，安裝程式並
+# 不要求 TypeScript runtime，所以驗不了。因此改成把外掛與安裝程式綁成同一份可信
+# 發佈物——外掛內嵌在 install-hooks.sh 裡，那條被汙染的通道整條消失。
+# 這裡的斷言刻意分成三種，因為它們保護的是三件不同的事：
+#   (A) 執行位置上的外掛永遠不是網路來的東西（真正的安全性質）；
+#   (B) 根本不會為了取得外掛去打網路（「同一份可信發佈物」的可觀測形式）；
+#   (C) 正常路徑沒有被這道防線一起否決——安裝仍然成功，且裝上去的是正確的外掛。
+# The plugin is the bridge that makes OpenCode call the verified runtime hook, so a
+# broken plugin means no protection under OpenCode at all, reported as success.
+# When the distribution has no `.opencode/` (the standalone install-hooks.sh shape)
+# the plugin used to be downloaded from the release and only checked for "readable
+# regular file", so a captive-portal page, a truncated body, and syntactically valid
+# TypeScript that registers no hook were all copied verbatim to the executing
+# location: exit 0, no warning, no deletion protection afterwards.
+# The runtime hook's download is verified behaviourally; the plugin's could not be,
+# because it is TypeScript and the installer does not require a TypeScript runtime.
+# The plugin is therefore bundled into install-hooks.sh instead, which removes the
+# poisoned channel rather than inspecting what comes out of it.
+# The three assertion shapes guard three different things:
+#   (A) the plugin at the executing location is never network content (the security
+#       property itself, which holds whichever fix is chosen);
+#   (B) the network is not consulted for the plugin at all (the observable form of
+#       "one trusted distribution");
+#   (C) the normal path is not denied along with the bad ones — the install still
+#       succeeds and the plugin it lands is the genuine one.
+OPENCODE_DIST="$TMP_ROOT/opencode-bundled-dist"
+mkdir -p "$OPENCODE_DIST/hooks"
+cp "$INSTALLER" "$OPENCODE_DIST/install-hooks.sh"
+chmod +x "$OPENCODE_DIST/install-hooks.sh"
+cp "$SCRIPT_DIR/hooks/protect-important-paths.js" "$OPENCODE_DIST/hooks/protect-important-paths.js"
+# 刻意不放 .opencode/：這正是會觸發外掛下載的發佈物形狀。
+# Deliberately no .opencode/: this is the distribution shape that triggered the
+# plugin download.
+OPENCODE_GENUINE_PLUGIN_HASH=$(file_hash "$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts")
+
+# $1 label, $2 poisoned release body, $3 a string that only the poisoned body contains
+assert_opencode_plugin_provenance() {
+    local label="$1"
+    local body="$2"
+    local marker="$3"
+
+    local project="$TMP_ROOT/opencode-provenance-$label"
+    make_repo "$project"
+    local log="$TMP_ROOT/opencode-provenance-$label.log"
+    : > "$log"
+    local plugin="$project/.opencode/plugins/protect-important-paths.ts"
+
+    local status=0
+    (
+        cd "$project" &&
+        env PATH="$RELEASE_STUB_BIN:$PATH" \
+            BETTER_RM_TEST_RELEASE_DIR="$RELEASE_ASSET_DIR" \
+            BETTER_RM_TEST_RELEASE_LOG="$log" \
+            BETTER_RM_TEST_RELEASE_BODY="$body" \
+            HOME="$TMP_ROOT/opencode-provenance-home-$label" CLAUDE_CONFIG_DIR= \
+            "$OPENCODE_DIST/install-hooks.sh" -a opencode
+    ) >/dev/null 2>&1 || status=$?
+
+    if [ -f "$plugin" ] && grep -q "$marker" "$plugin"; then
+        fail "opencode plugin is never the tampered download ($label)"
+    else
+        pass "opencode plugin is never the tampered download ($label)"
+    fi
+
+    assert_not_contains "opencode plugin is never fetched over the network ($label)" \
+        "$(cat "$log")" "opencode-protect-important-paths.ts"
+
+    if [ "$status" -eq 0 ] && [ -f "$plugin" ] &&
+       [ "$(file_hash "$plugin")" = "$OPENCODE_GENUINE_PLUGIN_HASH" ]; then
+        pass "opencode install lands the genuine plugin regardless of the release body ($label)"
+    else
+        fail "opencode install lands the genuine plugin regardless of the release body ($label)"
+    fi
+}
+
+assert_opencode_plugin_provenance 'captive-portal' \
+    '<html><head><title>Sign in to continue</title></head><body>Wi-Fi login required</body></html>' \
+    'Wi-Fi login required'
+
+# 截斷：前綴完全是合法外掛，只是 body 在中途斷掉。位元組層級的檢查（大小、可讀）
+# 抓不到，語法上也「看起來像那個檔案」。
+# Truncated: the prefix is the genuine plugin, the body just stops mid-statement.
+# Size/readability checks cannot see it and it still "looks like" the real file.
+assert_opencode_plugin_provenance 'truncated' \
+    'import type { Plugin } from "@opencode-ai/plugin";
+// @ts-ignore
+import { evaluate } from "../../hooks/protect-important-paths";
+
+export const ProtectImportantPathsPlugin: Plugin = async (ctx) => {
+  return {
+    "tool.execute.before": async (input, output) => {
+      if (input.tool === "bash") {
+        const comm' \
+    'const comm$'
+
+# 語法正確、型別正確、export 名稱一模一樣，就是不註冊任何 hook。這是 checksum 之外
+# 的那一類：檔案完好無損地抵達，內容卻什麼都不保護。
+# Syntactically and structurally valid, same export names, registers no hook. This
+# is the class a checksum cannot address: the file arrives intact and protects
+# nothing.
+assert_opencode_plugin_provenance 'registers-no-hook' \
+    'import type { Plugin } from "@opencode-ai/plugin";
+
+export const ProtectImportantPathsPlugin: Plugin = async (ctx) => {
+  return {};
+};
+
+export default ProtectImportantPathsPlugin;' \
+    'return {};'
+
+# 網路整條不通（Release 上沒有這個 asset、或離線）也必須照裝：外掛既然隨安裝程式
+# 一起出貨，就不該有任何理由依賴網路。
+# A dead network (asset missing from the release, or offline) must still install:
+# once the plugin ships with the installer there is no reason to need the network.
+OPENCODE_OFFLINE_PROJECT="$TMP_ROOT/opencode-offline-project"
+make_repo "$OPENCODE_OFFLINE_PROJECT"
+OPENCODE_OFFLINE_EMPTY_ASSETS="$TMP_ROOT/opencode-offline-empty-assets"
+mkdir -p "$OPENCODE_OFFLINE_EMPTY_ASSETS"
+OPENCODE_OFFLINE_PLUGIN="$OPENCODE_OFFLINE_PROJECT/.opencode/plugins/protect-important-paths.ts"
+OPENCODE_OFFLINE_STATUS=0
+(
+    cd "$OPENCODE_OFFLINE_PROJECT" &&
+    env PATH="$RELEASE_STUB_BIN:$PATH" \
+        BETTER_RM_TEST_RELEASE_DIR="$OPENCODE_OFFLINE_EMPTY_ASSETS" \
+        HOME="$TMP_ROOT/opencode-offline-home" CLAUDE_CONFIG_DIR= \
+        "$OPENCODE_DIST/install-hooks.sh" -a opencode
+) >/dev/null 2>&1 || OPENCODE_OFFLINE_STATUS=$?
+if [ "$OPENCODE_OFFLINE_STATUS" -eq 0 ]; then
+    pass "opencode install does not need the network for the plugin"
+else
+    fail "opencode install does not need the network for the plugin"
+fi
+assert_equal "opencode offline install lands the genuine plugin" \
+    "$OPENCODE_GENUINE_PLUGIN_HASH" \
+    "$([ -f "$OPENCODE_OFFLINE_PLUGIN" ] && file_hash "$OPENCODE_OFFLINE_PLUGIN" || echo missing)"
 
 # 第一次安裝（目的地不存在）走的是純 cp，完全沒有信任探測；hook_is_trustworthy
 # 只服務 refresh 路徑。cp 回報成功不代表寫進去的是完整內容：磁碟滿或檔案系統錯誤
