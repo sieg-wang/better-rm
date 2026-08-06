@@ -1141,13 +1141,19 @@ assert_equal "opencode offline install lands the genuine plugin" \
 # reports success but writes nothing, which is rare on a local filesystem — and is
 # exactly why this guard exists, since a write tool's exit status can never prove
 # the bytes landed.
-# $1 bin dir, $2 destination to truncate (MUST be the physical path), $3 hit log
-make_truncating_cp_bin() {
+# $1 bin dir, $2 destination to corrupt (MUST be the physical path), $3 hit log,
+# $4 optional payload file to land instead — absent means truncate to zero bytes
+make_corrupting_cp_bin() {
     local bin_dir="$1"
     local victim="$2"
     local hit_log="$3"
+    local payload="${4:-}"
     mkdir -p "$bin_dir"
     : > "$hit_log"
+    local landing="    : > \"\$dest\""
+    if [ -n "$payload" ]; then
+        landing="    /bin/cat \"$payload\" > \"\$dest\""
+    fi
     # 必須以「最後一個參數」（目的地）判斷。runtime hook 的來源與目的地檔名完全
     # 相同，比對任意參數會先打中來源，量到的就不是這條路徑了。
     # 目的地必須是實體路徑：安裝程式用 `pwd -P` 解析專案根目錄，而 macOS 的
@@ -1168,7 +1174,7 @@ make_truncating_cp_bin() {
 dest=\$(eval echo "\\\${\$#}")
 if [ "\$dest" = "$victim" ]; then
     printf '%s\n' "\$dest" >> "$hit_log"
-    : > "\$dest"
+$landing
     exit 0
 fi
 exec /bin/cp "\$@"
@@ -1180,7 +1186,7 @@ OPENCODE_TRUNC_RUNTIME_PROJECT="$TMP_ROOT/opencode-truncated-runtime-project"
 make_repo "$OPENCODE_TRUNC_RUNTIME_PROJECT"
 OPENCODE_TRUNC_RUNTIME="$OPENCODE_TRUNC_RUNTIME_PROJECT/hooks/protect-important-paths.js"
 OPENCODE_TRUNC_RUNTIME_HITS="$TMP_ROOT/opencode-trunc-runtime.hits"
-make_truncating_cp_bin "$TMP_ROOT/opencode-trunc-runtime-bin" \
+make_corrupting_cp_bin "$TMP_ROOT/opencode-trunc-runtime-bin" \
     "$(cd "$OPENCODE_TRUNC_RUNTIME_PROJECT" && pwd -P)/hooks/protect-important-paths.js" \
     "$OPENCODE_TRUNC_RUNTIME_HITS"
 OPENCODE_TRUNC_RUNTIME_STATUS=0
@@ -1218,7 +1224,7 @@ OPENCODE_TRUNC_PLUGIN_PROJECT="$TMP_ROOT/opencode-truncated-plugin-project"
 make_repo "$OPENCODE_TRUNC_PLUGIN_PROJECT"
 OPENCODE_TRUNC_PLUGIN="$OPENCODE_TRUNC_PLUGIN_PROJECT/.opencode/plugins/protect-important-paths.ts"
 OPENCODE_TRUNC_PLUGIN_HITS="$TMP_ROOT/opencode-trunc-plugin.hits"
-make_truncating_cp_bin "$TMP_ROOT/opencode-trunc-plugin-bin" \
+make_corrupting_cp_bin "$TMP_ROOT/opencode-trunc-plugin-bin" \
     "$(cd "$OPENCODE_TRUNC_PLUGIN_PROJECT" && pwd -P)/.opencode/plugins/protect-important-paths.ts" \
     "$OPENCODE_TRUNC_PLUGIN_HITS"
 OPENCODE_TRUNC_PLUGIN_STATUS=0
@@ -1242,6 +1248,237 @@ if [ -f "$OPENCODE_TRUNC_PLUGIN" ] && [ ! -s "$OPENCODE_TRUNC_PLUGIN" ]; then
         "$OPENCODE_TRUNC_PLUGIN_OUTPUT" "does not match its source"
 else
     fail "a truncated opencode plugin says the copy does not match its source"
+fi
+
+# cmp 的結束碼是三態：0＝相同、1＝不同、>=2＝比對本身跑不起來。把 >=2 也當成「不同」，
+# 就會拿一個沒有發生的診斷去中止一次完全健康的安裝：外掛其實位元完美地落地了，安裝
+# 卻中止、runtime hook 從此沒被裝上，訊息還說「可能只寫了一半」。那是假診斷。
+# 這正是 hook_is_trustworthy 用正向控制在防的事——分不出「候選檔壞掉」與「檢查工具
+# 壞掉」就會誤判——而外掛守衛沒有等價機制，只能靠 cmp 自己的結束碼。
+# 這裡要求的是：cmp 跑不起來時退回「無法驗證」並放行（訊息必須誠實），而不是宣稱不符。
+# cmp's exit status is tri-state: 0 same, 1 different, >=2 the comparison itself
+# could not run. Treating >=2 as "different" aborts a perfectly healthy install with
+# a diagnosis that never happened: the plugin landed byte-perfect, the install
+# aborted anyway, the runtime hook was never installed, and the message claimed a
+# partial copy. That is a false diagnosis.
+# This is exactly what hook_is_trustworthy's positive control exists to prevent —
+# failing to separate "the candidate is bad" from "the checker is broken" — and the
+# plugin guard has no equivalent, so cmp's own exit status is all there is.
+# The requirement: when cmp cannot run, degrade to "could not verify" and proceed,
+# with an honest message, rather than asserting a mismatch.
+OPENCODE_NOCMP_PROJECT="$TMP_ROOT/opencode-no-cmp-project"
+make_repo "$OPENCODE_NOCMP_PROJECT"
+OPENCODE_NOCMP_BIN="$TMP_ROOT/opencode-no-cmp-bin"
+mkdir -p "$OPENCODE_NOCMP_BIN"
+# 127 是 shell 找不到執行檔時的結束碼，也就是「機器上沒有 cmp」的形狀。
+# 127 is what a shell yields for a missing binary: the "this machine has no cmp"
+# shape.
+printf '#!/bin/sh\nexit 127\n' > "$OPENCODE_NOCMP_BIN/cmp"
+chmod +x "$OPENCODE_NOCMP_BIN/cmp"
+OPENCODE_NOCMP_PLUGIN="$OPENCODE_NOCMP_PROJECT/.opencode/plugins/protect-important-paths.ts"
+OPENCODE_NOCMP_RUNTIME="$OPENCODE_NOCMP_PROJECT/hooks/protect-important-paths.js"
+OPENCODE_NOCMP_STATUS=0
+OPENCODE_NOCMP_OUTPUT=$(
+    cd "$OPENCODE_NOCMP_PROJECT" &&
+    PATH="$OPENCODE_NOCMP_BIN:$PATH" HOME="$TMP_ROOT/opencode-no-cmp-home" \
+        CLAUDE_CONFIG_DIR= "$INSTALLER" -a opencode 2>&1
+) || OPENCODE_NOCMP_STATUS=$?
+if [ "$OPENCODE_NOCMP_STATUS" -eq 0 ]; then
+    pass "opencode installs when cmp cannot run"
+else
+    fail "opencode installs when cmp cannot run"
+fi
+assert_equal "opencode lands the genuine plugin when cmp cannot run" \
+    "$OPENCODE_GENUINE_PLUGIN_HASH" \
+    "$([ -f "$OPENCODE_NOCMP_PLUGIN" ] && file_hash "$OPENCODE_NOCMP_PLUGIN" || echo missing)"
+assert_equal "opencode still installs the runtime hook when cmp cannot run" \
+    "$(file_hash "$SCRIPT_DIR/hooks/protect-important-paths.js")" \
+    "$([ -f "$OPENCODE_NOCMP_RUNTIME" ] && file_hash "$OPENCODE_NOCMP_RUNTIME" || echo missing)"
+assert_not_contains "opencode never claims a mismatch it could not measure" \
+    "$OPENCODE_NOCMP_OUTPUT" "does not match its source"
+
+# runtime 守衛有兩個驗證器：行為探測（需要 node）與位元比對（需要 cmp）。兩個都在
+# 時當然要驗；只剩一個時用剩下的那個。兩個都跑不起來，就沒有任何證據指向這份複製
+# 有問題——此時中止並留下 fail-closed stub，是拿「無法測量」當成「測到壞掉」，會把
+# 一台本來裝得起來的機器變成裝不起來，還讓 OpenCode 底下每個指令都被擋。
+# opencode 是唯一會走到這個問題的 agent：其他八個都要用 node 合併 JSON 設定，沒有
+# node 根本走不到驗證那一步。所以這裡沒有「跟其他 agent 一致」可言，只有「不要製造
+# 一個沒有證據的失敗」。
+# 界線：只有「連比對工具都跑不起來」才放行，而且要大聲說出來。只要有任何一個驗證器
+# 能跑並且說這份檔案不擋，就必須 fail-closed——下面那條斷言釘的就是這件事。
+# The runtime guard has two verifiers: the behavioural probe (needs node) and the
+# byte comparison (needs cmp). Use both when both are there, the survivor when one
+# is. When neither can run there is no evidence against the copy at all, and
+# aborting with a fail-closed stub would treat "could not measure" as "measured
+# bad": it turns a machine that used to install into one that cannot, and blocks
+# every command under OpenCode.
+# opencode is the only agent that reaches this question — the other eight need node
+# to merge their JSON settings and never get as far as verification. So there is no
+# "consistent with the other agents" here, only "do not manufacture an evidence-free
+# failure".
+# The limit: acceptance requires that NO verifier could run, and it must say so out
+# loud. If any verifier runs and reports the file does not deny, it must still fail
+# closed — that is what the assertion after this one pins.
+OPENCODE_NOVERIFY_PROJECT="$TMP_ROOT/opencode-no-verifier-project"
+make_repo "$OPENCODE_NOVERIFY_PROJECT"
+OPENCODE_NOVERIFY_BIN="$TMP_ROOT/opencode-no-verifier-bin"
+mkdir -p "$OPENCODE_NOVERIFY_BIN"
+printf '#!/bin/sh\nexit 127\n' > "$OPENCODE_NOVERIFY_BIN/cmp"
+printf '#!/bin/sh\nexit 127\n' > "$OPENCODE_NOVERIFY_BIN/node"
+chmod +x "$OPENCODE_NOVERIFY_BIN/cmp" "$OPENCODE_NOVERIFY_BIN/node"
+OPENCODE_NOVERIFY_PLUGIN="$OPENCODE_NOVERIFY_PROJECT/.opencode/plugins/protect-important-paths.ts"
+OPENCODE_NOVERIFY_RUNTIME="$OPENCODE_NOVERIFY_PROJECT/hooks/protect-important-paths.js"
+OPENCODE_NOVERIFY_STATUS=0
+OPENCODE_NOVERIFY_OUTPUT=$(
+    cd "$OPENCODE_NOVERIFY_PROJECT" &&
+    PATH="$OPENCODE_NOVERIFY_BIN:$PATH" HOME="$TMP_ROOT/opencode-no-verifier-home" \
+        CLAUDE_CONFIG_DIR= "$INSTALLER" -a opencode 2>&1
+) || OPENCODE_NOVERIFY_STATUS=$?
+if [ "$OPENCODE_NOVERIFY_STATUS" -eq 0 ]; then
+    pass "opencode installs when neither verifier can run"
+else
+    fail "opencode installs when neither verifier can run"
+fi
+assert_equal "opencode lands the genuine runtime hook when neither verifier can run" \
+    "$(file_hash "$SCRIPT_DIR/hooks/protect-important-paths.js")" \
+    "$([ -f "$OPENCODE_NOVERIFY_RUNTIME" ] && file_hash "$OPENCODE_NOVERIFY_RUNTIME" || echo missing)"
+assert_equal "opencode lands the genuine plugin when neither verifier can run" \
+    "$OPENCODE_GENUINE_PLUGIN_HASH" \
+    "$([ -f "$OPENCODE_NOVERIFY_PLUGIN" ] && file_hash "$OPENCODE_NOVERIFY_PLUGIN" || echo missing)"
+assert_contains "opencode says out loud that it could not verify the runtime hook" \
+    "$OPENCODE_NOVERIFY_OUTPUT" "Could not verify the OpenCode runtime hook"
+# 「未驗證但繼續」與「驗過了」必須長得不一樣：訊息若含 fails closed，代表走的是中止
+# 那條路，這個情境就沒有真的回到可安裝狀態。
+# "Unverified but proceeding" must not look like "verified": a fails-closed message
+# here would mean the abort path ran and this scenario never returned to installable.
+assert_not_contains "opencode does not claim a fail-closed stub when it merely could not measure" \
+    "$OPENCODE_NOVERIFY_OUTPUT" "fails closed"
+
+# 「探測跑不起來就放行」是錯的近似解：只要 cmp 還在，截斷的複製就必須被抓到。
+# 沒有 node、但有 cmp，而且複製確實壞掉——這一組必須 fail-closed。
+# "Accept whenever the probe is unavailable" is the wrong approximation: while cmp
+# is still there a truncated copy must still be caught. No node, cmp present, copy
+# genuinely broken — this combination must fail closed.
+OPENCODE_NONODE_TRUNC_PROJECT="$TMP_ROOT/opencode-no-node-truncated-project"
+make_repo "$OPENCODE_NONODE_TRUNC_PROJECT"
+OPENCODE_NONODE_TRUNC_RUNTIME="$OPENCODE_NONODE_TRUNC_PROJECT/hooks/protect-important-paths.js"
+OPENCODE_NONODE_TRUNC_HITS="$TMP_ROOT/opencode-no-node-truncated.hits"
+make_corrupting_cp_bin "$TMP_ROOT/opencode-no-node-truncated-bin" \
+    "$(cd "$OPENCODE_NONODE_TRUNC_PROJECT" && pwd -P)/hooks/protect-important-paths.js" \
+    "$OPENCODE_NONODE_TRUNC_HITS"
+printf '#!/bin/sh\nexit 127\n' > "$TMP_ROOT/opencode-no-node-truncated-bin/node"
+chmod +x "$TMP_ROOT/opencode-no-node-truncated-bin/node"
+OPENCODE_NONODE_TRUNC_STATUS=0
+(
+    cd "$OPENCODE_NONODE_TRUNC_PROJECT" &&
+    PATH="$TMP_ROOT/opencode-no-node-truncated-bin:$PATH" \
+        HOME="$TMP_ROOT/opencode-no-node-truncated-home" \
+        CLAUDE_CONFIG_DIR= "$INSTALLER" -a opencode
+) >/dev/null 2>&1 || OPENCODE_NONODE_TRUNC_STATUS=$?
+if [ -s "$OPENCODE_NONODE_TRUNC_HITS" ]; then
+    pass "the no-node runtime truncation was actually injected"
+else
+    fail "the no-node runtime truncation was actually injected"
+fi
+if [ "$OPENCODE_NONODE_TRUNC_STATUS" -ne 0 ]; then
+    pass "opencode still fails closed on a truncated runtime hook when only cmp is available"
+else
+    fail "opencode still fails closed on a truncated runtime hook when only cmp is available"
+fi
+if [ -f "$OPENCODE_NONODE_TRUNC_RUNTIME" ] && hook_is_permissive "$OPENCODE_NONODE_TRUNC_RUNTIME"; then
+    fail "opencode leaves no allow-everything runtime hook when only cmp is available"
+else
+    pass "opencode leaves no allow-everything runtime hook when only cmp is available"
+fi
+
+# 守衛的「強度」也要釘住，否則未來的重構可以把內容比對悄悄換成大小比對而測試照樣綠。
+# 損壞的內容與正本長度完全相同：只比大小的實作會放行，內容比對才會擋。
+# The guards' STRENGTH has to be pinned too, or a future refactor can quietly swap
+# the content comparison for a size comparison with the suite still green. This
+# corruption is exactly as long as the original: a size-only check accepts it, only
+# a content comparison rejects it.
+OPENCODE_SAMELEN_PAYLOAD="$TMP_ROOT/opencode-samelen-plugin.ts"
+if [ -f "$OPENCODE_PLUGIN_SOURCE" ]; then
+    node -e 'const fs=require("fs");const s=fs.readFileSync(process.argv[1],"utf8");fs.writeFileSync(process.argv[2],s.replace("tool.execute.before","tool.execute.beforf"));' \
+        "$OPENCODE_PLUGIN_SOURCE" "$OPENCODE_SAMELEN_PAYLOAD"
+fi
+# fixture 自己要先被驗：長度一旦不同，這個測試就退化成「截斷」那一種，大小檢查照樣
+# 會被殺，於是這條斷言就再也證明不了它宣稱的事。
+# The fixture is verified first: if the lengths ever differ this case degrades into
+# the truncation case, a size check would be killed anyway, and the assertion would
+# stop proving what it claims.
+assert_equal "the same-length plugin corruption really is the same length" \
+    "$([ -f "$OPENCODE_PLUGIN_SOURCE" ] && wc -c < "$OPENCODE_PLUGIN_SOURCE" | tr -d ' ' || echo missing)" \
+    "$([ -f "$OPENCODE_SAMELEN_PAYLOAD" ] && wc -c < "$OPENCODE_SAMELEN_PAYLOAD" | tr -d ' ' || echo missing)"
+OPENCODE_SAMELEN_PROJECT="$TMP_ROOT/opencode-samelen-plugin-project"
+make_repo "$OPENCODE_SAMELEN_PROJECT"
+OPENCODE_SAMELEN_PLUGIN="$OPENCODE_SAMELEN_PROJECT/.opencode/plugins/protect-important-paths.ts"
+OPENCODE_SAMELEN_HITS="$TMP_ROOT/opencode-samelen.hits"
+make_corrupting_cp_bin "$TMP_ROOT/opencode-samelen-bin" \
+    "$(cd "$OPENCODE_SAMELEN_PROJECT" && pwd -P)/.opencode/plugins/protect-important-paths.ts" \
+    "$OPENCODE_SAMELEN_HITS" "$OPENCODE_SAMELEN_PAYLOAD"
+OPENCODE_SAMELEN_STATUS=0
+(
+    cd "$OPENCODE_SAMELEN_PROJECT" &&
+    PATH="$TMP_ROOT/opencode-samelen-bin:$PATH" HOME="$TMP_ROOT/opencode-samelen-home" \
+        CLAUDE_CONFIG_DIR= "$INSTALLER" -a opencode
+) >/dev/null 2>&1 || OPENCODE_SAMELEN_STATUS=$?
+if [ -s "$OPENCODE_SAMELEN_HITS" ]; then
+    pass "the same-length plugin corruption was actually injected"
+else
+    fail "the same-length plugin corruption was actually injected"
+fi
+if [ "$OPENCODE_SAMELEN_STATUS" -ne 0 ]; then
+    pass "opencode rejects a plugin corrupted without changing its length"
+else
+    fail "opencode rejects a plugin corrupted without changing its length"
+fi
+
+# runtime 守衛同理：0 位元組會被任何「非空」檢查擋下，所以那證明不了守衛是行為性的。
+# 這份 payload 是合法、非空、可執行的 JS，只是以 exit 0 與空輸出結束——契約上正是
+# 「放行一切」。非空檢查會放行它，行為探測才會擋。
+# Same for the runtime guard: a 0-byte file is caught by any non-empty check, so it
+# cannot prove the guard is behavioural. This payload is valid, non-empty, runnable
+# JS that exits 0 with no output — precisely the allow-everything shape. A non-empty
+# check accepts it; only a behavioural probe rejects it.
+OPENCODE_PERMISSIVE_PAYLOAD="$TMP_ROOT/opencode-permissive-runtime.js"
+printf '%s\n' \
+    '#!/usr/bin/env node' \
+    'process.stdin.resume();' \
+    'process.stdin.on("end", () => { process.exit(0); });' \
+    > "$OPENCODE_PERMISSIVE_PAYLOAD"
+if hook_is_permissive "$OPENCODE_PERMISSIVE_PAYLOAD"; then
+    pass "the permissive runtime fixture really does allow everything"
+else
+    fail "the permissive runtime fixture really does allow everything"
+fi
+OPENCODE_PERMISSIVE_PROJECT="$TMP_ROOT/opencode-permissive-runtime-project"
+make_repo "$OPENCODE_PERMISSIVE_PROJECT"
+OPENCODE_PERMISSIVE_RUNTIME="$OPENCODE_PERMISSIVE_PROJECT/hooks/protect-important-paths.js"
+OPENCODE_PERMISSIVE_HITS="$TMP_ROOT/opencode-permissive.hits"
+make_corrupting_cp_bin "$TMP_ROOT/opencode-permissive-bin" \
+    "$(cd "$OPENCODE_PERMISSIVE_PROJECT" && pwd -P)/hooks/protect-important-paths.js" \
+    "$OPENCODE_PERMISSIVE_HITS" "$OPENCODE_PERMISSIVE_PAYLOAD"
+OPENCODE_PERMISSIVE_STATUS=0
+(
+    cd "$OPENCODE_PERMISSIVE_PROJECT" &&
+    PATH="$TMP_ROOT/opencode-permissive-bin:$PATH" HOME="$TMP_ROOT/opencode-permissive-home" \
+        CLAUDE_CONFIG_DIR= "$INSTALLER" -a opencode
+) >/dev/null 2>&1 || OPENCODE_PERMISSIVE_STATUS=$?
+if [ -s "$OPENCODE_PERMISSIVE_HITS" ]; then
+    pass "the permissive runtime substitution was actually injected"
+else
+    fail "the permissive runtime substitution was actually injected"
+fi
+if [ "$OPENCODE_PERMISSIVE_STATUS" -ne 0 ]; then
+    pass "opencode rejects a valid non-empty runtime hook that allows everything"
+else
+    fail "opencode rejects a valid non-empty runtime hook that allows everything"
+fi
+if [ -f "$OPENCODE_PERMISSIVE_RUNTIME" ] && hook_is_permissive "$OPENCODE_PERMISSIVE_RUNTIME"; then
+    fail "opencode never leaves an allow-everything runtime hook behind"
+else
+    pass "opencode never leaves an allow-everything runtime hook behind"
 fi
 
 # 第一次安裝（目的地不存在）走的是純 cp，完全沒有信任探測；hook_is_trustworthy

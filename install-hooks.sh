@@ -916,6 +916,41 @@ require_verified_opencode_runtime() {
         return 0
     fi
 
+    # 這裡有兩個驗證器：行為探測（需要 node）與位元比對（需要 cmp）。走到這一行代表
+    # 兩者合起來沒有給出「可信」，但那有兩種截然不同的原因，必須分開處理：
+    #   探測跑得起來、說它不擋            → 有證據，fail-closed。
+    #   探測跑不起來，cmp 說位元不同      → 有證據，fail-closed。
+    #   探測跑不起來，cmp 也跑不起來      → 沒有任何證據，只是量不到。
+    # 第三種若也中止，就是拿「無法測量」當成「測到壞掉」：一台本來裝得起來的機器
+    # 變成裝不起來，還留下一個擋掉 OpenCode 每個指令的 stub。opencode 是唯一會走到
+    # 這個問題的 agent（其他八個都要用 node 合併 JSON，沒有 node 根本到不了這裡），
+    # 所以這不是與誰一致的問題，而是不要製造一個沒有證據的失敗。
+    # 只在第三種放行，而且要大聲說出來——這與外掛守衛對 cmp 三態的處理是同一套規則。
+    # There are two verifiers here: the behavioural probe (needs node) and the byte
+    # comparison (needs cmp). Reaching this line means they did not jointly say
+    # "trustworthy", but that has two very different causes and they must be split:
+    #   probe ran and says it does not deny        -> evidence, fail closed.
+    #   probe unavailable, cmp says bytes differ   -> evidence, fail closed.
+    #   probe unavailable and cmp cannot run       -> no evidence, just no measurement.
+    # Aborting on the third treats "could not measure" as "measured bad": a machine
+    # that used to install stops installing and is left with a stub that blocks every
+    # command under OpenCode. opencode is the only agent that gets this far (the
+    # other eight need node to merge their JSON settings), so this is not about
+    # matching them — it is about not manufacturing an evidence-free failure.
+    # Accept only in the third case, and say so out loud. Same rule the plugin guard
+    # applies to cmp's tri-state.
+    if [ "$HOOK_PROBE_UNAVAILABLE" = true ]; then
+        local compare_status=0
+        cmp -s "$OPENCODE_RUNTIME_SOURCE_PATH" "$OPENCODE_RUNTIME_PATH" || compare_status=$?
+        if [ "$compare_status" -ge 2 ]; then
+            warning "無法驗證 OpenCode 共用 hook：自我檢測與位元比對都無法執行，已在未驗證的情況下繼續：$OPENCODE_RUNTIME_PATH"
+            warning "Could not verify the OpenCode runtime hook: neither the self-check nor the byte comparison could run; continuing unverified: $OPENCODE_RUNTIME_PATH"
+            warning "安裝可用的 node 或 cmp 後重跑安裝程式，即可取得驗證"
+            warning "Install a working node or cmp and re-run the installer to get it verified"
+            return 0
+        fi
+    fi
+
     # 訊息必須跟著 stub 是否真的寫成功而分歧：stub 寫失敗時磁碟上留下的是未經驗證
     # 的內容（可能放行一切），此時再印「已改為 fail-closed」就是騙人。
     # The message branches on whether the stub was actually written: if it was not,
@@ -952,7 +987,37 @@ require_verified_opencode_runtime() {
 # stays on disk is the bad copy, the message says so, and re-running the installer
 # repairs it.
 require_faithful_opencode_plugin() {
-    if cmp -s "$PLUGIN_SOURCE_PATH" "$PLUGIN_PATH"; then
+    # cmp 的結束碼是三態，不是布林：0＝相同、1＝內容不同、>=2＝比對本身跑不起來
+    # （cmp 不存在、檔案讀不到…）。把 >=2 也當成「不同」，就是拿一個從未發生的診斷
+    # 去中止一次完全健康的安裝——實測（PATH 上放一個 exit 127 的 cmp）：外掛位元完美
+    # 地落地了，安裝卻中止、runtime hook 從此沒被裝上，訊息還說「可能只寫了一半」。
+    # hook_is_trustworthy 用「正向控制」處理同一個問題（分不出候選檔壞掉與探針壞掉
+    # 就會誤判）；外掛這側沒有等價機制，所以只能靠 cmp 自己的結束碼把兩者分開。
+    # 「跑不起來」時的正確行為是退回未驗證並說實話，而不是宣稱不符：這條路徑上沒有
+    # 任何證據指向外掛有問題，中止只會製造一個假的失敗。
+    # cmp's exit status is tri-state, not boolean: 0 identical, 1 contents differ,
+    # >=2 the comparison itself could not run (no cmp on the machine, unreadable
+    # file, ...). Treating >=2 as "different" aborts a perfectly healthy install with
+    # a diagnosis that never happened — measured with an `exit 127` cmp on PATH: the
+    # plugin landed byte-perfect, the install aborted anyway, the runtime hook was
+    # never installed, and the message claimed a partial copy.
+    # hook_is_trustworthy solves the same problem with a positive control (failing to
+    # separate "the candidate is bad" from "the probe is broken" produces exactly
+    # this misdiagnosis); the plugin side has no equivalent, so cmp's own exit status
+    # is the only thing that can tell the two apart.
+    # When it cannot run, the correct behaviour is to degrade to unverified and say
+    # so, not to assert a mismatch: nothing on this path is evidence against the
+    # plugin, and aborting would manufacture a failure.
+    local status=0
+    cmp -s "$PLUGIN_SOURCE_PATH" "$PLUGIN_PATH" || status=$?
+
+    if [ "$status" -eq 0 ]; then
+        return 0
+    fi
+
+    if [ "$status" -ge 2 ]; then
+        warning "無法驗證 OpenCode 外掛的複製結果（比對工具無法執行），已在未驗證的情況下繼續：$PLUGIN_PATH"
+        warning "Could not verify the OpenCode plugin copy (the comparison tool could not run); continuing unverified: $PLUGIN_PATH"
         return 0
     fi
 
