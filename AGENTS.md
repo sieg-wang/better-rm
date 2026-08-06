@@ -171,11 +171,35 @@ were fixed on 2026-08-04 and are no longer open. What replaced them:
   with no output, which the contract reads as allow-everything. The guard was
   fully disarmed while the install reported success.
   `require_verified_opencode_runtime` now runs the same check after both of that
-  path's writes. It adds no runtime requirement: when the probe cannot run,
-  `hook_is_trustworthy` degrades to "byte-identical to the source" and
-  `OPENCODE_RUNTIME_SOURCE_PATH` *is* `HOOK_SOURCE_PATH`, so a machine with no
-  usable `node` still installs (measured: healthy install exit 0 with the
-  byte-comparison warning, truncated install exit 1 with the stub in place).
+  path's writes.
+- **What each opencode guard actually needs, measured.** The runtime guard has two
+  verifiers and needs **either**: the behavioural probe (`node`) or the byte
+  comparison (`cmp`, against `OPENCODE_RUNTIME_SOURCE_PATH`, which *is*
+  `HOOK_SOURCE_PATH`). The plugin guard has only `cmp`. Neither is an absolute
+  requirement, because both guards read `cmp`'s status as the tri-state it is:
+
+  | available | runtime hook | plugin |
+  |---|---|---|
+  | `node` + `cmp` | probe, then `cmp` as fallback | `cmp` |
+  | `cmp` only | `cmp`, with the byte-comparison warning | `cmp` |
+  | `node` only | probe | warns "could not verify", proceeds |
+  | neither | warns "could not verify", proceeds | warns "could not verify", proceeds |
+
+  Evidence of corruption always fails closed; absence of measurement never does.
+  Measured healthy installs exit 0 in all four rows with both files genuine, which
+  matches main. Measured corrupt installs still exit 1 wherever any verifier can
+  run — including "no `node`, `cmp` present, truncated runtime hook", which leaves
+  the fail-closed stub.
+- **`cmp`'s exit status is tri-state, not boolean: 0 same, 1 different, ≥2 the
+  comparison could not run.** Both guards shipped briefly with `≥2` folded into
+  "different", and that abort produced a *false diagnosis*: with an `exit 127`
+  `cmp` on `PATH` the plugin landed byte-perfect, the install aborted anyway, the
+  runtime hook was never installed, and the message said "it may be a partial
+  copy". The threshold is pinned at exactly **2**, not at some larger number: an
+  actual `cmp` error returns 2, and 127 is only the missing-binary case, so a `≥3`
+  threshold misreports the most common error code as a mismatch. A same-week
+  sibling of this bug appeared in `launchd-tools` (`! cmp -s … 2>/dev/null`), so it
+  is worth stating flatly: never use `cmp` as a boolean.
 - **Get the trigger condition right: a full disk is LOUD, not silent.** Measured
   on both trees, a `cp` that fails with ENOSPC exits non-zero, lands nothing, and
   the install exits 1 on every agent including `opencode`. The silent shape is
@@ -185,7 +209,8 @@ were fixed on 2026-08-04 and are no longer open. What replaced them:
   can leave a truncated file at exit 0"; that was measured false.
 - **What the plugin's check does and does not do.** `require_faithful_opencode_plugin`
   compares the published plugin against its source after the copy, so a partial
-  write aborts loudly instead of landing silently. It proves the copy is faithful,
+  write aborts loudly instead of landing silently whenever `cmp` can run (see the
+  table above for what happens when it cannot). It proves the copy is faithful,
   not that the plugin protects anything — the plugin is TypeScript and a
   behavioural probe would need a TypeScript runtime the installer does not
   require, so the source's own correctness rests on the bundled copy's

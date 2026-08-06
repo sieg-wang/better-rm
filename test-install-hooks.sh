@@ -1354,6 +1354,45 @@ assert_contains "opencode says out loud that it could not verify the runtime hoo
 assert_not_contains "opencode does not claim a fail-closed stub when it merely could not measure" \
     "$OPENCODE_NOVERIFY_OUTPUT" "fails closed"
 
+# 邊界必須釘在 2，不是「某個很大的數」。POSIX 與 GNU 的 cmp 都以 >1 表示「比對本身
+# 出錯」，而實際出錯時回的就是 **2**（檔案開不起來之類）；127 只是「找不到執行檔」這
+# 一種。上面的測試只用 127，於是把門檻寫成 >=3 的實作照樣全綠——那個實作會把最常見
+# 的 cmp 錯誤碼當成「內容不同」，正是這一輪修掉的假診斷又回來一次。
+# The boundary has to be pinned at 2, not at "some large number". POSIX and GNU cmp
+# both use >1 for "the comparison itself errored", and the status an actual error
+# yields is **2** (an unopenable file, ...); 127 is only the missing-binary case. The
+# tests above use 127 alone, so an implementation with the threshold at >=3 stays
+# green while misreporting the most common cmp error code as a content mismatch —
+# exactly the false diagnosis this round removed.
+OPENCODE_CMP2_PROJECT="$TMP_ROOT/opencode-cmp-exit2-project"
+make_repo "$OPENCODE_CMP2_PROJECT"
+OPENCODE_CMP2_BIN="$TMP_ROOT/opencode-cmp-exit2-bin"
+mkdir -p "$OPENCODE_CMP2_BIN"
+printf '#!/bin/sh\nexit 2\n' > "$OPENCODE_CMP2_BIN/cmp"
+printf '#!/bin/sh\nexit 127\n' > "$OPENCODE_CMP2_BIN/node"
+chmod +x "$OPENCODE_CMP2_BIN/cmp" "$OPENCODE_CMP2_BIN/node"
+OPENCODE_CMP2_PLUGIN="$OPENCODE_CMP2_PROJECT/.opencode/plugins/protect-important-paths.ts"
+OPENCODE_CMP2_RUNTIME="$OPENCODE_CMP2_PROJECT/hooks/protect-important-paths.js"
+OPENCODE_CMP2_STATUS=0
+OPENCODE_CMP2_OUTPUT=$(
+    cd "$OPENCODE_CMP2_PROJECT" &&
+    PATH="$OPENCODE_CMP2_BIN:$PATH" HOME="$TMP_ROOT/opencode-cmp-exit2-home" \
+        CLAUDE_CONFIG_DIR= "$INSTALLER" -a opencode 2>&1
+) || OPENCODE_CMP2_STATUS=$?
+if [ "$OPENCODE_CMP2_STATUS" -eq 0 ]; then
+    pass "opencode installs when cmp errors with its canonical status 2"
+else
+    fail "opencode installs when cmp errors with its canonical status 2"
+fi
+assert_equal "opencode lands the genuine plugin when cmp errors with status 2" \
+    "$OPENCODE_GENUINE_PLUGIN_HASH" \
+    "$([ -f "$OPENCODE_CMP2_PLUGIN" ] && file_hash "$OPENCODE_CMP2_PLUGIN" || echo missing)"
+assert_equal "opencode lands the genuine runtime hook when cmp errors with status 2" \
+    "$(file_hash "$SCRIPT_DIR/hooks/protect-important-paths.js")" \
+    "$([ -f "$OPENCODE_CMP2_RUNTIME" ] && file_hash "$OPENCODE_CMP2_RUNTIME" || echo missing)"
+assert_not_contains "opencode never reports a cmp error as a content mismatch" \
+    "$OPENCODE_CMP2_OUTPUT" "does not match its source"
+
 # 「探測跑不起來就放行」是錯的近似解：只要 cmp 還在，截斷的複製就必須被抓到。
 # 沒有 node、但有 cmp，而且複製確實壞掉——這一組必須 fail-closed。
 # "Accept whenever the probe is unavailable" is the wrong approximation: while cmp
