@@ -1182,6 +1182,121 @@ EOF
     chmod +x "$bin_dir/cp"
 }
 
+# $1 bin dir, $2 destination the copy must silently skip, $3 hit log
+# 與 make_corrupting_cp_bin 的差別是關鍵：那個留下一個空檔（目的地存在），這個
+# 什麼都不建立（目的地不存在）。兩者都是「cp 回報成功卻沒把位元組放上去」，但後者
+# 會讓 `cmp -s 來源 <不存在>` 回傳 2 —— 與「cmp 跑不起來」同一個結束碼。
+# The difference from make_corrupting_cp_bin is the whole point: that one leaves an
+# empty file (destination exists), this one creates nothing (destination absent).
+# Both are "cp reported success without landing the bytes", but the latter makes
+# `cmp -s source <missing>` return 2 — the same status as "cmp could not run".
+make_vanishing_cp_bin() {
+    local bin_dir="$1"
+    local victim="$2"
+    local hit_log="$3"
+    mkdir -p "$bin_dir"
+    : > "$hit_log"
+    cat > "$bin_dir/cp" <<EOF
+#!/bin/sh
+dest=\$(eval echo "\\\${\$#}")
+if [ "\$dest" = "$victim" ]; then
+    printf '%s\n' "\$dest" >> "$hit_log"
+    exit 0
+fi
+exec /bin/cp "\$@"
+EOF
+    chmod +x "$bin_dir/cp"
+}
+
+# cmp 的 exit 2 有兩個成因，而其中一個正是守衛存在的理由：運算元不存在。一個回報
+# 成功卻什麼都沒建立的 cp，會讓 `cmp -s 來源 <不存在>` 回傳 2，於是「>=2 就是比對
+# 工具跑不起來」這個讀法會把它當成無法測量而放行 —— 安裝印出「Created OpenCode
+# plugin」、exit 0，磁碟上卻沒有外掛，OpenCode 零保護。那正好打敗守衛自己寫下的目的
+# （cp 的 exit status 證明不了位元組落地，這個比對可以）。
+# 這裡不靠「窮舉哪些狀況會讓 cmp 回 2」來修：目的地不存在本身就是「位元組沒落地」
+# 的直接證據，先確認它存在再談比對。
+# cmp's exit 2 has two causes, and one of them is the very thing the guard exists to
+# catch: a missing operand. A cp that reports success while creating nothing makes
+# `cmp -s source <missing>` return 2, so reading ">=2 means cmp could not run" treats
+# it as unmeasurable and lets it through — the install prints "Created OpenCode
+# plugin", exits 0, and there is no plugin on disk at all. That defeats the guard's
+# own stated purpose (cp's exit status cannot prove the bytes landed, this
+# comparison can).
+# The fix is not an enumeration of what makes cmp return 2: a missing destination is
+# itself direct evidence the bytes did not land, so establish that it exists first.
+OPENCODE_VANISH_PLUGIN_PROJECT="$TMP_ROOT/opencode-vanish-plugin-project"
+make_repo "$OPENCODE_VANISH_PLUGIN_PROJECT"
+OPENCODE_VANISH_PLUGIN="$OPENCODE_VANISH_PLUGIN_PROJECT/.opencode/plugins/protect-important-paths.ts"
+OPENCODE_VANISH_PLUGIN_HITS="$TMP_ROOT/opencode-vanish-plugin.hits"
+make_vanishing_cp_bin "$TMP_ROOT/opencode-vanish-plugin-bin" \
+    "$(cd "$OPENCODE_VANISH_PLUGIN_PROJECT" && pwd -P)/.opencode/plugins/protect-important-paths.ts" \
+    "$OPENCODE_VANISH_PLUGIN_HITS"
+OPENCODE_VANISH_PLUGIN_STATUS=0
+OPENCODE_VANISH_PLUGIN_OUTPUT=$(
+    cd "$OPENCODE_VANISH_PLUGIN_PROJECT" &&
+    PATH="$TMP_ROOT/opencode-vanish-plugin-bin:$PATH" HOME="$TMP_ROOT/opencode-vanish-plugin-home" \
+        CLAUDE_CONFIG_DIR= "$INSTALLER" -a opencode 2>&1
+) || OPENCODE_VANISH_PLUGIN_STATUS=$?
+if [ -s "$OPENCODE_VANISH_PLUGIN_HITS" ]; then
+    pass "the vanishing plugin copy was actually injected"
+else
+    fail "the vanishing plugin copy was actually injected"
+fi
+if [ "$OPENCODE_VANISH_PLUGIN_STATUS" -ne 0 ]; then
+    pass "opencode aborts when the plugin copy lands nothing at all"
+else
+    fail "opencode aborts when the plugin copy lands nothing at all"
+fi
+assert_contains "opencode says the plugin copy wrote nothing rather than blaming the comparison" \
+    "$OPENCODE_VANISH_PLUGIN_OUTPUT" "wrote nothing"
+assert_not_contains "opencode never calls a missing plugin an unverifiable one" \
+    "$OPENCODE_VANISH_PLUGIN_OUTPUT" "continuing unverified"
+assert_not_contains "opencode never reports creating a plugin that is not there" \
+    "$OPENCODE_VANISH_PLUGIN_OUTPUT" "Created OpenCode plugin"
+
+# runtime hook 同形。node 不在時特別明顯：探測跑不起來 → 落到 cmp → 運算元不存在
+# → 2 → 被當成「量不到」而放行，於是 exit 0 但執行位置上根本沒有 hook。
+# Same shape for the runtime hook, and most visible with node absent: the probe
+# cannot run, so it falls to cmp, whose operand does not exist, which returns 2 and
+# is read as "unmeasurable" — exit 0 with no hook at the executing location at all.
+OPENCODE_VANISH_RUNTIME_PROJECT="$TMP_ROOT/opencode-vanish-runtime-project"
+make_repo "$OPENCODE_VANISH_RUNTIME_PROJECT"
+OPENCODE_VANISH_RUNTIME="$OPENCODE_VANISH_RUNTIME_PROJECT/hooks/protect-important-paths.js"
+OPENCODE_VANISH_RUNTIME_HITS="$TMP_ROOT/opencode-vanish-runtime.hits"
+make_vanishing_cp_bin "$TMP_ROOT/opencode-vanish-runtime-bin" \
+    "$(cd "$OPENCODE_VANISH_RUNTIME_PROJECT" && pwd -P)/hooks/protect-important-paths.js" \
+    "$OPENCODE_VANISH_RUNTIME_HITS"
+printf '#!/bin/sh\nexit 127\n' > "$TMP_ROOT/opencode-vanish-runtime-bin/node"
+chmod +x "$TMP_ROOT/opencode-vanish-runtime-bin/node"
+OPENCODE_VANISH_RUNTIME_STATUS=0
+OPENCODE_VANISH_RUNTIME_OUTPUT=$(
+    cd "$OPENCODE_VANISH_RUNTIME_PROJECT" &&
+    PATH="$TMP_ROOT/opencode-vanish-runtime-bin:$PATH" HOME="$TMP_ROOT/opencode-vanish-runtime-home" \
+        CLAUDE_CONFIG_DIR= "$INSTALLER" -a opencode 2>&1
+) || OPENCODE_VANISH_RUNTIME_STATUS=$?
+if [ -s "$OPENCODE_VANISH_RUNTIME_HITS" ]; then
+    pass "the vanishing runtime copy was actually injected"
+else
+    fail "the vanishing runtime copy was actually injected"
+fi
+if [ "$OPENCODE_VANISH_RUNTIME_STATUS" -ne 0 ]; then
+    pass "opencode aborts when the runtime copy lands nothing at all"
+else
+    fail "opencode aborts when the runtime copy lands nothing at all"
+fi
+# 缺席的 hook 在契約上就是放行（PreToolUse 找不到檔案會以非零結束，那是「非阻擋
+# 錯誤」，工具照跑），所以這條路徑必須留下 fail-closed stub，不能只是中止。
+# An absent hook is an allow under the contract (PreToolUse exits non-zero when the
+# file is missing, which is a NON-blocking error and the tool still runs), so this
+# path has to leave the fail-closed stub rather than merely abort.
+if [ -f "$OPENCODE_VANISH_RUNTIME" ] && ! hook_is_permissive "$OPENCODE_VANISH_RUNTIME"; then
+    pass "opencode leaves a fail-closed stub when the runtime copy lands nothing"
+else
+    fail "opencode leaves a fail-closed stub when the runtime copy lands nothing"
+fi
+assert_not_contains "opencode never reports creating a runtime hook that is not there" \
+    "$OPENCODE_VANISH_RUNTIME_OUTPUT" "Created OpenCode runtime hook"
+
 OPENCODE_TRUNC_RUNTIME_PROJECT="$TMP_ROOT/opencode-truncated-runtime-project"
 make_repo "$OPENCODE_TRUNC_RUNTIME_PROJECT"
 OPENCODE_TRUNC_RUNTIME="$OPENCODE_TRUNC_RUNTIME_PROJECT/hooks/protect-important-paths.js"
@@ -1296,6 +1411,13 @@ assert_equal "opencode still installs the runtime hook when cmp cannot run" \
     "$([ -f "$OPENCODE_NOCMP_RUNTIME" ] && file_hash "$OPENCODE_NOCMP_RUNTIME" || echo missing)"
 assert_not_contains "opencode never claims a mismatch it could not measure" \
     "$OPENCODE_NOCMP_OUTPUT" "does not match its source"
+# 「大聲說出來」是這個放行的另一半契約：未驗證卻安靜通過，與驗過了對使用者沒有區別。
+# runtime 那側早有對應斷言，外掛這側原本沒有，於是刪掉這行警告的 mutant 全綠。
+# "Say it out loud" is the other half of this pass-through: an unverified install that
+# stays silent is indistinguishable from a verified one. The runtime side already had
+# this assertion, the plugin side did not, so a mutant deleting the warning stayed green.
+assert_contains "opencode says out loud that it could not verify the plugin copy" \
+    "$OPENCODE_NOCMP_OUTPUT" "Could not verify the OpenCode plugin copy"
 
 # runtime 守衛有兩個驗證器：行為探測（需要 node）與位元比對（需要 cmp）。兩個都在
 # 時當然要驗；只剩一個時用剩下的那個。兩個都跑不起來，就沒有任何證據指向這份複製
@@ -1353,6 +1475,47 @@ assert_contains "opencode says out loud that it could not verify the runtime hoo
 # here would mean the abort path ran and this scenario never returned to installable.
 assert_not_contains "opencode does not claim a fail-closed stub when it merely could not measure" \
     "$OPENCODE_NOVERIFY_OUTPUT" "fails closed"
+
+# runtime 的 pass-through 掛在 HOOK_PROBE_UNAVAILABLE 底下，那個條件本身要被釘住：
+# 拿掉它，cmp 的結束碼就會在「探測跑得起來而且說這份 hook 不擋」的情況下也被採信，
+# 於是 cmp 不在的機器上，一份被截斷的 hook 會以 exit 0 通過。node 正常、cmp 不在、
+# hook 被截斷——這一組必須 fail-closed，而且只有保留那個條件才會。
+# The runtime pass-through sits under HOOK_PROBE_UNAVAILABLE, and that condition needs
+# pinning: remove it and cmp's status is believed even when the probe DID run and said
+# the hook does not deny, so on a machine without cmp a truncated hook passes at exit 0.
+# node working, cmp absent, hook truncated — this combination must fail closed, and only
+# keeping that condition makes it.
+OPENCODE_NOCMP_TRUNC_PROJECT="$TMP_ROOT/opencode-no-cmp-truncated-project"
+make_repo "$OPENCODE_NOCMP_TRUNC_PROJECT"
+OPENCODE_NOCMP_TRUNC_RUNTIME="$OPENCODE_NOCMP_TRUNC_PROJECT/hooks/protect-important-paths.js"
+OPENCODE_NOCMP_TRUNC_HITS="$TMP_ROOT/opencode-no-cmp-truncated.hits"
+make_corrupting_cp_bin "$TMP_ROOT/opencode-no-cmp-truncated-bin" \
+    "$(cd "$OPENCODE_NOCMP_TRUNC_PROJECT" && pwd -P)/hooks/protect-important-paths.js" \
+    "$OPENCODE_NOCMP_TRUNC_HITS"
+printf '#!/bin/sh\nexit 127\n' > "$TMP_ROOT/opencode-no-cmp-truncated-bin/cmp"
+chmod +x "$TMP_ROOT/opencode-no-cmp-truncated-bin/cmp"
+OPENCODE_NOCMP_TRUNC_STATUS=0
+(
+    cd "$OPENCODE_NOCMP_TRUNC_PROJECT" &&
+    PATH="$TMP_ROOT/opencode-no-cmp-truncated-bin:$PATH" \
+        HOME="$TMP_ROOT/opencode-no-cmp-truncated-home" \
+        CLAUDE_CONFIG_DIR= "$INSTALLER" -a opencode
+) >/dev/null 2>&1 || OPENCODE_NOCMP_TRUNC_STATUS=$?
+if [ -s "$OPENCODE_NOCMP_TRUNC_HITS" ]; then
+    pass "the no-cmp runtime truncation was actually injected"
+else
+    fail "the no-cmp runtime truncation was actually injected"
+fi
+if [ "$OPENCODE_NOCMP_TRUNC_STATUS" -ne 0 ]; then
+    pass "opencode fails closed on a truncated runtime hook when only the probe is available"
+else
+    fail "opencode fails closed on a truncated runtime hook when only the probe is available"
+fi
+if [ -f "$OPENCODE_NOCMP_TRUNC_RUNTIME" ] && hook_is_permissive "$OPENCODE_NOCMP_TRUNC_RUNTIME"; then
+    fail "opencode leaves no allow-everything runtime hook when only the probe is available"
+else
+    pass "opencode leaves no allow-everything runtime hook when only the probe is available"
+fi
 
 # 邊界必須釘在 2，不是「某個很大的數」。POSIX 與 GNU 的 cmp 都以 >1 表示「比對本身
 # 出錯」，而實際出錯時回的就是 **2**（檔案開不起來之類）；127 只是「找不到執行檔」這

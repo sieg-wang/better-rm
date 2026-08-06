@@ -907,6 +907,24 @@ validate_opencode_destination() {
 require_verified_opencode_runtime() {
     local backup_path="${1:-}"
 
+    # 目的地不存在＝位元組沒落地的直接證據，而且缺席的 hook 在契約上就是「放行一切」
+    # （PreToolUse 找不到檔案會以非零結束，那是「非阻擋錯誤」，工具照跑）。這個情況
+    # 一定會走到下面的 fail-closed stub 並 exit 1：node 正常時 hook_is_trustworthy
+    # 會直接判否；node 不在時則由下面那個 `-f` 條件擋住「無法驗證就放行」那條路。
+    # 這裡先把真正的原因說出來，否則使用者只會看到含糊的「無法通過驗證」。
+    # A missing destination is direct evidence the bytes did not land, and an absent
+    # hook is allow-everything under the contract (PreToolUse exits non-zero when the
+    # file is missing, which is a NON-blocking error, so the tool still runs). This
+    # case always reaches the fail-closed stub and exit 1 below: with node working
+    # hook_is_trustworthy rejects it outright, and with node absent the `-f` conjunct
+    # below blocks the "cannot verify, so proceed" path.
+    # Naming the real cause here matters — otherwise the user only sees a vague
+    # "could not be verified".
+    if [ ! -f "$OPENCODE_RUNTIME_PATH" ]; then
+        error "OpenCode 共用 hook 沒有出現在執行位置：複製回報成功卻沒有寫出任何東西：$OPENCODE_RUNTIME_PATH"
+        error "The OpenCode runtime hook is not at its executing location: the copy reported success but wrote nothing: $OPENCODE_RUNTIME_PATH"
+    fi
+
     HOOK_PROBE_UNAVAILABLE=false
     if hook_is_trustworthy "$OPENCODE_RUNTIME_PATH"; then
         if [ "$HOOK_PROBE_UNAVAILABLE" = true ]; then
@@ -942,7 +960,11 @@ require_verified_opencode_runtime() {
     if [ "$HOOK_PROBE_UNAVAILABLE" = true ]; then
         local compare_status=0
         cmp -s "$OPENCODE_RUNTIME_SOURCE_PATH" "$OPENCODE_RUNTIME_PATH" || compare_status=$?
-        if [ "$compare_status" -ge 2 ]; then
+        # `-f` 是關鍵的合取項：cmp 對「不存在的運算元」同樣回 2，少了它，一個什麼都
+        # 沒建立的複製會被當成「量不到」而放行。
+        # The `-f` conjunct is essential: cmp also returns 2 for a missing operand, and
+        # without it a copy that created nothing would be waved through as unmeasurable.
+        if [ "$compare_status" -ge 2 ] && [ -f "$OPENCODE_RUNTIME_PATH" ]; then
             warning "無法驗證 OpenCode 共用 hook：自我檢測與位元比對都無法執行，已在未驗證的情況下繼續：$OPENCODE_RUNTIME_PATH"
             warning "Could not verify the OpenCode runtime hook: neither the self-check nor the byte comparison could run; continuing unverified: $OPENCODE_RUNTIME_PATH"
             warning "安裝可用的 node 或 cmp 後重跑安裝程式，即可取得驗證"
@@ -1008,6 +1030,28 @@ require_faithful_opencode_plugin() {
     # When it cannot run, the correct behaviour is to degrade to unverified and say
     # so, not to assert a mismatch: nothing on this path is evidence against the
     # plugin, and aborting would manufacture a failure.
+    # 先確認目的地存在，再談比對。cmp 的 exit 2 有兩個成因，其中一個正是這個守衛存在
+    # 的理由：運算元不存在。一個回報成功卻什麼都沒建立的 cp，會讓
+    # `cmp -s 來源 <不存在>` 回傳 2，若把它讀成「比對工具跑不起來」就會放行 ——
+    # 安裝印出「Created OpenCode plugin」、exit 0，磁碟上卻沒有外掛。
+    # 這裡不靠窮舉「哪些狀況會讓 cmp 回 2」：目的地不存在本身就是「位元組沒落地」的
+    # 直接證據，與任何比對工具是否可用無關。
+    # Establish the destination exists before comparing anything. cmp's exit 2 has two
+    # causes and one of them is the very thing this guard exists to catch: a missing
+    # operand. A cp that reports success while creating nothing makes
+    # `cmp -s source <missing>` return 2, and reading that as "the comparison tool
+    # could not run" lets it through — the install prints "Created OpenCode plugin",
+    # exits 0, and there is no plugin on disk.
+    # This does not enumerate what makes cmp return 2: a missing destination is itself
+    # direct evidence the bytes did not land, whatever tooling is available.
+    if [ ! -f "$PLUGIN_PATH" ]; then
+        error "OpenCode 外掛沒有出現在執行位置：複製回報成功卻沒有寫出任何東西：$PLUGIN_PATH"
+        error "The OpenCode plugin is not at its executing location: the copy reported success but wrote nothing: $PLUGIN_PATH"
+        error "磁碟上沒有外掛，OpenCode 底下就沒有任何保護；請重新執行安裝程式"
+        error "With no plugin on disk OpenCode has no protection at all; re-run the installer"
+        exit 1
+    fi
+
     local status=0
     cmp -s "$PLUGIN_SOURCE_PATH" "$PLUGIN_PATH" || status=$?
 
