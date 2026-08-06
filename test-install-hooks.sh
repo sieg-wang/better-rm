@@ -1296,6 +1296,15 @@ else
 fi
 assert_not_contains "opencode never reports creating a runtime hook that is not there" \
     "$OPENCODE_VANISH_RUNTIME_OUTPUT" "Created OpenCode runtime hook"
+# 與外掛那側對稱：不能只證明「有中止、有 stub」，還要證明訊息說出了真正的原因。少了
+# 這條，把那段誠實訊息整個刪掉的 mutant 仍然全綠 —— 使用者只會看到含糊的
+# 「無法通過驗證」，而真正發生的是「複製什麼都沒寫出來」。
+# Symmetric with the plugin side: proving "it aborted and left a stub" is not enough,
+# the message must also name the real cause. Without this a mutant deleting that
+# honest message stays green, leaving the user with a vague "could not be verified"
+# when what actually happened is that the copy wrote nothing.
+assert_contains "opencode says the runtime copy wrote nothing rather than blaming the comparison" \
+    "$OPENCODE_VANISH_RUNTIME_OUTPUT" "wrote nothing"
 
 OPENCODE_TRUNC_RUNTIME_PROJECT="$TMP_ROOT/opencode-truncated-runtime-project"
 make_repo "$OPENCODE_TRUNC_RUNTIME_PROJECT"
