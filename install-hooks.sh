@@ -879,6 +879,90 @@ validate_opencode_destination() {
     fi
 }
 
+# 驗證剛寫到 OpenCode 執行位置的共用 runtime hook。
+# 為什麼 opencode 需要自己一份：其他八個 agent 都走 resolve_shared_hook_for_settings，
+# 第一次安裝會經過 hook_is_trustworthy，驗不過就寫 fail-closed stub 並中止；
+# install_opencode_hooks 不經過那個函式，於是這條路徑上只有一個裸 `cp`。實測（`cp`
+# 回報成功卻沒寫入任何內容）：claude／codex／cursor／grok 全部 exit 1 並留下 stub，
+# opencode 是 exit 0 加一個 0 位元組的 runtime hook —— 而 0 位元組的 hook 以 exit 0
+# 與空輸出結束，在契約上就是「放行一切」。這支工具存在的理由就是防刪，所以那是必須
+# 關掉的洞，不是可以只寫進文件的殘留。
+# 這裡沒有引入新的執行環境需求：hook_is_trustworthy 在探測跑不起來時會退回
+# 「與來源位元組相同」，而 OPENCODE_RUNTIME_SOURCE_PATH 就是 HOOK_SOURCE_PATH，
+# 所以沒有 node 的機器照樣裝得起來，只是改用 cmp 驗——正常安裝不會被這道檢查否決。
+# Verify the shared runtime hook just written to OpenCode's executing location.
+# Why opencode needs its own: the other eight agents go through
+# resolve_shared_hook_for_settings, whose first install runs hook_is_trustworthy and
+# writes the fail-closed stub before aborting on failure. install_opencode_hooks
+# does not call that function, so this path had a bare cp and nothing else.
+# Measured with a cp that reports success while writing nothing:
+# claude/codex/cursor/grok all exit 1 and leave the stub, opencode exited 0 with a
+# 0-byte runtime hook — and a 0-byte hook exits 0 with no output, which the contract
+# reads as allow-everything. Blocking deletions is what this tool is for, so that is
+# a hole to close, not a residual to write down.
+# No new runtime requirement is introduced: when the probe cannot run,
+# hook_is_trustworthy degrades to "byte-identical to the source", and
+# OPENCODE_RUNTIME_SOURCE_PATH is HOOK_SOURCE_PATH, so a machine without node still
+# installs — verified by cmp instead. A healthy install is never denied by this.
+require_verified_opencode_runtime() {
+    local backup_path="${1:-}"
+
+    HOOK_PROBE_UNAVAILABLE=false
+    if hook_is_trustworthy "$OPENCODE_RUNTIME_PATH"; then
+        if [ "$HOOK_PROBE_UNAVAILABLE" = true ]; then
+            warning "無法執行 hook 自我檢測，已改以位元組比對確認與來源完全相同"
+            warning "Could not run the hook self-check; verified byte-identical to the source instead"
+        fi
+        return 0
+    fi
+
+    # 訊息必須跟著 stub 是否真的寫成功而分歧：stub 寫失敗時磁碟上留下的是未經驗證
+    # 的內容（可能放行一切），此時再印「已改為 fail-closed」就是騙人。
+    # The message branches on whether the stub was actually written: if it was not,
+    # what remains on disk is unverified and may allow everything, and claiming "it
+    # now fails closed" there would be a lie.
+    if write_fail_closed_hook_stub "$OPENCODE_RUNTIME_PATH"; then
+        error "OpenCode 共用 hook 無法通過驗證，已改為 fail-closed（拒絕所有工具呼叫）：$OPENCODE_RUNTIME_PATH"
+        error "The OpenCode runtime hook could not be verified; it now fails closed (every tool call is denied): $OPENCODE_RUNTIME_PATH"
+    else
+        error "OpenCode 共用 hook 無法通過驗證，連 fail-closed stub 也寫不進去：$OPENCODE_RUNTIME_PATH 目前的內容可能會放行所有刪除"
+        error "The OpenCode runtime hook could not be verified and the fail-closed stub could not be written either; what is at $OPENCODE_RUNTIME_PATH may allow everything"
+    fi
+    if [ -n "$backup_path" ]; then
+        error "請從備份還原 / Restore it from the backup: $backup_path"
+    fi
+    exit 1
+}
+
+# 驗證剛寫到 OpenCode 執行位置的外掛確實與來源相同。
+# 外掛是 TypeScript，行為探測需要安裝程式並不要求的 TypeScript runtime，所以這裡驗
+# 的是「複製有沒有忠實落地」而不是「它有沒有保護作用」—— 來源本身的正確性由內嵌副本
+# 的 byte-identity 測試釘住。`cp` 的結束碼證明不了位元組落地，這一行才證明得了。
+# 界線講明白：驗不過就中止，但不會像 runtime hook 那樣留下 fail-closed 的替代品，
+# 因為那需要另造一份 TypeScript stub；磁碟上留下的是那份寫壞的外掛，訊息會說出來，
+# 使用者重跑安裝程式即可。
+# Verify the plugin just written to OpenCode's executing location matches its source.
+# The plugin is TypeScript and a behavioural probe would need a TypeScript runtime
+# the installer does not require, so what is checked is whether the copy landed
+# faithfully, not whether it protects anything — the source's own correctness is
+# pinned by the bundled copy's byte-identity test. cp's exit status cannot prove the
+# bytes landed; this comparison can.
+# Stated limit: a failure aborts but does NOT leave a fail-closed replacement the way
+# the runtime hook does, because that would need a separate TypeScript stub. What
+# stays on disk is the bad copy, the message says so, and re-running the installer
+# repairs it.
+require_faithful_opencode_plugin() {
+    if cmp -s "$PLUGIN_SOURCE_PATH" "$PLUGIN_PATH"; then
+        return 0
+    fi
+
+    error "OpenCode 外掛寫入後與來源不符，可能只寫了一半：$PLUGIN_PATH"
+    error "The OpenCode plugin does not match its source after the write; it may be a partial copy: $PLUGIN_PATH"
+    error "磁碟上的外掛不可信任，且不會自動修復；請重新執行安裝程式"
+    error "The plugin on disk is not trustworthy and is not repaired automatically; re-run the installer"
+    exit 1
+}
+
 # 以 Node.js 安全合併 JSON hook 設定
 # Safely merge JSON hook settings with Node.js
 merge_json_settings() {
@@ -1541,12 +1625,14 @@ install_opencode_hooks() {
             # chmod garbage and aborting the install midway). The shared-hook path
             # dropped stat for the same reason.
             cp "$PLUGIN_SOURCE_PATH" "$PLUGIN_PATH"
+            require_faithful_opencode_plugin
             success "已更新 OpenCode 插件：$PLUGIN_PATH"
             success "Updated OpenCode plugin: $PLUGIN_PATH"
             info "備份檔案 / Backup: $backup_path"
         fi
     else
         cp "$PLUGIN_SOURCE_PATH" "$PLUGIN_PATH"
+        require_faithful_opencode_plugin
         success "已建立 OpenCode 插件：$PLUGIN_PATH"
         success "Created OpenCode plugin: $PLUGIN_PATH"
     fi
@@ -1567,12 +1653,14 @@ install_opencode_hooks() {
             # As above: cp onto an existing file preserves mode and inode, so no
             # stat is needed — and stat here is not portable.
             cp "$OPENCODE_RUNTIME_SOURCE_PATH" "$OPENCODE_RUNTIME_PATH"
+            require_verified_opencode_runtime "$runtime_backup_path"
             success "已更新 OpenCode 共享 hook：$OPENCODE_RUNTIME_PATH"
             success "Updated OpenCode runtime hook: $OPENCODE_RUNTIME_PATH"
             info "備份檔案 / Backup: $runtime_backup_path"
         fi
     else
         cp "$OPENCODE_RUNTIME_SOURCE_PATH" "$OPENCODE_RUNTIME_PATH"
+        require_verified_opencode_runtime
         success "已建立 OpenCode 共享 hook：$OPENCODE_RUNTIME_PATH"
         success "Created OpenCode runtime hook: $OPENCODE_RUNTIME_PATH"
     fi

@@ -159,12 +159,39 @@ were fixed on 2026-08-04 and are no longer open. What replaced them:
   `resolve_opencode_plugin`'s *runtime hook* download branch was left alone for a
   different reason: `resolve_source_paths` already guarantees `HOOK_SOURCE_PATH`
   is readable before it runs, so that branch is unreachable.
-- **What the bundling does NOT cover.** It stops network content from becoming
-  the plugin; it does not check that the bytes reached the destination intact.
-  The plugin publish path is still a bare `cp` with no post-write comparison, so
-  a full disk or a filesystem error can still leave a truncated plugin at the
-  executing location with the install reporting success — the same shape the
-  runtime hook's first-install path already guards against and this one does not.
+- **`-a opencode` did not go through the shared-hook trust check at all.** The
+  other eight agents resolve their runtime hook through
+  `resolve_shared_hook_for_settings`, whose first install runs
+  `hook_is_trustworthy` and, on failure, writes the fail-closed stub and exits
+  non-zero. `install_opencode_hooks` never called that function, so publishing
+  `hooks/protect-important-paths.js` was a bare `cp` and nothing else. Measured
+  with a `cp` that reports success while writing nothing: `claude --global`,
+  `claude`, `codex`, `cursor` and `grok` all exited 1 leaving the stub, while
+  `opencode` exited **0 with a 0-byte runtime hook** — and a 0-byte hook exits 0
+  with no output, which the contract reads as allow-everything. The guard was
+  fully disarmed while the install reported success.
+  `require_verified_opencode_runtime` now runs the same check after both of that
+  path's writes. It adds no runtime requirement: when the probe cannot run,
+  `hook_is_trustworthy` degrades to "byte-identical to the source" and
+  `OPENCODE_RUNTIME_SOURCE_PATH` *is* `HOOK_SOURCE_PATH`, so a machine with no
+  usable `node` still installs (measured: healthy install exit 0 with the
+  byte-comparison warning, truncated install exit 1 with the stub in place).
+- **Get the trigger condition right: a full disk is LOUD, not silent.** Measured
+  on both trees, a `cp` that fails with ENOSPC exits non-zero, lands nothing, and
+  the install exits 1 on every agent including `opencode`. The silent shape is
+  the *other* one — a `cp` that reports success but writes nothing — which is
+  rare on a local filesystem and is the whole reason a write tool's exit status
+  cannot stand in for verification. Do not describe this residual as "a full disk
+  can leave a truncated file at exit 0"; that was measured false.
+- **What the plugin's check does and does not do.** `require_faithful_opencode_plugin`
+  compares the published plugin against its source after the copy, so a partial
+  write aborts loudly instead of landing silently. It proves the copy is faithful,
+  not that the plugin protects anything — the plugin is TypeScript and a
+  behavioural probe would need a TypeScript runtime the installer does not
+  require, so the source's own correctness rests on the bundled copy's
+  byte-identity test. Unlike the runtime hook, a failure leaves **no fail-closed
+  replacement**: that would need a separate TypeScript stub. The bad copy stays on
+  disk, the message says so, and re-running the installer repairs it.
 - **A broken `sed` extraction would misdirect.** `test-hooks.js` extracts
   `hook_denies_protected_deletion` and `write_fail_closed_hook_stub` from
   `install-hooks.sh` with a `sed` range ending at `/^}/`. Re-indenting the

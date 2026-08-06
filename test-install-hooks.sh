@@ -1105,6 +1105,134 @@ assert_equal "opencode offline install lands the genuine plugin" \
     "$OPENCODE_GENUINE_PLUGIN_HASH" \
     "$([ -f "$OPENCODE_OFFLINE_PLUGIN" ] && file_hash "$OPENCODE_OFFLINE_PLUGIN" || echo missing)"
 
+# ---------------------------------------------------------------------------
+# OpenCode publish integrity
+# ---------------------------------------------------------------------------
+# `-a opencode` 不經過 resolve_shared_hook_for_settings，所以 hook_is_trustworthy
+# 與 write_fail_closed_hook_stub 這道防線在這條路徑上從來沒有生效過：其他八個 agent
+# 的第一次安裝都會驗，opencode 只有一個裸 `cp`。實測（cp 回報成功卻沒寫入任何內容）
+# 的差異是決定性的：claude/codex/cursor/grok 全部 exit 1 並留下 fail-closed stub，
+# opencode 是 exit 0 加一個 0 位元組的 runtime hook —— 而 0 位元組的 hook 以 exit 0
+# 與空輸出結束，在契約上就是「放行一切」，也就是防護被完全解除卻回報成功。
+# 觸發條件要說準：磁碟滿是「大聲」的（`cp` 非零退出、什麼都沒落地、安裝 exit 1，
+# 兩棵樹皆然）。會安靜的是「`cp` 回報成功但寫入為空」，本機檔案系統上罕見，但這正是
+# 這道防線存在的理由 —— 寫入工具的回傳值本來就證明不了位元組有沒有落地。
+# `-a opencode` does not go through resolve_shared_hook_for_settings, so the
+# hook_is_trustworthy / write_fail_closed_hook_stub guard never applied on this
+# path: the other eight agents verify their first install, opencode had a bare cp.
+# Measured with a cp that reports success while writing nothing, the difference is
+# decisive: claude/codex/cursor/grok all exit 1 and leave the fail-closed stub,
+# opencode exited 0 with a 0-byte runtime hook — and a 0-byte hook exits 0 with no
+# output, which the contract reads as allow-everything, i.e. the guard fully
+# disarmed while reporting success.
+# The trigger has to be stated accurately: a full disk is LOUD (cp exits non-zero,
+# nothing lands, the install exits 1, on both trees). The silent shape is a cp that
+# reports success but writes nothing, which is rare on a local filesystem — and is
+# exactly why this guard exists, since a write tool's exit status can never prove
+# the bytes landed.
+# $1 bin dir, $2 destination to truncate (MUST be the physical path), $3 hit log
+make_truncating_cp_bin() {
+    local bin_dir="$1"
+    local victim="$2"
+    local hit_log="$3"
+    mkdir -p "$bin_dir"
+    : > "$hit_log"
+    # 必須以「最後一個參數」（目的地）判斷。runtime hook 的來源與目的地檔名完全
+    # 相同，比對任意參數會先打中來源，量到的就不是這條路徑了。
+    # 目的地必須是實體路徑：安裝程式用 `pwd -P` 解析專案根目錄，而 macOS 的
+    # $TMPDIR 是 /var/folders（symlink），安裝程式看到的是 /private/var/folders。
+    # 第一版比對 $TMPDIR 那串，於是替身一次都沒被走到，兩個測試都在「以為有截斷、
+    # 其實沒有」的情況下紅 —— 命中記錄就是為了讓那種失效大聲出來。
+    # The DESTINATION (last argument) is what must be matched. The runtime hook's
+    # source and destination share a filename, so matching any argument hits the
+    # source first and measures something else entirely.
+    # The destination must be the PHYSICAL path: the installer resolves the project
+    # root with `pwd -P`, and macOS $TMPDIR is /var/folders (a symlink), which the
+    # installer sees as /private/var/folders. The first version compared the
+    # $TMPDIR spelling, so the shim was never reached and both tests went red while
+    # nothing had actually been truncated. The hit log exists to make that failure
+    # mode loud instead of silent.
+    cat > "$bin_dir/cp" <<EOF
+#!/bin/sh
+dest=\$(eval echo "\\\${\$#}")
+if [ "\$dest" = "$victim" ]; then
+    printf '%s\n' "\$dest" >> "$hit_log"
+    : > "\$dest"
+    exit 0
+fi
+exec /bin/cp "\$@"
+EOF
+    chmod +x "$bin_dir/cp"
+}
+
+OPENCODE_TRUNC_RUNTIME_PROJECT="$TMP_ROOT/opencode-truncated-runtime-project"
+make_repo "$OPENCODE_TRUNC_RUNTIME_PROJECT"
+OPENCODE_TRUNC_RUNTIME="$OPENCODE_TRUNC_RUNTIME_PROJECT/hooks/protect-important-paths.js"
+OPENCODE_TRUNC_RUNTIME_HITS="$TMP_ROOT/opencode-trunc-runtime.hits"
+make_truncating_cp_bin "$TMP_ROOT/opencode-trunc-runtime-bin" \
+    "$(cd "$OPENCODE_TRUNC_RUNTIME_PROJECT" && pwd -P)/hooks/protect-important-paths.js" \
+    "$OPENCODE_TRUNC_RUNTIME_HITS"
+OPENCODE_TRUNC_RUNTIME_STATUS=0
+OPENCODE_TRUNC_RUNTIME_OUTPUT=$(
+    cd "$OPENCODE_TRUNC_RUNTIME_PROJECT" &&
+    PATH="$TMP_ROOT/opencode-trunc-runtime-bin:$PATH" HOME="$TMP_ROOT/opencode-trunc-runtime-home" \
+        CLAUDE_CONFIG_DIR= "$INSTALLER" -a opencode 2>&1
+) || OPENCODE_TRUNC_RUNTIME_STATUS=$?
+if [ -s "$OPENCODE_TRUNC_RUNTIME_HITS" ]; then
+    pass "the opencode runtime truncation was actually injected"
+else
+    fail "the opencode runtime truncation was actually injected"
+fi
+if [ "$OPENCODE_TRUNC_RUNTIME_STATUS" -ne 0 ]; then
+    pass "a truncated opencode runtime hook aborts instead of reporting success"
+else
+    fail "a truncated opencode runtime hook aborts instead of reporting success"
+fi
+if [ -f "$OPENCODE_TRUNC_RUNTIME" ] && hook_is_permissive "$OPENCODE_TRUNC_RUNTIME"; then
+    fail "a truncated opencode runtime hook never leaves an allow-everything hook"
+else
+    pass "a truncated opencode runtime hook never leaves an allow-everything hook"
+fi
+assert_contains "a truncated opencode runtime hook says it now fails closed" \
+    "$OPENCODE_TRUNC_RUNTIME_OUTPUT" "fails closed"
+
+# 外掛沒有行為探測可用（它是 TypeScript），但「複製過去的內容是否與來源相同」是
+# 驗得了的，而來源本身的正確性已由上面的 byte-identity 斷言釘住。這裡要求的只有
+# 一件事：靜默截斷不得以 exit 0 收場。
+# No behavioural probe is available for the plugin (it is TypeScript), but whether
+# the copy matches its source is checkable, and the source's own correctness is
+# pinned by the byte-identity assertions above. The requirement here is only that a
+# silent truncation must not end at exit 0.
+OPENCODE_TRUNC_PLUGIN_PROJECT="$TMP_ROOT/opencode-truncated-plugin-project"
+make_repo "$OPENCODE_TRUNC_PLUGIN_PROJECT"
+OPENCODE_TRUNC_PLUGIN="$OPENCODE_TRUNC_PLUGIN_PROJECT/.opencode/plugins/protect-important-paths.ts"
+OPENCODE_TRUNC_PLUGIN_HITS="$TMP_ROOT/opencode-trunc-plugin.hits"
+make_truncating_cp_bin "$TMP_ROOT/opencode-trunc-plugin-bin" \
+    "$(cd "$OPENCODE_TRUNC_PLUGIN_PROJECT" && pwd -P)/.opencode/plugins/protect-important-paths.ts" \
+    "$OPENCODE_TRUNC_PLUGIN_HITS"
+OPENCODE_TRUNC_PLUGIN_STATUS=0
+OPENCODE_TRUNC_PLUGIN_OUTPUT=$(
+    cd "$OPENCODE_TRUNC_PLUGIN_PROJECT" &&
+    PATH="$TMP_ROOT/opencode-trunc-plugin-bin:$PATH" HOME="$TMP_ROOT/opencode-trunc-plugin-home" \
+        CLAUDE_CONFIG_DIR= "$INSTALLER" -a opencode 2>&1
+) || OPENCODE_TRUNC_PLUGIN_STATUS=$?
+if [ -s "$OPENCODE_TRUNC_PLUGIN_HITS" ]; then
+    pass "the opencode plugin truncation was actually injected"
+else
+    fail "the opencode plugin truncation was actually injected"
+fi
+if [ "$OPENCODE_TRUNC_PLUGIN_STATUS" -ne 0 ]; then
+    pass "a truncated opencode plugin aborts instead of reporting success"
+else
+    fail "a truncated opencode plugin aborts instead of reporting success"
+fi
+if [ -f "$OPENCODE_TRUNC_PLUGIN" ] && [ ! -s "$OPENCODE_TRUNC_PLUGIN" ]; then
+    assert_contains "a truncated opencode plugin says the copy does not match its source" \
+        "$OPENCODE_TRUNC_PLUGIN_OUTPUT" "does not match its source"
+else
+    fail "a truncated opencode plugin says the copy does not match its source"
+fi
+
 # 第一次安裝（目的地不存在）走的是純 cp，完全沒有信任探測；hook_is_trustworthy
 # 只服務 refresh 路徑。cp 回報成功不代表寫進去的是完整內容：磁碟滿或檔案系統錯誤
 # 會留下 0 byte 的檔案，而那在契約上就是「放行一切」。
