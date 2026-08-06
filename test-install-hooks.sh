@@ -828,8 +828,19 @@ fi
 RELEASE_ASSET_DIR="$TMP_ROOT/release-assets"
 mkdir -p "$RELEASE_ASSET_DIR"
 cp "$SCRIPT_DIR/hooks/protect-important-paths.js" "$RELEASE_ASSET_DIR/protect-important-paths.js"
-cp "$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts" \
-    "$RELEASE_ASSET_DIR/opencode-protect-important-paths.ts"
+# 這個檔案是內嵌副本被釘住的那份正本。它不見時，套件原本會在下面的 cp 就被 set -e
+# 帶走，訊息是 `cp: ... No such file`：看起來像測試環境壞掉，而不是「正本不見了」。
+# 先斷言它存在、再讓後續的雜湊比對以 missing 乾淨地紅，失敗才會指向正確的地方。
+# This file is the original the bundled copy is pinned to. When it is missing the
+# suite used to die at the cp below under set -e with `cp: ... No such file`, which
+# reads as a broken test environment rather than a missing original. Assert it
+# first and let the hash comparisons fail cleanly against "missing" instead.
+OPENCODE_PLUGIN_SOURCE="$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts"
+assert_file "the OpenCode plugin source the bundled copy is pinned to exists" \
+    "$OPENCODE_PLUGIN_SOURCE"
+if [ -f "$OPENCODE_PLUGIN_SOURCE" ]; then
+    cp "$OPENCODE_PLUGIN_SOURCE" "$RELEASE_ASSET_DIR/opencode-protect-important-paths.ts"
+fi
 
 RELEASE_STUB_BIN="$TMP_ROOT/release-stub-bin"
 mkdir -p "$RELEASE_STUB_BIN"
@@ -1002,7 +1013,7 @@ cp "$SCRIPT_DIR/hooks/protect-important-paths.js" "$OPENCODE_DIST/hooks/protect-
 # 刻意不放 .opencode/：這正是會觸發外掛下載的發佈物形狀。
 # Deliberately no .opencode/: this is the distribution shape that triggered the
 # plugin download.
-OPENCODE_GENUINE_PLUGIN_HASH=$(file_hash "$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts")
+OPENCODE_GENUINE_PLUGIN_HASH=$([ -f "$OPENCODE_PLUGIN_SOURCE" ] && file_hash "$OPENCODE_PLUGIN_SOURCE" || echo missing)
 
 # $1 label, $2 poisoned release body, $3 a string that only the poisoned body contains
 assert_opencode_plugin_provenance() {
