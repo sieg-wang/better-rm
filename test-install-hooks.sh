@@ -1842,6 +1842,59 @@ assert_equal "opencode runtime hook is updated under a GNU-userland stat" \
 assert_equal "opencode plugin keeps its original mode" "640" "$(file_mode "$GNU_STAT_PLUGIN")"
 assert_equal "opencode runtime hook keeps its original mode" "640" "$(file_mode "$GNU_STAT_RUNTIME")"
 
+# A symlinked *ancestor* must not let a project-scoped install escape the Git root.
+# validate_opencode_destination only inspects the final component, which does not
+# exist yet when the parent is the link -- so before the containment check the
+# installer wrote both files outside the project and exited 0.
+OPENCODE_ANCESTOR_REPO="$TMP_ROOT/opencode-ancestor-plugin-project"
+make_repo "$OPENCODE_ANCESTOR_REPO"
+OUTSIDE_PLUGINS="$TMP_ROOT/outside-opencode-plugins"
+mkdir -p "$OUTSIDE_PLUGINS" "$OPENCODE_ANCESTOR_REPO/.opencode"
+ln -s "$OUTSIDE_PLUGINS" "$OPENCODE_ANCESTOR_REPO/.opencode/plugins"
+assert_failure "opencode rejects a symlinked plugin ancestor" \
+    bash -c "cd '$OPENCODE_ANCESTOR_REPO' && '$INSTALLER' -a opencode"
+if [ ! -e "$OUTSIDE_PLUGINS/protect-important-paths.ts" ]; then
+    pass "opencode symlinked plugin ancestor writes nothing outside the root"
+else
+    fail "opencode symlinked plugin ancestor writes nothing outside the root"
+fi
+if [ ! -e "$OPENCODE_ANCESTOR_REPO/hooks/protect-important-paths.js" ]; then
+    pass "opencode symlinked plugin ancestor leaves the runtime unwritten"
+else
+    fail "opencode symlinked plugin ancestor leaves the runtime unwritten"
+fi
+
+# Same for the runtime destination, and it must fail closed *before* the plugin
+# is written -- not after, which would leave a half-installed project.
+OPENCODE_ANCESTOR_RUNTIME_REPO="$TMP_ROOT/opencode-ancestor-runtime-project"
+make_repo "$OPENCODE_ANCESTOR_RUNTIME_REPO"
+OUTSIDE_HOOKS="$TMP_ROOT/outside-opencode-hooks"
+mkdir -p "$OUTSIDE_HOOKS"
+ln -s "$OUTSIDE_HOOKS" "$OPENCODE_ANCESTOR_RUNTIME_REPO/hooks"
+assert_failure "opencode rejects a symlinked runtime ancestor" \
+    bash -c "cd '$OPENCODE_ANCESTOR_RUNTIME_REPO' && '$INSTALLER' -a opencode"
+if [ ! -e "$OUTSIDE_HOOKS/protect-important-paths.js" ]; then
+    pass "opencode symlinked runtime ancestor writes nothing outside the root"
+else
+    fail "opencode symlinked runtime ancestor writes nothing outside the root"
+fi
+if [ ! -e "$OPENCODE_ANCESTOR_RUNTIME_REPO/.opencode/plugins/protect-important-paths.ts" ]; then
+    pass "opencode symlinked runtime ancestor leaves the plugin unwritten"
+else
+    fail "opencode symlinked runtime ancestor leaves the plugin unwritten"
+fi
+
+# Anti-tautology: containment is about where the path *lands*, not about the
+# presence of a symlink. An ancestor link that stays inside the root still installs.
+OPENCODE_INSIDE_LINK_REPO="$TMP_ROOT/opencode-inside-link-project"
+make_repo "$OPENCODE_INSIDE_LINK_REPO"
+mkdir -p "$OPENCODE_INSIDE_LINK_REPO/.opencode" "$OPENCODE_INSIDE_LINK_REPO/real-plugins"
+ln -s "$OPENCODE_INSIDE_LINK_REPO/real-plugins" "$OPENCODE_INSIDE_LINK_REPO/.opencode/plugins"
+assert_success "opencode accepts an ancestor symlink that stays inside the root" \
+    bash -c "cd '$OPENCODE_INSIDE_LINK_REPO' && '$INSTALLER' -a opencode"
+assert_file "opencode installs through an inside-the-root ancestor symlink" \
+    "$OPENCODE_INSIDE_LINK_REPO/real-plugins/protect-important-paths.ts"
+
 echo ""
 echo "========================================"
 echo "Passed: $PASSED"

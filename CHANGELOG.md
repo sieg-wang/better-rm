@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `deletion.log` records now carry a `v2` marker and escape `\\`, `|`, newline, and CR in both path fields, so filenames containing `|` or a newline can be logged and restored. Records written before this change (no `v2` marker) are still read by `--restore`.
 - Added `BETTER_RM_STATE_DIR` and XDG state-directory support for `deletion.log`.
 - Restricted newly created state directories and deletion logs to user-only access.
+- `install-hooks.sh -a opencode` can no longer write outside the project. It only checked whether the final destination was a symlink, so a symlinked ancestor such as `.opencode/plugins` or `hooks` left the final component non-existent, the check passed, and `mkdir -p` plus `cp` then created the plugin and the runtime hook outside the Git root — exiting 0 while doing it. Both destinations are now resolved to their physical path and required to land inside the physical Git root, and either one failing rejects the install before *either* file is written.
 
 ### Added
 - 1.4.3: Prepare release 1.4.3

@@ -819,6 +819,13 @@ resolve_opencode_plugin() {
 
     local project_root
     project_root="$(resolve_project_root)"
+    # 容器的實體根目錄，供 require_opencode_destination_within_root 當錨點。
+    # The physical root, used as the containment anchor for the destinations.
+    if ! OPENCODE_PROJECT_ROOT="$(cd -- "$project_root" 2>/dev/null && pwd -P)"; then
+        error "無法解析專案根目錄的實體路徑：$project_root"
+        error "Cannot resolve the physical path of the project root: $project_root"
+        exit 1
+    fi
     PLUGIN_SOURCE_PATH="$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts"
     if [ ! -f "$PLUGIN_SOURCE_PATH" ] || [ ! -r "$PLUGIN_SOURCE_PATH" ]; then
         local plugin_bundle_dir
@@ -877,6 +884,88 @@ validate_opencode_destination() {
         error "OpenCode ${name_en} path is not a regular file: $path"
         exit 1
     fi
+}
+
+# 解析一條路徑的實體位置（跟隨所有既存祖先目錄的符號連結），但不建立任何目錄。
+# 為什麼不用 realpath：BSD 與 GNU 的可用性與旗標不一致，這支安裝程式要能在乾淨的
+# macOS 上跑。逐層往上找到第一個存在的祖先，用 `cd -- ... && pwd -P` 取其實體路徑，
+# 再把還不存在的層級接回去。
+# Resolve a path physically (following symlinks on every existing ancestor)
+# without creating anything. realpath is deliberately not used: its
+# availability and flags differ between BSD and GNU userland and this
+# installer has to run on a stock macOS. Walk up to the first existing
+# ancestor, take its physical path, then re-append the missing components.
+physical_path() {
+    local path="$1"
+    local suffix=""
+    local base parent
+
+    while [ ! -e "$path" ]; do
+        base="$(basename -- "$path")"
+        parent="$(dirname -- "$path")"
+        if [ "$parent" = "$path" ]; then
+            printf '%s' "$path"
+            return 0
+        fi
+        if [ -n "$suffix" ]; then
+            suffix="$base/$suffix"
+        else
+            suffix="$base"
+        fi
+        path="$parent"
+    done
+
+    local resolved
+    if [ -d "$path" ]; then
+        resolved="$(cd -- "$path" 2>/dev/null && pwd -P)" || return 1
+    else
+        parent="$(dirname -- "$path")"
+        base="$(basename -- "$path")"
+        parent="$(cd -- "$parent" 2>/dev/null && pwd -P)" || return 1
+        resolved="${parent%/}/$base"
+    fi
+
+    if [ -n "$suffix" ]; then
+        printf '%s' "${resolved%/}/$suffix"
+    else
+        printf '%s' "$resolved"
+    fi
+}
+
+# 確認 OpenCode 安裝目標的實體路徑仍在實體專案根目錄內。
+# 為什麼 validate_opencode_destination 不夠：它只看最後一層是不是符號連結，而
+# `.opencode/plugins` 或 `hooks` 這種祖先目錄若本身是連結，最後一層根本還不存在，
+# 檢查就過了，接著 `mkdir -p` 穿過連結、`cp` 把宣稱 project-scoped 的檔案寫到專案外
+# 並以 exit 0 收場（實測會在 root 外產出 plugin 與 runtime 兩個檔案）。
+# Require an OpenCode destination to resolve inside the physical project root.
+# validate_opencode_destination is not enough on its own: it only inspects the
+# final component, and when an ancestor such as `.opencode/plugins` or `hooks`
+# is itself a symlink the final component does not exist yet, so the check
+# passes, `mkdir -p` then traverses the link and `cp` writes a supposedly
+# project-scoped file outside the project -- exiting 0 while doing it.
+require_opencode_destination_within_root() {
+    local path="$1"
+    local root="$2"
+    local name_zh="$3"
+    local name_en="$4"
+
+    local resolved
+    if ! resolved="$(physical_path "$path")"; then
+        error "無法解析 OpenCode ${name_zh}的實體路徑：$path"
+        error "Cannot resolve the physical path of the OpenCode ${name_en}: $path"
+        exit 1
+    fi
+
+    case "$resolved" in
+        "$root"/*) ;;
+        *)
+            error "拒絕在專案根目錄外寫入 OpenCode ${name_zh}：$path"
+            error "Refusing to write the OpenCode ${name_en} outside the project root: $path"
+            error "實體路徑 / physical path: $resolved"
+            error "專案根目錄 / project root: $root"
+            exit 1
+            ;;
+    esac
 }
 
 # 驗證剛寫到 OpenCode 執行位置的共用 runtime hook。
@@ -1696,6 +1785,10 @@ install_opencode_hooks() {
     # Validate every destination before writing either file, avoiding partial updates.
     validate_opencode_destination "$PLUGIN_PATH" "插件" "plugin"
     validate_opencode_destination "$OPENCODE_RUNTIME_PATH" "runtime" "runtime file"
+    require_opencode_destination_within_root \
+        "$PLUGIN_PATH" "$OPENCODE_PROJECT_ROOT" "插件" "plugin"
+    require_opencode_destination_within_root \
+        "$OPENCODE_RUNTIME_PATH" "$OPENCODE_PROJECT_ROOT" "runtime" "runtime file"
 
     local plugin_dir
     plugin_dir="$(dirname -- "$PLUGIN_PATH")"
