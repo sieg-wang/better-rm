@@ -1,6 +1,9 @@
 name: CI and release
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
@@ -46,12 +49,11 @@ jobs:
           git --version
           node --version
 
+      - name: Verify CI suite aggregation contract
+        run: ./test-run-test-suites.sh
+
       - name: Run repository test suites
-        run: |
-          set -euo pipefail
-          ./test-better-rm.sh
-          node ./test-hooks.js
-          ./test-install-hooks.sh
+        run: ./run-test-suites.sh
 
       - name: Verify tests did not modify the checkout
         run: |

@@ -354,9 +354,39 @@ resolve_shared_hook_for_settings() {
 # the tests extract this function verbatim with a sed range ending at /^}/ and
 # run it directly, which a column-zero brace would truncate.
 hook_denies_protected_deletion() {
-    node -e '
+    local candidate_mode="${2:-path}"
+    local probe_script
+    probe_script='
     const { spawnSync } = require("child_process");
+    const fs = require("fs");
     const hookPath = process.argv[1];
+    const useSource = process.env.BETTER_RM_HOOK_SOURCE_MODE === "source";
+    let hookArgs = [hookPath];
+    if (useSource) {
+      try {
+        // fd 3 is a read handle for the installer-held stage inode. Positional
+        // reads leave its shared offset at zero, so a later cmp fallback still
+        // sees the complete candidate. Child processes intentionally do not
+        // inherit arbitrary descriptors, so they execute these bytes with -e.
+        const size = fs.fstatSync(3).size;
+        const content = Buffer.alloc(size);
+        let offset = 0;
+        while (offset < size) {
+          const count = fs.readSync(3, content, offset, size - offset, offset);
+          if (count === 0) process.exit(1);
+          offset += count;
+        }
+        // `node -e` does not make the evaluated source its main module, so a
+        // normal `if (require.main === module) main()` CLI guard stays false.
+        // Start that same entry point explicitly after evaluating the held
+        // bytes; this preserves the real hook stdin/stdout contract.
+        const source = `${content.toString("utf8")}
+if (typeof main === "function" && require.main !== module) main();`;
+        hookArgs = ["-e", source];
+      } catch (_error) {
+        process.exit(1);
+      }
+    }
     const commands = [
       "rm -rf /",
       "rm -rf /etc",
@@ -365,7 +395,7 @@ hook_denies_protected_deletion() {
       "rm -rf /project/.git",
     ];
     for (const command of commands) {
-      const result = spawnSync(process.execPath, [hookPath], {
+      const result = spawnSync(process.execPath, hookArgs, {
         input: JSON.stringify({
           hook_event_name: "PreToolUse",
           tool_name: "Bash",
@@ -379,7 +409,12 @@ hook_denies_protected_deletion() {
       if (!/"permissionDecision":"deny"/.test(result.stdout)) process.exit(1);
     }
     process.exit(0);
-' "$1" 2>/dev/null
+'
+    if [ "$candidate_mode" = source ]; then
+        BETTER_RM_HOOK_SOURCE_MODE=source node -e "$probe_script" "$1" 3<&6 2>/dev/null
+    else
+        BETTER_RM_HOOK_SOURCE_MODE=path node -e "$probe_script" "$1" 2>/dev/null
+    fi
 }
 
 # 驗證「剛從網路下載回來的」hook，驗不過就中止安裝。
@@ -465,7 +500,8 @@ require_verified_downloaded_hook() {
 # job, not the installer's.
 hook_is_trustworthy() {
     local candidate="$1"
-    if hook_denies_protected_deletion "$candidate"; then
+    local candidate_mode="${2:-path}"
+    if hook_denies_protected_deletion "$candidate" "$candidate_mode"; then
         return 0
     fi
     if hook_denies_protected_deletion "$HOOK_SOURCE_PATH"; then
@@ -968,7 +1004,7 @@ require_opencode_destination_within_root() {
     esac
 }
 
-# 驗證剛寫到 OpenCode 執行位置的共用 runtime hook。
+# 驗證剛寫到 OpenCode 錨定 staging inode 的共用 runtime hook 候選檔。
 # 為什麼 opencode 需要自己一份：其他八個 agent 都走 resolve_shared_hook_for_settings，
 # 第一次安裝會經過 hook_is_trustworthy，驗不過就寫 fail-closed stub 並中止；
 # install_opencode_hooks 不經過那個函式，於是這條路徑上只有一個裸 `cp`。實測（`cp`
@@ -979,7 +1015,7 @@ require_opencode_destination_within_root() {
 # 這裡沒有引入新的執行環境需求：hook_is_trustworthy 在探測跑不起來時會退回
 # 「與來源位元組相同」，而 OPENCODE_RUNTIME_SOURCE_PATH 就是 HOOK_SOURCE_PATH，
 # 所以沒有 node 的機器照樣裝得起來，只是改用 cmp 驗——正常安裝不會被這道檢查否決。
-# Verify the shared runtime hook just written to OpenCode's executing location.
+# Verify the shared runtime-hook candidate on its anchored staging inode.
 # Why opencode needs its own: the other eight agents go through
 # resolve_shared_hook_for_settings, whose first install runs hook_is_trustworthy and
 # writes the fail-closed stub before aborting on failure. install_opencode_hooks
@@ -995,6 +1031,8 @@ require_opencode_destination_within_root() {
 # installs — verified by cmp instead. A healthy install is never denied by this.
 require_verified_opencode_runtime() {
     local backup_path="${1:-}"
+    local report_path="${OPENCODE_RUNTIME_DISPLAY_PATH:-$OPENCODE_RUNTIME_PATH}"
+    OPENCODE_RUNTIME_FAIL_CLOSED_WRITTEN=false
 
     # 目的地不存在＝位元組沒落地的直接證據，而且缺席的 hook 在契約上就是「放行一切」
     # （PreToolUse 找不到檔案會以非零結束，那是「非阻擋錯誤」，工具照跑）。這個情況
@@ -1009,13 +1047,13 @@ require_verified_opencode_runtime() {
     # below blocks the "cannot verify, so proceed" path.
     # Naming the real cause here matters — otherwise the user only sees a vague
     # "could not be verified".
-    if [ ! -f "$OPENCODE_RUNTIME_PATH" ]; then
-        error "OpenCode 共用 hook 沒有出現在執行位置：複製回報成功卻沒有寫出任何東西：$OPENCODE_RUNTIME_PATH"
-        error "The OpenCode runtime hook is not at its executing location: the copy reported success but wrote nothing: $OPENCODE_RUNTIME_PATH"
+    if [ "${OPENCODE_COPY_WROTE_NOTHING:-false}" = true ] || [ ! -f "$OPENCODE_RUNTIME_PATH" ]; then
+        error "OpenCode 共用 hook 候選檔：複製回報成功卻沒有寫出任何東西：$report_path"
+        error "The OpenCode runtime-hook candidate copy reported success but wrote nothing: $report_path"
     fi
 
     HOOK_PROBE_UNAVAILABLE=false
-    if hook_is_trustworthy "$OPENCODE_RUNTIME_PATH"; then
+    if hook_is_trustworthy "$OPENCODE_RUNTIME_PATH" source; then
         if [ "$HOOK_PROBE_UNAVAILABLE" = true ]; then
             warning "無法執行 hook 自我檢測，已改以位元組比對確認與來源完全相同"
             warning "Could not run the hook self-check; verified byte-identical to the source instead"
@@ -1054,8 +1092,8 @@ require_verified_opencode_runtime() {
         # The `-f` conjunct is essential: cmp also returns 2 for a missing operand, and
         # without it a copy that created nothing would be waved through as unmeasurable.
         if [ "$compare_status" -ge 2 ] && [ -f "$OPENCODE_RUNTIME_PATH" ]; then
-            warning "無法驗證 OpenCode 共用 hook：自我檢測與位元比對都無法執行，已在未驗證的情況下繼續：$OPENCODE_RUNTIME_PATH"
-            warning "Could not verify the OpenCode runtime hook: neither the self-check nor the byte comparison could run; continuing unverified: $OPENCODE_RUNTIME_PATH"
+            warning "無法驗證 OpenCode 共用 hook：自我檢測與位元比對都無法執行，已在未驗證的情況下繼續：$report_path"
+            warning "Could not verify the OpenCode runtime hook: neither the self-check nor the byte comparison could run; continuing unverified: $report_path"
             warning "安裝可用的 node 或 cmp 後重跑安裝程式，即可取得驗證"
             warning "Install a working node or cmp and re-run the installer to get it verified"
             return 0
@@ -1067,37 +1105,39 @@ require_verified_opencode_runtime() {
     # The message branches on whether the stub was actually written: if it was not,
     # what remains on disk is unverified and may allow everything, and claiming "it
     # now fails closed" there would be a lie.
-    if write_fail_closed_hook_stub "$OPENCODE_RUNTIME_PATH"; then
-        error "OpenCode 共用 hook 無法通過驗證，已改為 fail-closed（拒絕所有工具呼叫）：$OPENCODE_RUNTIME_PATH"
-        error "The OpenCode runtime hook could not be verified; it now fails closed (every tool call is denied): $OPENCODE_RUNTIME_PATH"
+    if write_fail_closed_hook_stub "${OPENCODE_RUNTIME_WRITE_PATH:-$OPENCODE_RUNTIME_PATH}"; then
+        OPENCODE_RUNTIME_FAIL_CLOSED_WRITTEN=true
+        error "OpenCode 共用 hook 無法通過驗證；fail-closed replacement 已在錨定暫存檔備妥，尚待發布：$report_path"
+        error "The OpenCode runtime hook could not be verified; a fail-closed replacement is staged but not yet published: $report_path"
     else
-        error "OpenCode 共用 hook 無法通過驗證，連 fail-closed stub 也寫不進去：$OPENCODE_RUNTIME_PATH 目前的內容可能會放行所有刪除"
-        error "The OpenCode runtime hook could not be verified and the fail-closed stub could not be written either; what is at $OPENCODE_RUNTIME_PATH may allow everything"
+        error "OpenCode 共用 hook 無法通過驗證，連 fail-closed stub 也寫不進去：$report_path 目前的內容可能會放行所有刪除"
+        error "The OpenCode runtime hook could not be verified and the fail-closed stub could not be written either; what is at $report_path may allow everything"
     fi
     if [ -n "$backup_path" ]; then
         error "請從備份還原 / Restore it from the backup: $backup_path"
     fi
-    exit 1
+    return 1
 }
 
-# 驗證剛寫到 OpenCode 執行位置的外掛確實與來源相同。
+# 驗證剛寫到 OpenCode 錨定 staging inode 的外掛候選檔確實與來源相同。
 # 外掛是 TypeScript，行為探測需要安裝程式並不要求的 TypeScript runtime，所以這裡驗
 # 的是「複製有沒有忠實落地」而不是「它有沒有保護作用」—— 來源本身的正確性由內嵌副本
 # 的 byte-identity 測試釘住。`cp` 的結束碼證明不了位元組落地，這一行才證明得了。
 # 界線講明白：驗不過就中止，但不會像 runtime hook 那樣留下 fail-closed 的替代品，
-# 因為那需要另造一份 TypeScript stub；磁碟上留下的是那份寫壞的外掛，訊息會說出來，
-# 使用者重跑安裝程式即可。
-# Verify the plugin just written to OpenCode's executing location matches its source.
+# 因為那需要另造一份 TypeScript stub；候選檔仍只存在於錨定 staging inode，不會發布
+# 到執行位置，使用者修正原因後重跑安裝程式即可。
+# Verify the OpenCode plugin candidate on its anchored staging inode matches its source.
 # The plugin is TypeScript and a behavioural probe would need a TypeScript runtime
 # the installer does not require, so what is checked is whether the copy landed
 # faithfully, not whether it protects anything — the source's own correctness is
 # pinned by the bundled copy's byte-identity test. cp's exit status cannot prove the
 # bytes landed; this comparison can.
 # Stated limit: a failure aborts but does NOT leave a fail-closed replacement the way
-# the runtime hook does, because that would need a separate TypeScript stub. What
-# stays on disk is the bad copy, the message says so, and re-running the installer
-# repairs it.
+# the runtime hook does, because that would need a separate TypeScript stub. The
+# candidate remains only on the anchored staging inode and is never published at the
+# execution path; fixing the cause and re-running the installer retries the install.
 require_faithful_opencode_plugin() {
+    local report_path="${OPENCODE_PLUGIN_DISPLAY_PATH:-$PLUGIN_PATH}"
     # cmp 的結束碼是三態，不是布林：0＝相同、1＝內容不同、>=2＝比對本身跑不起來
     # （cmp 不存在、檔案讀不到…）。把 >=2 也當成「不同」，就是拿一個從未發生的診斷
     # 去中止一次完全健康的安裝——實測（PATH 上放一個 exit 127 的 cmp）：外掛位元完美
@@ -1133,12 +1173,12 @@ require_faithful_opencode_plugin() {
     # exits 0, and there is no plugin on disk.
     # This does not enumerate what makes cmp return 2: a missing destination is itself
     # direct evidence the bytes did not land, whatever tooling is available.
-    if [ ! -f "$PLUGIN_PATH" ]; then
-        error "OpenCode 外掛沒有出現在執行位置：複製回報成功卻沒有寫出任何東西：$PLUGIN_PATH"
-        error "The OpenCode plugin is not at its executing location: the copy reported success but wrote nothing: $PLUGIN_PATH"
+    if [ "${OPENCODE_COPY_WROTE_NOTHING:-false}" = true ] || [ ! -f "$PLUGIN_PATH" ]; then
+        error "OpenCode 外掛候選檔：複製回報成功卻沒有寫出任何東西：$report_path"
+        error "The OpenCode plugin candidate copy reported success but wrote nothing: $report_path"
         error "磁碟上沒有外掛，OpenCode 底下就沒有任何保護；請重新執行安裝程式"
         error "With no plugin on disk OpenCode has no protection at all; re-run the installer"
-        exit 1
+        return 1
     fi
 
     local status=0
@@ -1149,16 +1189,16 @@ require_faithful_opencode_plugin() {
     fi
 
     if [ "$status" -ge 2 ]; then
-        warning "無法驗證 OpenCode 外掛的複製結果（比對工具無法執行），已在未驗證的情況下繼續：$PLUGIN_PATH"
-        warning "Could not verify the OpenCode plugin copy (the comparison tool could not run); continuing unverified: $PLUGIN_PATH"
+        warning "無法驗證 OpenCode 外掛的複製結果（比對工具無法執行），已在未驗證的情況下繼續：$report_path"
+        warning "Could not verify the OpenCode plugin copy (the comparison tool could not run); continuing unverified: $report_path"
         return 0
     fi
 
-    error "OpenCode 外掛寫入後與來源不符，可能只寫了一半：$PLUGIN_PATH"
-    error "The OpenCode plugin does not match its source after the write; it may be a partial copy: $PLUGIN_PATH"
+    error "OpenCode 外掛候選檔與來源不符，可能只寫了一半：$report_path"
+    error "The OpenCode plugin candidate does not match its source; it may be a partial copy: $report_path"
     error "磁碟上的外掛不可信任，且不會自動修復；請重新執行安裝程式"
     error "The plugin on disk is not trustworthy and is not repaired automatically; re-run the installer"
-    exit 1
+    return 1
 }
 
 # 以 Node.js 安全合併 JSON hook 設定
@@ -1775,6 +1815,455 @@ install_grok_hooks() {
     report_json_result "Grok Build" "$result"
 }
 
+# 以 GNU-first、BSD-fallback 取得已開啟檔案或路徑的 inode 與 mode。這裡比較的是同一
+# 個已錨定目錄內的兩個名稱；macOS fdesc 對 /dev/fd 回報自己的 device number，不能拿
+# 來與底層檔案的 st_dev 比，但 inode 仍是底層 inode。路徑另以 -L 拒絕 symlink。
+# Read inode and mode with GNU-first, BSD-fallback stat spellings. Both names
+# being compared live in the same anchored directory. macOS fdesc reports its
+# own device number for /dev/fd, but preserves the underlying inode; symlinks are
+# rejected separately before identity is trusted. Capture each branch so a failed spelling cannot pollute
+# the fallback.
+opencode_file_identity() {
+    local value
+    if value="$(stat -c '%i' "$1" 2>/dev/null)"; then
+        printf '%s' "$value"
+    elif value="$(stat -f '%i' "$1" 2>/dev/null)"; then
+        printf '%s' "$value"
+    else
+        return 1
+    fi
+}
+
+# Linux exposes /dev/fd/N as a symlink into procfs. GNU stat therefore needs -L
+# when the identity source is a held descriptor; without it we compare the
+# procfs-link inode with the file inode and reject every healthy publish.
+# macOS fdesc entries already describe the held file and use the BSD spelling.
+opencode_held_file_identity() {
+    local value
+    if value="$(stat -Lc '%i' "$1" 2>/dev/null)"; then
+        printf '%s' "$value"
+    elif value="$(stat -f '%i' "$1" 2>/dev/null)"; then
+        printf '%s' "$value"
+    else
+        return 1
+    fi
+}
+
+opencode_file_mode() {
+    local value
+    if value="$(stat -c '%a' "$1" 2>/dev/null)"; then
+        printf '%s' "$value"
+    elif value="$(stat -f '%Lp' "$1" 2>/dev/null)"; then
+        printf '%s' "$value"
+    else
+        return 1
+    fi
+}
+
+# 暫存名稱與目的名稱都必須是目前已錨定 cwd 的 direct child。如此即使同 UID 程序在
+# 最後一次檢查後把 leaf 換成 symlink，mv 只會搬動 symlink 本身，不會穿過可替換的
+# stage-directory 中介去移走 root 外的 target。事後 inode 檢查仍負責把 leaf swap
+# 轉成非零；它不是拿來宣稱 race 消失，而是把影響限制在攻擊者本來就能改寫的目的名稱。
+# Both the staged name and destination must be direct children of the anchored
+# cwd. If a same-UID process swaps the leaf for a symlink after the last check,
+# mv can move only that symlink; there is no swappable stage-directory component
+# through which it could consume an out-of-root target. The post-identity check
+# still turns the leaf swap into failure; it does not claim the race disappeared.
+require_direct_opencode_child() {
+    local path="$1"
+    local name_en="$2"
+    case "$path" in
+        ./.better-rm-opencode.*)
+            case "${path#./}" in
+                */*) ;;
+                *) return 0 ;;
+            esac
+            ;;
+    esac
+    error "OpenCode ${name_en} path is not a safe direct child of the anchored directory: $path"
+    return 1
+}
+
+publish_anchored_opencode_file() {
+    local fd_path="$1"
+    local stage_path="$2"
+    local destination="$3"
+    local policy="$4"
+    local name_en="$5"
+    local expected stage_identity destination_identity
+
+    require_direct_opencode_child "$stage_path" "$name_en staging"
+    expected="$(opencode_held_file_identity "$fd_path")" || {
+        error "Cannot identify the staged OpenCode ${name_en}: $stage_path"
+        return 1
+    }
+    stage_identity="$(opencode_file_identity "$stage_path")" || true
+    if [ -z "$stage_identity" ] || [ "$stage_identity" != "$expected" ] || [ -L "$stage_path" ]; then
+        error "OpenCode ${name_en} staging path changed before publish: $stage_path"
+        error "staged fd identity: ${expected:-<unavailable>}; path identity: ${stage_identity:-<unavailable>}"
+        return 1
+    fi
+
+    case "$(uname -s)" in
+        Darwin|FreeBSD|NetBSD|OpenBSD|DragonFly)
+            mv "$policy" -h -- "$stage_path" "$destination"
+            ;;
+        *)
+            mv "$policy" -T -- "$stage_path" "$destination"
+            ;;
+    esac
+
+    destination_identity="$(opencode_file_identity "$destination")" || true
+    if [ -z "$destination_identity" ] || [ "$destination_identity" != "$expected" ] || [ -L "$destination" ]; then
+        error "OpenCode ${name_en} did not land at the exact destination: $destination"
+        return 1
+    fi
+}
+
+# 在目前已錨定的 cwd 內用 noclobber 建立隨機 direct-child stage，再以 held fd 寫入。
+# mktemp -u 只產生候選名稱；真正的安全邊界是隨後 noclobber 的 exclusive create：若同
+# UID 程序搶先建立任何型態的 leaf，open 失敗且不會追隨它。
+# Create a random direct-child stage in the anchored cwd with noclobber, then
+# write only through its held fd. mktemp -u proposes a name; the security boundary
+# is the following exclusive create, which fails rather than following any leaf a
+# same-UID process managed to create first.
+prepare_anchored_opencode_file() {
+    local source="$1"
+    local destination="$2"
+    local name_en="$3"
+    local timestamp suffix original_path_identity source_mode
+    local write_identity read_identity stage_path_identity
+
+    OPENCODE_STAGE_PATH="$(mktemp -u "./.better-rm-opencode.stage.XXXXXX")" || {
+        error "Cannot reserve a staging name for the OpenCode ${name_en}"
+        return 1
+    }
+    require_direct_opencode_child "$OPENCODE_STAGE_PATH" "$name_en staging"
+    OPENCODE_BACKUP_STAGE_PATH=""
+    OPENCODE_BACKUP_PATH=""
+    OPENCODE_ORIGINAL_EXISTED=false
+    OPENCODE_ORIGINAL_ID=""
+    OPENCODE_ORIGINAL_MODE=""
+
+    if [ -e "$destination" ]; then
+        OPENCODE_ORIGINAL_EXISTED=true
+        if ! exec 8< "$destination"; then
+            error "Cannot open the existing OpenCode ${name_en}: $destination"
+            return 1
+        fi
+        if [ -L "$destination" ]; then
+            error "OpenCode ${name_en} became a symbolic link before backup: $destination"
+            return 1
+        fi
+        OPENCODE_ORIGINAL_ID="$(opencode_held_file_identity /dev/fd/8)" || return 1
+        original_path_identity="$(opencode_file_identity "$destination")" || true
+        if [ "$original_path_identity" != "$OPENCODE_ORIGINAL_ID" ]; then
+            error "OpenCode ${name_en} changed while it was being opened: $destination"
+            return 1
+        fi
+        # macOS fdesc exposes /dev/fd/N with the descriptor-node mode (0440),
+        # not the underlying file's mode. The pathname was just proven to name
+        # the held inode; reading its mode is non-mutating, and the identity is
+        # checked again before publish.
+        OPENCODE_ORIGINAL_MODE="$(opencode_file_mode "$destination")" || return 1
+
+        timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+        OPENCODE_BACKUP_PATH="$destination.better-rm.bak.$timestamp"
+        suffix=1
+        while [ -e "$OPENCODE_BACKUP_PATH" ] || [ -L "$OPENCODE_BACKUP_PATH" ]; do
+            OPENCODE_BACKUP_PATH="$destination.better-rm.bak.$timestamp.$suffix"
+            suffix=$((suffix + 1))
+        done
+        OPENCODE_BACKUP_STAGE_PATH="$(mktemp -u "./.better-rm-opencode.backup.XXXXXX")" || {
+            error "Cannot reserve the OpenCode ${name_en} backup staging name"
+            return 1
+        }
+        require_direct_opencode_child "$OPENCODE_BACKUP_STAGE_PATH" "$name_en backup staging"
+        set -o noclobber
+        if ! exec 7> "$OPENCODE_BACKUP_STAGE_PATH"; then
+            set +o noclobber
+            error "Cannot create the OpenCode ${name_en} backup stage"
+            return 1
+        fi
+        set +o noclobber
+        cp /dev/fd/8 /dev/fd/7
+        chmod "$OPENCODE_ORIGINAL_MODE" /dev/fd/7
+        publish_anchored_opencode_file \
+            /dev/fd/7 "$OPENCODE_BACKUP_STAGE_PATH" "$OPENCODE_BACKUP_PATH" -n \
+            "${name_en} backup"
+        OPENCODE_BACKUP_STAGE_PATH=""
+    fi
+
+    set -o noclobber
+    if ! exec 9> "$OPENCODE_STAGE_PATH"; then
+        set +o noclobber
+        error "Cannot create the OpenCode ${name_en} stage"
+        return 1
+    fi
+    set +o noclobber
+    write_identity="$(opencode_held_file_identity /dev/fd/9)" || return 1
+    # Bash 3.2 closes descriptors >= 10 in command-substitution subshells.
+    # Keep the read handle below that boundary because the identity helpers
+    # are intentionally captured with $(...). The separate read descriptor
+    # lets verification execute the held inode without reopening its pathname.
+    if ! exec 6< "$OPENCODE_STAGE_PATH"; then
+        error "Cannot open the OpenCode ${name_en} stage for held-fd verification"
+        return 1
+    fi
+    read_identity="$(opencode_held_file_identity /dev/fd/6)" || return 1
+    stage_path_identity="$(opencode_file_identity "$OPENCODE_STAGE_PATH")" || true
+    if [ "$read_identity" != "$write_identity" ] ||
+       [ "$stage_path_identity" != "$write_identity" ] ||
+       [ -L "$OPENCODE_STAGE_PATH" ]; then
+        error "OpenCode ${name_en} staging path changed while opening its verification handle: $OPENCODE_STAGE_PATH"
+        error "staged write-fd identity: ${write_identity:-<unavailable>}; read-fd identity: ${read_identity:-<unavailable>}; path identity: ${stage_path_identity:-<unavailable>}"
+        return 1
+    fi
+    BETTER_RM_OPENCODE_PUBLISH_PATH="$OPENCODE_ANCHORED_DIR/${destination#./}" \
+        cp "$source" /dev/fd/9
+    if [ -n "$OPENCODE_ORIGINAL_MODE" ]; then
+        chmod "$OPENCODE_ORIGINAL_MODE" /dev/fd/9
+    else
+        # `exec 9>` creates the stage before cp writes through the descriptor,
+        # so cp cannot apply the source inode's mode as it would for a missing
+        # pathname. Preserve the shipped mode explicitly on a first install.
+        source_mode="$(opencode_file_mode "$source")" || return 1
+        chmod "$source_mode" /dev/fd/9
+    fi
+    if [ -s /dev/fd/6 ]; then
+        OPENCODE_COPY_WROTE_NOTHING=false
+    else
+        OPENCODE_COPY_WROTE_NOTHING=true
+    fi
+}
+
+require_unchanged_opencode_publish_target() {
+    local destination="$1"
+    local name_en="$2"
+    local current_identity=""
+
+    if [ "$OPENCODE_ORIGINAL_EXISTED" = true ]; then
+        current_identity="$(opencode_file_identity "$destination")" || true
+        if [ -L "$destination" ] || [ "$current_identity" != "$OPENCODE_ORIGINAL_ID" ]; then
+            error "OpenCode ${name_en} destination changed during installation before publish: $destination"
+            return 1
+        fi
+    elif [ -e "$destination" ] || [ -L "$destination" ]; then
+        error "OpenCode ${name_en} destination changed during installation before publish: $destination"
+        return 1
+    fi
+}
+
+cleanup_anchored_opencode_leaf() {
+    local path="$1"
+    local fd_path="$2"
+    local name_en="$3"
+    local held_identity path_identity
+
+    [ -n "$path" ] || return 0
+    if ! require_direct_opencode_child "$path" "$name_en staging residue"; then
+        warning "保留 OpenCode 暫存殘留，因為清理目標不是已錨定目錄的 direct child：$path"
+        warning "Retained OpenCode staging residue because the cleanup target is not a direct child of the anchored directory: $path"
+        return 0
+    fi
+    held_identity="$(opencode_held_file_identity "$fd_path")" || held_identity=""
+    path_identity="$(opencode_file_identity "$path")" || path_identity=""
+    if [ -z "$held_identity" ] || [ "$path_identity" != "$held_identity" ] || [ -L "$path" ]; then
+        warning "保留 OpenCode 暫存殘留，因為無法證明 direct-child 路徑仍指向 held inode：$path"
+        warning "Retained OpenCode staging residue because the direct-child path no longer proves the held inode: $path"
+        return 0
+    fi
+    if ! rm -f -- "$path"; then
+        warning "無法清除 OpenCode 暫存殘留：$path"
+        warning "Could not remove retained OpenCode staging residue: $path"
+    fi
+}
+
+cleanup_anchored_opencode_stage() {
+    cleanup_anchored_opencode_leaf "${OPENCODE_STAGE_PATH:-}" /dev/fd/9 "candidate"
+    cleanup_anchored_opencode_leaf "${OPENCODE_BACKUP_STAGE_PATH:-}" /dev/fd/7 "backup"
+    exec 7>&-
+    exec 8<&-
+    exec 9>&-
+    exec 6<&-
+}
+
+# 逐層進入 OpenCode 目的目錄，並在同一個 shell 工作目錄（作業系統持有的目錄
+# handle）內完成寫入。檢查後若祖先路徑被換成別的 symlink，後續相對路徑仍指向
+# 已開啟的目錄；完成後再解析一次對外路徑，若它不再指向同一目錄就大聲失敗。
+# Traverse an OpenCode destination one component at a time and perform the write
+# from the same shell working directory (an OS-held directory handle). If an
+# ancestor is replaced after validation, relative writes remain anchored to the
+# opened directory; a post-write re-resolution then rejects a changed public route.
+with_anchored_opencode_directory() {
+    local logical_dir="$1"
+    local relative_dir="$2"
+    local name_zh="$3"
+    local name_en="$4"
+    local callback="$5"
+    local remaining component current anchored resolved
+
+    (
+        if ! cd -P -- "$OPENCODE_PROJECT_ROOT"; then
+            error "無法開啟 OpenCode 專案根目錄：$OPENCODE_PROJECT_ROOT"
+            error "Cannot open the OpenCode project root: $OPENCODE_PROJECT_ROOT"
+            return 1
+        fi
+        current="$(pwd -P)" || return 1
+        if [ "$current" != "$OPENCODE_PROJECT_ROOT" ]; then
+            error "OpenCode 專案根目錄在安裝期間發生變更，已在建立子目錄前中止：$OPENCODE_PROJECT_ROOT"
+            error "The OpenCode project root changed during installation; refusing before creating child directories: $OPENCODE_PROJECT_ROOT"
+            error "目前實體路徑 / current physical path: $current"
+            return 1
+        fi
+
+        remaining="$relative_dir"
+        while [ -n "$remaining" ]; do
+            component="${remaining%%/*}"
+            if [ "$remaining" = "$component" ]; then
+                remaining=""
+            else
+                remaining="${remaining#*/}"
+            fi
+            case "$component" in
+                ''|.|..)
+                    error "OpenCode ${name_zh}目錄含有不安全的路徑元件：$relative_dir"
+                    error "OpenCode ${name_en} directory contains an unsafe path component: $relative_dir"
+                    return 1
+                    ;;
+            esac
+            if [ ! -e "$component" ] && ! mkdir -- "$component"; then
+                error "無法建立 OpenCode ${name_zh}目錄：$logical_dir"
+                error "Cannot create the OpenCode ${name_en} directory: $logical_dir"
+                return 1
+            fi
+            if ! cd -P -- "$component"; then
+                error "無法開啟 OpenCode ${name_zh}目錄：$logical_dir"
+                error "Cannot open the OpenCode ${name_en} directory: $logical_dir"
+                return 1
+            fi
+            current="$(pwd -P)" || return 1
+            case "$current" in
+                "$OPENCODE_PROJECT_ROOT"/*) ;;
+                *)
+                    error "拒絕在專案根目錄外寫入 OpenCode ${name_zh}：$logical_dir"
+                    error "Refusing to write the OpenCode ${name_en} outside the project root: $logical_dir"
+                    error "實體路徑 / physical path: $current"
+                    return 1
+                    ;;
+            esac
+        done
+
+        anchored="$(pwd -P)" || return 1
+        OPENCODE_ANCHORED_DIR="$anchored"
+        exec 6< /dev/null
+        exec 7> /dev/null
+        exec 8< /dev/null
+        exec 9> /dev/null
+        trap cleanup_anchored_opencode_stage EXIT
+        "$callback"
+
+        if ! resolved="$(physical_path "$logical_dir")" || [ "$resolved" != "$anchored" ]; then
+            error "OpenCode ${name_zh}目的路徑在安裝期間發生變更，已拒絕繼續：$logical_dir"
+            error "The OpenCode ${name_en} destination route changed during installation; refusing to continue: $logical_dir"
+            error "原本實體路徑 / anchored physical path: $anchored"
+            error "目前實體路徑 / current physical path: ${resolved:-<unresolved>}"
+            return 1
+        fi
+    )
+}
+
+install_anchored_opencode_plugin() {
+    local display_path="$PLUGIN_PATH"
+    local destination="./protect-important-paths.ts"
+    local PLUGIN_PATH="$destination"
+    local was_existing=false
+
+    validate_opencode_destination "$PLUGIN_PATH" "插件" "plugin"
+    if [ -e "$PLUGIN_PATH" ]; then
+        if cmp -s "$PLUGIN_SOURCE_PATH" "$PLUGIN_PATH"; then
+            info "OpenCode 插件已是最新狀態 / OpenCode plugin is already up to date"
+            return 0
+        else
+            was_existing=true
+        fi
+    fi
+
+    prepare_anchored_opencode_file "$PLUGIN_SOURCE_PATH" "$destination" "plugin"
+    OPENCODE_PLUGIN_DISPLAY_PATH="$display_path"
+    PLUGIN_PATH=/dev/fd/6
+    if ! require_faithful_opencode_plugin; then
+        return 1
+    fi
+    require_unchanged_opencode_publish_target "$destination" "plugin"
+    publish_anchored_opencode_file \
+        /dev/fd/9 "$OPENCODE_STAGE_PATH" "$destination" -f "plugin"
+    OPENCODE_STAGE_PATH=""
+
+    if [ "$was_existing" = true ]; then
+        success "已更新 OpenCode 插件：$display_path"
+        success "Updated OpenCode plugin: $display_path"
+        info "備份檔案 / Backup: ${display_path}${OPENCODE_BACKUP_PATH#"${destination}"}"
+    else
+        success "已建立 OpenCode 插件：$display_path"
+        success "Created OpenCode plugin: $display_path"
+    fi
+}
+
+install_anchored_opencode_runtime() {
+    local display_path="$OPENCODE_RUNTIME_PATH"
+    local destination="./protect-important-paths.js"
+    local OPENCODE_RUNTIME_PATH="$destination"
+    local was_existing=false
+    local backup_display_path=""
+
+    validate_opencode_destination "$OPENCODE_RUNTIME_PATH" "runtime" "runtime file"
+    if [ -e "$OPENCODE_RUNTIME_PATH" ]; then
+        if cmp -s "$OPENCODE_RUNTIME_SOURCE_PATH" "$OPENCODE_RUNTIME_PATH"; then
+            success "OpenCode 共享 hook 已是最新狀態 / OpenCode runtime hook is already up to date"
+            return 0
+        else
+            was_existing=true
+        fi
+    fi
+
+    prepare_anchored_opencode_file "$OPENCODE_RUNTIME_SOURCE_PATH" "$destination" "runtime file"
+    if [ -n "$OPENCODE_BACKUP_PATH" ]; then
+        backup_display_path="${display_path}${OPENCODE_BACKUP_PATH#"${destination}"}"
+    fi
+    OPENCODE_RUNTIME_PATH=/dev/fd/6
+    OPENCODE_RUNTIME_WRITE_PATH=/dev/fd/9
+    OPENCODE_RUNTIME_DISPLAY_PATH="$display_path"
+    if ! require_verified_opencode_runtime "$backup_display_path"; then
+        if [ "$OPENCODE_RUNTIME_FAIL_CLOSED_WRITTEN" = true ]; then
+            if require_unchanged_opencode_publish_target "$destination" "runtime file" &&
+               publish_anchored_opencode_file \
+                   /dev/fd/9 "$OPENCODE_STAGE_PATH" "$destination" -f "runtime file"; then
+                OPENCODE_STAGE_PATH=""
+                error "OpenCode 共用 hook 無法通過驗證；fail-closed replacement 已發布，現在會拒絕所有工具呼叫：$display_path"
+                error "The OpenCode runtime hook could not be verified; the fail-closed replacement was published and it now fails closed: $display_path"
+            else
+                error "fail-closed replacement 已寫入錨定暫存檔，但無法發布；執行位置的保護狀態未確認：$display_path"
+                error "The fail-closed replacement was staged but could not be published; protection at the execution path is not confirmed: $display_path"
+            fi
+        fi
+        return 1
+    fi
+    require_unchanged_opencode_publish_target "$destination" "runtime file"
+    publish_anchored_opencode_file \
+        /dev/fd/9 "$OPENCODE_STAGE_PATH" "$destination" -f "runtime file"
+    OPENCODE_STAGE_PATH=""
+
+    if [ "$was_existing" = true ]; then
+        success "已更新 OpenCode 共享 hook：$display_path"
+        success "Updated OpenCode runtime hook: $display_path"
+        info "備份檔案 / Backup: ${display_path}${OPENCODE_BACKUP_PATH#"${destination}"}"
+    else
+        success "已建立 OpenCode 共享 hook：$display_path"
+        success "Created OpenCode runtime hook: $display_path"
+    fi
+}
+
 # 安裝 OpenCode 插件 (Install OpenCode plugin)
 install_opencode_hooks() {
     resolve_opencode_plugin
@@ -1782,7 +2271,9 @@ install_opencode_hooks() {
     info "OpenCode 插件：$PLUGIN_PATH"
     info "OpenCode 共享 hook：$OPENCODE_RUNTIME_PATH"
 
-    # Validate every destination before writing either file, avoiding partial updates.
+    # Validate both public routes before the first write. Each write then opens
+    # and remains inside its validated directory until publish and verification
+    # finish, closing the check/re-resolution window in mkdir/cp.
     validate_opencode_destination "$PLUGIN_PATH" "插件" "plugin"
     validate_opencode_destination "$OPENCODE_RUNTIME_PATH" "runtime" "runtime file"
     require_opencode_destination_within_root \
@@ -1790,82 +2281,12 @@ install_opencode_hooks() {
     require_opencode_destination_within_root \
         "$OPENCODE_RUNTIME_PATH" "$OPENCODE_PROJECT_ROOT" "runtime" "runtime file"
 
-    local plugin_dir
-    plugin_dir="$(dirname -- "$PLUGIN_PATH")"
-    mkdir -p "$plugin_dir"
-
-    local runtime_dir
-    runtime_dir="$(dirname -- "$OPENCODE_RUNTIME_PATH")"
-    mkdir -p "$runtime_dir"
-
-    if [ -e "$PLUGIN_PATH" ]; then
-        if cmp -s "$PLUGIN_SOURCE_PATH" "$PLUGIN_PATH"; then
-            info "OpenCode 插件已是最新狀態 / OpenCode plugin is already up to date"
-        else
-            local backup_path
-            backup_path="$PLUGIN_PATH.better-rm.bak.$(date -u +%Y%m%dT%H%M%SZ)"
-            local suffix=1
-            while [ -e "$backup_path" ]; do
-                backup_path="$PLUGIN_PATH.better-rm.bak.$(date -u +%Y%m%dT%H%M%SZ).${suffix}"
-                suffix=$((suffix + 1))
-            done
-            cp "$PLUGIN_PATH" "$backup_path"
-            # 不讀原本的 mode，也就完全不必用 stat：`cp` 覆寫既有檔案時保留目的地
-            # 的 inode 與 mode，所以那個 chmod 本來就是多餘的。stat 的旗標在 BSD
-            # 與 GNU userland 並不相容（GNU 的 `-f` 是「檔案系統狀態」，會把 '%Lp'
-            # 當成另一個 operand：stderr 報錯、結束碼 1，但仍把該檔案的檔案系統資訊
-            # 印到 stdout；`||` 後援確實會執行，命令替換卻把兩段 stdout 一起收下，
-            # chmod 吃到垃圾而失敗，安裝就停在寫到一半的狀態）。共用 hook 的路徑
-            # 早已用同樣的理由拿掉 stat。
-            # The original mode is never read, so stat is not needed: cp onto an
-            # existing file preserves the destination's inode and mode, which made
-            # that chmod redundant anyway. stat's flags are not portable between
-            # BSD and GNU userland (GNU `-f` means FILE SYSTEM status and treats
-            # '%Lp' as another operand: it errors on stderr and exits 1 but still
-            # prints that file's filesystem info on stdout, so the `||` fallback
-            # runs and the command substitution captures BOTH outputs, feeding
-            # chmod garbage and aborting the install midway). The shared-hook path
-            # dropped stat for the same reason.
-            cp "$PLUGIN_SOURCE_PATH" "$PLUGIN_PATH"
-            require_faithful_opencode_plugin
-            success "已更新 OpenCode 插件：$PLUGIN_PATH"
-            success "Updated OpenCode plugin: $PLUGIN_PATH"
-            info "備份檔案 / Backup: $backup_path"
-        fi
-    else
-        cp "$PLUGIN_SOURCE_PATH" "$PLUGIN_PATH"
-        require_faithful_opencode_plugin
-        success "已建立 OpenCode 插件：$PLUGIN_PATH"
-        success "Created OpenCode plugin: $PLUGIN_PATH"
-    fi
-
-    if [ -e "$OPENCODE_RUNTIME_PATH" ]; then
-        if cmp -s "$OPENCODE_RUNTIME_SOURCE_PATH" "$OPENCODE_RUNTIME_PATH"; then
-            success "OpenCode 共享 hook 已是最新狀態 / OpenCode runtime hook is already up to date"
-        else
-            local runtime_backup_path
-            runtime_backup_path="$OPENCODE_RUNTIME_PATH.better-rm.bak.$(date -u +%Y%m%dT%H%M%SZ)"
-            local runtime_suffix=1
-            while [ -e "$runtime_backup_path" ]; do
-                runtime_backup_path="$OPENCODE_RUNTIME_PATH.better-rm.bak.$(date -u +%Y%m%dT%H%M%SZ).${runtime_suffix}"
-                runtime_suffix=$((runtime_suffix + 1))
-            done
-            cp "$OPENCODE_RUNTIME_PATH" "$runtime_backup_path"
-            # 同上：cp 覆寫既有檔案會保留 mode 與 inode，因此不需要（也不能）用 stat。
-            # As above: cp onto an existing file preserves mode and inode, so no
-            # stat is needed — and stat here is not portable.
-            cp "$OPENCODE_RUNTIME_SOURCE_PATH" "$OPENCODE_RUNTIME_PATH"
-            require_verified_opencode_runtime "$runtime_backup_path"
-            success "已更新 OpenCode 共享 hook：$OPENCODE_RUNTIME_PATH"
-            success "Updated OpenCode runtime hook: $OPENCODE_RUNTIME_PATH"
-            info "備份檔案 / Backup: $runtime_backup_path"
-        fi
-    else
-        cp "$OPENCODE_RUNTIME_SOURCE_PATH" "$OPENCODE_RUNTIME_PATH"
-        require_verified_opencode_runtime
-        success "已建立 OpenCode 共享 hook：$OPENCODE_RUNTIME_PATH"
-        success "Created OpenCode runtime hook: $OPENCODE_RUNTIME_PATH"
-    fi
+    with_anchored_opencode_directory \
+        "$(dirname -- "$PLUGIN_PATH")" ".opencode/plugins" \
+        "插件" "plugin" install_anchored_opencode_plugin
+    with_anchored_opencode_directory \
+        "$(dirname -- "$OPENCODE_RUNTIME_PATH")" "hooks" \
+        "runtime" "runtime file" install_anchored_opencode_runtime
 }
 
 main() {

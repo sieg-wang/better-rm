@@ -1448,7 +1448,8 @@ if [ "$last" = "$BETTER_RM_SWAP_KEY" ]; then
     n=$(cat "$BETTER_RM_SWAP_COUNT" 2>/dev/null || echo 0)
     n=$((n + 1))
     printf '%s' "$n" > "$BETTER_RM_SWAP_COUNT"
-    identity=$("$BETTER_RM_REAL_STAT" -f '%d:%i' "$last" 2>/dev/null) || exit 1
+    identity=$("$BETTER_RM_REAL_STAT" -c '%d:%i' "$last" 2>/dev/null ||
+        "$BETTER_RM_REAL_STAT" -f '%d:%i' "$last" 2>/dev/null) || exit 1
     printf '%s\n' "$identity"
     if [ "$n" -eq "$BETTER_RM_SWAP_AT" ]; then
         "$BETTER_RM_REAL_MV" "$BETTER_RM_SWAP_DEST" "$BETTER_RM_SWAP_KIDNAP" || exit 1
@@ -1627,7 +1628,8 @@ last=""
 for arg in "$@"; do last="$arg"; done
 case "$last" in
   "$BETTER_RM_XDEV_TRASH"/*)
-    real=$("$BETTER_RM_REAL_STAT" -f '%d:%i' "$last" 2>/dev/null) || exit 1
+    real=$("$BETTER_RM_REAL_STAT" -c '%d:%i' "$last" 2>/dev/null ||
+        "$BETTER_RM_REAL_STAT" -f '%d:%i' "$last" 2>/dev/null) || exit 1
     printf '99:%s\n' "${real#*:}"
     exit 0
     ;;

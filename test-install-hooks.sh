@@ -1099,6 +1099,7 @@ make_repo "$OPENCODE_OFFLINE_PROJECT"
 OPENCODE_OFFLINE_EMPTY_ASSETS="$TMP_ROOT/opencode-offline-empty-assets"
 mkdir -p "$OPENCODE_OFFLINE_EMPTY_ASSETS"
 OPENCODE_OFFLINE_PLUGIN="$OPENCODE_OFFLINE_PROJECT/.opencode/plugins/protect-important-paths.ts"
+OPENCODE_OFFLINE_RUNTIME="$OPENCODE_OFFLINE_PROJECT/hooks/protect-important-paths.js"
 OPENCODE_OFFLINE_STATUS=0
 (
     cd "$OPENCODE_OFFLINE_PROJECT" &&
@@ -1115,6 +1116,12 @@ fi
 assert_equal "opencode offline install lands the genuine plugin" \
     "$OPENCODE_GENUINE_PLUGIN_HASH" \
     "$([ -f "$OPENCODE_OFFLINE_PLUGIN" ] && file_hash "$OPENCODE_OFFLINE_PLUGIN" || echo missing)"
+assert_equal "a fresh opencode plugin inherits the shipped source mode" \
+    "$(file_mode "$OPENCODE_PLUGIN_SOURCE")" \
+    "$([ -f "$OPENCODE_OFFLINE_PLUGIN" ] && file_mode "$OPENCODE_OFFLINE_PLUGIN" || echo missing)"
+assert_equal "a fresh opencode runtime inherits the shipped executable mode" \
+    "$(file_mode "$SCRIPT_DIR/hooks/protect-important-paths.js")" \
+    "$([ -f "$OPENCODE_OFFLINE_RUNTIME" ] && file_mode "$OPENCODE_OFFLINE_RUNTIME" || echo missing)"
 
 # ---------------------------------------------------------------------------
 # OpenCode publish integrity
@@ -1148,6 +1155,7 @@ make_corrupting_cp_bin() {
     local victim="$2"
     local hit_log="$3"
     local payload="${4:-}"
+    local victim_base="${victim##*/}"
     mkdir -p "$bin_dir"
     : > "$hit_log"
     local landing="    : > \"\$dest\""
@@ -1172,7 +1180,9 @@ make_corrupting_cp_bin() {
     cat > "$bin_dir/cp" <<EOF
 #!/bin/sh
 dest=\$(eval echo "\\\${\$#}")
-if [ "\$dest" = "$victim" ]; then
+publish=\${BETTER_RM_OPENCODE_PUBLISH_PATH:-}
+if [ "\$dest" = "$victim" ] || [ "\${dest##*/}" = "$victim_base" ] ||
+   [ "\$publish" = "$victim" ] || [ "\${publish##*/}" = "$victim_base" ]; then
     printf '%s\n' "\$dest" >> "$hit_log"
 $landing
     exit 0
@@ -1194,12 +1204,15 @@ make_vanishing_cp_bin() {
     local bin_dir="$1"
     local victim="$2"
     local hit_log="$3"
+    local victim_base="${victim##*/}"
     mkdir -p "$bin_dir"
     : > "$hit_log"
     cat > "$bin_dir/cp" <<EOF
 #!/bin/sh
 dest=\$(eval echo "\\\${\$#}")
-if [ "\$dest" = "$victim" ]; then
+publish=\${BETTER_RM_OPENCODE_PUBLISH_PATH:-}
+if [ "\$dest" = "$victim" ] || [ "\${dest##*/}" = "$victim_base" ] ||
+   [ "\$publish" = "$victim" ] || [ "\${publish##*/}" = "$victim_base" ]; then
     printf '%s\n' "\$dest" >> "$hit_log"
     exit 0
 fi
@@ -1367,12 +1380,13 @@ if [ "$OPENCODE_TRUNC_PLUGIN_STATUS" -ne 0 ]; then
 else
     fail "a truncated opencode plugin aborts instead of reporting success"
 fi
-if [ -f "$OPENCODE_TRUNC_PLUGIN" ] && [ ! -s "$OPENCODE_TRUNC_PLUGIN" ]; then
-    assert_contains "a truncated opencode plugin says the copy does not match its source" \
-        "$OPENCODE_TRUNC_PLUGIN_OUTPUT" "does not match its source"
+if [ ! -e "$OPENCODE_TRUNC_PLUGIN" ] && [ ! -L "$OPENCODE_TRUNC_PLUGIN" ]; then
+    pass "a truncated opencode plugin is never published"
 else
-    fail "a truncated opencode plugin says the copy does not match its source"
+    fail "a truncated opencode plugin is never published"
 fi
+assert_contains "a truncated opencode plugin says the copy wrote nothing" \
+    "$OPENCODE_TRUNC_PLUGIN_OUTPUT" "wrote nothing"
 
 # cmp 的結束碼是三態：0＝相同、1＝不同、>=2＝比對本身跑不起來。把 >=2 也當成「不同」，
 # 就會拿一個沒有發生的診斷去中止一次完全健康的安裝：外掛其實位元完美地落地了，安裝
@@ -1478,6 +1492,14 @@ assert_equal "opencode lands the genuine plugin when neither verifier can run" \
     "$([ -f "$OPENCODE_NOVERIFY_PLUGIN" ] && file_hash "$OPENCODE_NOVERIFY_PLUGIN" || echo missing)"
 assert_contains "opencode says out loud that it could not verify the runtime hook" \
     "$OPENCODE_NOVERIFY_OUTPUT" "Could not verify the OpenCode runtime hook"
+OPENCODE_NOVERIFY_RUNTIME_PHYSICAL="$(
+    cd -- "$(dirname -- "$OPENCODE_NOVERIFY_RUNTIME")" &&
+    printf '%s/%s' "$(pwd -P)" "$(basename -- "$OPENCODE_NOVERIFY_RUNTIME")"
+)"
+assert_contains "opencode unverifiable warning names the real runtime path" \
+    "$OPENCODE_NOVERIFY_OUTPUT" "$OPENCODE_NOVERIFY_RUNTIME_PHYSICAL"
+assert_not_contains "opencode unverifiable warning never exposes an ephemeral descriptor path" \
+    "$OPENCODE_NOVERIFY_OUTPUT" "/dev/fd/"
 # 「未驗證但繼續」與「驗過了」必須長得不一樣：訊息若含 fails closed，代表走的是中止
 # 那條路，這個情境就沒有真的回到可安裝狀態。
 # "Unverified but proceeding" must not look like "verified": a fails-closed message
@@ -1788,8 +1810,10 @@ assert_equal "the whitespace temp dir is still cleaned up" "0" \
 REAL_STAT=$(command -v stat)
 if "$REAL_STAT" -f '%Lp' "$INSTALLER" >/dev/null 2>&1; then
     STAT_MODE_ARGS="-f %Lp"
+    STAT_INODE_ARGS="-f %i"
 else
     STAT_MODE_ARGS="-c %a"
+    STAT_INODE_ARGS="-c %i"
 fi
 GNU_STAT_BIN="$TMP_ROOT/gnu-stat-bin"
 mkdir -p "$GNU_STAT_BIN"
@@ -1806,15 +1830,50 @@ if [ "\$1" = "-f" ]; then
     done
     exit 1
 fi
-if [ "\$1" = "-c" ]; then
-    shift
-    shift
+follow=false
+case "\$1" in
+    -Lc|-cL)
+        follow=true
+        shift
+        ;;
+    -L)
+        follow=true
+        shift
+        [ "\${1:-}" = "-c" ] || exit 64
+        shift
+        ;;
+    -c)
+        shift
+        ;;
+    *)
+        exec "$REAL_STAT" "\$@"
+        ;;
+esac
+if [ \$# -ge 1 ]; then
+    fmt="\$1"; shift
     for f in "\$@"; do
-        "$REAL_STAT" $STAT_MODE_ARGS "\$f"
+        case "\$fmt" in
+            %a) "$REAL_STAT" $STAT_MODE_ARGS "\$f" ;;
+            %i)
+                case "\$f" in
+                    /dev/fd/*)
+                        if [ "\$follow" = false ]; then
+                            # Linux /dev/fd/N is a symlink. GNU stat without -L
+                            # observes that link, not the held file descriptor.
+                            printf '%s\n' 4242424242
+                        else
+                            "$REAL_STAT" -L $STAT_INODE_ARGS "\$f"
+                        fi
+                        ;;
+                    *) "$REAL_STAT" $STAT_INODE_ARGS "\$f" ;;
+                esac
+                ;;
+            *) exit 64 ;;
+        esac
     done
     exit 0
 fi
-exec "$REAL_STAT" "\$@"
+exit 64
 EOF
 chmod +x "$GNU_STAT_BIN/stat"
 GNU_STAT_PROJECT="$TMP_ROOT/gnu-stat-opencode-project"
@@ -1825,13 +1884,16 @@ GNU_STAT_RUNTIME="$GNU_STAT_PROJECT/hooks/protect-important-paths.js"
 printf 'stale plugin that must be replaced\n' > "$GNU_STAT_PLUGIN"
 printf '// stale runtime hook that must be replaced\n' > "$GNU_STAT_RUNTIME"
 chmod 640 "$GNU_STAT_PLUGIN" "$GNU_STAT_RUNTIME"
-if (
+GNU_STAT_STATUS=0
+GNU_STAT_OUTPUT=$(
     cd "$GNU_STAT_PROJECT"
-    PATH="$GNU_STAT_BIN:$PATH" "$INSTALLER" -a opencode >/dev/null 2>&1
-); then
+    PATH="$GNU_STAT_BIN:$PATH" "$INSTALLER" -a opencode 2>&1
+) || GNU_STAT_STATUS=$?
+if [ "$GNU_STAT_STATUS" -eq 0 ]; then
     pass "opencode install survives a GNU-userland stat"
 else
     fail "opencode install survives a GNU-userland stat"
+    printf '%s\n' "$GNU_STAT_OUTPUT" >&2
 fi
 assert_equal "opencode plugin is updated under a GNU-userland stat" \
     "$(file_hash "$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts")" \
@@ -1841,6 +1903,124 @@ assert_equal "opencode runtime hook is updated under a GNU-userland stat" \
     "$(file_hash "$GNU_STAT_RUNTIME")"
 assert_equal "opencode plugin keeps its original mode" "640" "$(file_mode "$GNU_STAT_PLUGIN")"
 assert_equal "opencode runtime hook keeps its original mode" "640" "$(file_mode "$GNU_STAT_RUNTIME")"
+
+GNU_STAT_PLUGIN_BACKUP=$(find "$(dirname "$GNU_STAT_PLUGIN")" -maxdepth 1 -type f \
+    -name 'protect-important-paths.ts.better-rm.bak.*' | head -n 1)
+GNU_STAT_RUNTIME_BACKUP=$(find "$(dirname "$GNU_STAT_RUNTIME")" -maxdepth 1 -type f \
+    -name 'protect-important-paths.js.better-rm.bak.*' | head -n 1)
+assert_equal "opencode plugin update publishes exactly one recovery backup" "1" \
+    "$(backup_count "$(dirname "$GNU_STAT_PLUGIN")" protect-important-paths.ts)"
+assert_equal "opencode runtime update publishes exactly one recovery backup" "1" \
+    "$(backup_count "$(dirname "$GNU_STAT_RUNTIME")" protect-important-paths.js)"
+assert_equal "opencode plugin backup preserves the predecessor bytes" \
+    "stale plugin that must be replaced" "$(cat "$GNU_STAT_PLUGIN_BACKUP")"
+assert_equal "opencode runtime backup preserves the predecessor bytes" \
+    "// stale runtime hook that must be replaced" "$(cat "$GNU_STAT_RUNTIME_BACKUP")"
+assert_equal "opencode plugin backup preserves predecessor mode" "640" \
+    "$(file_mode "$GNU_STAT_PLUGIN_BACKUP")"
+assert_equal "opencode runtime backup preserves predecessor mode" "640" \
+    "$(file_mode "$GNU_STAT_RUNTIME_BACKUP")"
+
+GNU_STAT_SECOND_STATUS=0
+(
+    cd "$GNU_STAT_PROJECT"
+    PATH="$GNU_STAT_BIN:$PATH" "$INSTALLER" -a opencode
+) >/dev/null 2>&1 || GNU_STAT_SECOND_STATUS=$?
+assert_equal "an idempotent opencode install still succeeds" "0" "$GNU_STAT_SECOND_STATUS"
+assert_equal "an idempotent opencode plugin install creates no extra backup" "1" \
+    "$(backup_count "$(dirname "$GNU_STAT_PLUGIN")" protect-important-paths.ts)"
+assert_equal "an idempotent opencode runtime install creates no extra backup" "1" \
+    "$(backup_count "$(dirname "$GNU_STAT_RUNTIME")" protect-important-paths.js)"
+
+# A same-second backup name may already exist. It is immutable recovery state:
+# the installer must keep it byte-for-byte and publish the predecessor at the
+# first free numeric suffix.
+OPENCODE_BACKUP_COLLISION_REPO="$TMP_ROOT/opencode-backup-collision-project"
+make_repo "$OPENCODE_BACKUP_COLLISION_REPO"
+mkdir -p "$OPENCODE_BACKUP_COLLISION_REPO/.opencode/plugins" \
+    "$OPENCODE_BACKUP_COLLISION_REPO/hooks"
+OPENCODE_BACKUP_COLLISION_PLUGIN="$OPENCODE_BACKUP_COLLISION_REPO/.opencode/plugins/protect-important-paths.ts"
+OPENCODE_BACKUP_COLLISION_RUNTIME="$OPENCODE_BACKUP_COLLISION_REPO/hooks/protect-important-paths.js"
+printf 'collision predecessor plugin\n' > "$OPENCODE_BACKUP_COLLISION_PLUGIN"
+printf 'collision predecessor runtime\n' > "$OPENCODE_BACKUP_COLLISION_RUNTIME"
+chmod 640 "$OPENCODE_BACKUP_COLLISION_PLUGIN" "$OPENCODE_BACKUP_COLLISION_RUNTIME"
+OPENCODE_BACKUP_FIXED_STAMP=20300102T030405Z
+OPENCODE_BACKUP_COLLISION_PLUGIN_BASE="$OPENCODE_BACKUP_COLLISION_PLUGIN.better-rm.bak.$OPENCODE_BACKUP_FIXED_STAMP"
+OPENCODE_BACKUP_COLLISION_RUNTIME_BASE="$OPENCODE_BACKUP_COLLISION_RUNTIME.better-rm.bak.$OPENCODE_BACKUP_FIXED_STAMP"
+printf 'pre-existing plugin backup\n' > "$OPENCODE_BACKUP_COLLISION_PLUGIN_BASE"
+printf 'pre-existing runtime backup\n' > "$OPENCODE_BACKUP_COLLISION_RUNTIME_BASE"
+OPENCODE_BACKUP_DATE_BIN="$TMP_ROOT/opencode-backup-date-bin"
+REAL_DATE=$(command -v date)
+mkdir -p "$OPENCODE_BACKUP_DATE_BIN"
+cat > "$OPENCODE_BACKUP_DATE_BIN/date" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = "-u" ] && [ "\${2:-}" = "+%Y%m%dT%H%M%SZ" ]; then
+    printf '%s\n' "$OPENCODE_BACKUP_FIXED_STAMP"
+    exit 0
+fi
+exec "$REAL_DATE" "\$@"
+EOF
+chmod +x "$OPENCODE_BACKUP_DATE_BIN/date"
+OPENCODE_BACKUP_COLLISION_STATUS=0
+(
+    cd "$OPENCODE_BACKUP_COLLISION_REPO"
+    PATH="$OPENCODE_BACKUP_DATE_BIN:$PATH" "$INSTALLER" -a opencode
+) >/dev/null 2>&1 || OPENCODE_BACKUP_COLLISION_STATUS=$?
+assert_equal "opencode backup collision install succeeds" "0" "$OPENCODE_BACKUP_COLLISION_STATUS"
+assert_equal "opencode never overwrites a colliding plugin backup" \
+    "pre-existing plugin backup" "$(cat "$OPENCODE_BACKUP_COLLISION_PLUGIN_BASE")"
+assert_equal "opencode never overwrites a colliding runtime backup" \
+    "pre-existing runtime backup" "$(cat "$OPENCODE_BACKUP_COLLISION_RUNTIME_BASE")"
+assert_equal "opencode plugin backup collision uses suffix one" \
+    "collision predecessor plugin" "$(cat "$OPENCODE_BACKUP_COLLISION_PLUGIN_BASE.1")"
+assert_equal "opencode runtime backup collision uses suffix one" \
+    "collision predecessor runtime" "$(cat "$OPENCODE_BACKUP_COLLISION_RUNTIME_BASE.1")"
+
+# A backup that cannot be published must stop before replacing the predecessor.
+OPENCODE_BACKUP_FAIL_REPO="$TMP_ROOT/opencode-backup-publish-failure-project"
+make_repo "$OPENCODE_BACKUP_FAIL_REPO"
+mkdir -p "$OPENCODE_BACKUP_FAIL_REPO/.opencode/plugins" "$OPENCODE_BACKUP_FAIL_REPO/hooks"
+OPENCODE_BACKUP_FAIL_PLUGIN="$OPENCODE_BACKUP_FAIL_REPO/.opencode/plugins/protect-important-paths.ts"
+OPENCODE_BACKUP_FAIL_RUNTIME="$OPENCODE_BACKUP_FAIL_REPO/hooks/protect-important-paths.js"
+printf 'backup failure predecessor plugin\n' > "$OPENCODE_BACKUP_FAIL_PLUGIN"
+printf 'backup failure predecessor runtime\n' > "$OPENCODE_BACKUP_FAIL_RUNTIME"
+chmod 640 "$OPENCODE_BACKUP_FAIL_PLUGIN" "$OPENCODE_BACKUP_FAIL_RUNTIME"
+OPENCODE_BACKUP_FAIL_BIN="$TMP_ROOT/opencode-backup-publish-failure-bin"
+OPENCODE_BACKUP_FAIL_MARKER="$TMP_ROOT/opencode-backup-publish-failure-hit"
+mkdir -p "$OPENCODE_BACKUP_FAIL_BIN"
+cat > "$OPENCODE_BACKUP_FAIL_BIN/mv" <<EOF
+#!/bin/sh
+dest=\$(eval echo "\\\${\$#}")
+case "\$dest" in
+    *.better-rm.bak.*)
+        printf 'hit\n' > "$OPENCODE_BACKUP_FAIL_MARKER"
+        exit 74
+        ;;
+esac
+exec /bin/mv "\$@"
+EOF
+chmod +x "$OPENCODE_BACKUP_FAIL_BIN/mv"
+OPENCODE_BACKUP_FAIL_STATUS=0
+(
+    cd "$OPENCODE_BACKUP_FAIL_REPO"
+    PATH="$OPENCODE_BACKUP_FAIL_BIN:$PATH" "$INSTALLER" -a opencode
+) >/dev/null 2>&1 || OPENCODE_BACKUP_FAIL_STATUS=$?
+if [ -s "$OPENCODE_BACKUP_FAIL_MARKER" ]; then
+    pass "the opencode backup publish failure was injected"
+else
+    fail "the opencode backup publish failure was injected"
+fi
+if [ "$OPENCODE_BACKUP_FAIL_STATUS" -ne 0 ]; then
+    pass "opencode aborts when the recovery backup cannot be published"
+else
+    fail "opencode aborts when the recovery backup cannot be published"
+fi
+assert_equal "a failed plugin backup publish leaves predecessor bytes untouched" \
+    "backup failure predecessor plugin" "$(cat "$OPENCODE_BACKUP_FAIL_PLUGIN")"
+assert_equal "a failed plugin backup publish leaves predecessor mode untouched" "640" \
+    "$(file_mode "$OPENCODE_BACKUP_FAIL_PLUGIN")"
+assert_equal "a failed plugin backup publish leaves runtime untouched" \
+    "backup failure predecessor runtime" "$(cat "$OPENCODE_BACKUP_FAIL_RUNTIME")"
 
 # A symlinked *ancestor* must not let a project-scoped install escape the Git root.
 # validate_opencode_destination only inspects the final component, which does not
@@ -1894,6 +2074,375 @@ assert_success "opencode accepts an ancestor symlink that stays inside the root"
     bash -c "cd '$OPENCODE_INSIDE_LINK_REPO' && '$INSTALLER' -a opencode"
 assert_file "opencode installs through an inside-the-root ancestor symlink" \
     "$OPENCODE_INSIDE_LINK_REPO/real-plugins/protect-important-paths.ts"
+
+# The physical project root can itself be renamed after resolve_opencode_plugin
+# records it. Inject on the second dirname of the plugin destination: the first
+# occurs during the read-only containment check, while the second is the call
+# immediately before with_anchored_opencode_directory re-opens the root. A
+# changed root handle must be rejected before mkdir creates even `.opencode` in
+# the replacement route.
+OPENCODE_ROOT_SWAP_REPO="$TMP_ROOT/opencode-root-swap-project"
+make_repo "$OPENCODE_ROOT_SWAP_REPO"
+OPENCODE_ROOT_SWAP_OUTSIDE="$TMP_ROOT/opencode-root-swap-outside"
+mkdir -p "$OPENCODE_ROOT_SWAP_OUTSIDE"
+OPENCODE_ROOT_SWAP_BIN="$TMP_ROOT/opencode-root-swap-bin"
+OPENCODE_ROOT_SWAP_COUNT="$TMP_ROOT/opencode-root-swap-count"
+OPENCODE_ROOT_SWAP_MARKER="$TMP_ROOT/opencode-root-swap-hit"
+REAL_DIRNAME=$(command -v dirname)
+mkdir -p "$OPENCODE_ROOT_SWAP_BIN"
+cat > "$OPENCODE_ROOT_SWAP_BIN/dirname" <<EOF
+#!/bin/sh
+last=\$(eval echo "\\\${\$#}")
+case "\$last" in
+    */.opencode/plugins/protect-important-paths.ts)
+        count=0
+        [ ! -f "$OPENCODE_ROOT_SWAP_COUNT" ] || count=\$(cat "$OPENCODE_ROOT_SWAP_COUNT")
+        count=\$((count + 1))
+        printf '%s\n' "\$count" > "$OPENCODE_ROOT_SWAP_COUNT"
+        if [ "\$count" -eq 2 ]; then
+            /bin/mv "$OPENCODE_ROOT_SWAP_REPO" "$OPENCODE_ROOT_SWAP_REPO.before-swap" || exit 70
+            /bin/ln -s "$OPENCODE_ROOT_SWAP_OUTSIDE" "$OPENCODE_ROOT_SWAP_REPO" || exit 71
+            printf 'hit\n' > "$OPENCODE_ROOT_SWAP_MARKER"
+        fi
+        ;;
+esac
+exec "$REAL_DIRNAME" "\$@"
+EOF
+chmod +x "$OPENCODE_ROOT_SWAP_BIN/dirname"
+OPENCODE_ROOT_SWAP_STATUS=0
+OPENCODE_ROOT_SWAP_OUTPUT=$(
+    cd "$OPENCODE_ROOT_SWAP_REPO" &&
+    PATH="$OPENCODE_ROOT_SWAP_BIN:$PATH" "$INSTALLER" -a opencode 2>&1
+) || OPENCODE_ROOT_SWAP_STATUS=$?
+if [ -s "$OPENCODE_ROOT_SWAP_MARKER" ]; then
+    pass "the opencode project-root swap was injected before root re-open"
+else
+    fail "the opencode project-root swap was injected before root re-open"
+    printf '%s\n' "$OPENCODE_ROOT_SWAP_OUTPUT" >&2
+fi
+if [ "$OPENCODE_ROOT_SWAP_STATUS" -ne 0 ]; then
+    pass "opencode rejects a project root changed before re-open"
+else
+    fail "opencode rejects a project root changed before re-open"
+fi
+assert_equal "opencode rejects the changed root before creating outside directories" "0" \
+    "$(find "$OPENCODE_ROOT_SWAP_OUTSIDE" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+
+# A directory can change after the initial physical-path check. Intercept the
+# first publish, replace the plugin directory route, and then let the real copy
+# continue. The installer must keep the write anchored to the directory it
+# validated, notice that the configured route changed, and fail loudly.
+OPENCODE_SWAP_REPO="$TMP_ROOT/opencode-swap-project"
+make_repo "$OPENCODE_SWAP_REPO"
+mkdir -p "$OPENCODE_SWAP_REPO/.opencode/plugins"
+OPENCODE_SWAP_OUTSIDE="$TMP_ROOT/opencode-swap-outside"
+mkdir -p "$OPENCODE_SWAP_OUTSIDE"
+OPENCODE_SWAP_BIN="$TMP_ROOT/opencode-swap-bin"
+OPENCODE_SWAP_MARKER="$TMP_ROOT/opencode-swap-hit"
+mkdir -p "$OPENCODE_SWAP_BIN"
+cat > "$OPENCODE_SWAP_BIN/cp" <<EOF
+#!/bin/sh
+if [ ! -e "$OPENCODE_SWAP_MARKER" ]; then
+    : > "$OPENCODE_SWAP_MARKER"
+    mv "$OPENCODE_SWAP_REPO/.opencode/plugins" \
+        "$OPENCODE_SWAP_REPO/.opencode/plugins.before-swap" || exit 70
+    ln -s "$OPENCODE_SWAP_OUTSIDE" \
+        "$OPENCODE_SWAP_REPO/.opencode/plugins" || exit 71
+fi
+exec /bin/cp "\$@"
+EOF
+chmod +x "$OPENCODE_SWAP_BIN/cp"
+OPENCODE_SWAP_OUTPUT="$(
+    cd "$OPENCODE_SWAP_REPO"
+    PATH="$OPENCODE_SWAP_BIN:$PATH" "$INSTALLER" -a opencode 2>&1
+)" && OPENCODE_SWAP_STATUS=0 || OPENCODE_SWAP_STATUS=$?
+if [ "$OPENCODE_SWAP_STATUS" -ne 0 ]; then
+    pass "opencode rejects a destination route changed during publish"
+else
+    fail "opencode rejects a destination route changed during publish"
+fi
+assert_contains "opencode reports the changed destination route" \
+    "$OPENCODE_SWAP_OUTPUT" "changed during installation"
+if [ ! -e "$OPENCODE_SWAP_OUTSIDE/protect-important-paths.ts" ]; then
+    pass "opencode route swap writes no plugin outside the project root"
+else
+    fail "opencode route swap writes no plugin outside the project root"
+fi
+if [ ! -e "$OPENCODE_SWAP_REPO/hooks/protect-important-paths.js" ]; then
+    pass "opencode route swap aborts before publishing the runtime hook"
+else
+    fail "opencode route swap aborts before publishing the runtime hook"
+fi
+
+# Holding the destination directory does not by itself protect the final file
+# name. Replace an already-validated plugin with a symlink immediately before
+# the copy: a direct `cp source destination` follows that link and overwrites the
+# outside target. Publishing through an anchored temporary file must replace the
+# link itself, or abort, without changing the outside bytes.
+OPENCODE_FINAL_SWAP_REPO="$TMP_ROOT/opencode-final-swap-project"
+make_repo "$OPENCODE_FINAL_SWAP_REPO"
+mkdir -p "$OPENCODE_FINAL_SWAP_REPO/.opencode/plugins"
+OPENCODE_FINAL_SWAP_PLUGIN="$OPENCODE_FINAL_SWAP_REPO/.opencode/plugins/protect-important-paths.ts"
+printf 'stale plugin\n' > "$OPENCODE_FINAL_SWAP_PLUGIN"
+OPENCODE_FINAL_SWAP_OUTSIDE="$TMP_ROOT/opencode-final-swap-outside.ts"
+printf 'outside bytes must survive\n' > "$OPENCODE_FINAL_SWAP_OUTSIDE"
+OPENCODE_FINAL_SWAP_OUTSIDE_HASH="$(file_hash "$OPENCODE_FINAL_SWAP_OUTSIDE")"
+OPENCODE_FINAL_SWAP_BIN="$TMP_ROOT/opencode-final-swap-bin"
+OPENCODE_FINAL_SWAP_MARKER="$TMP_ROOT/opencode-final-swap-hit"
+mkdir -p "$OPENCODE_FINAL_SWAP_BIN"
+cat > "$OPENCODE_FINAL_SWAP_BIN/cp" <<EOF
+#!/bin/sh
+dest=\$(eval echo "\\\${\$#}")
+publish=\${BETTER_RM_OPENCODE_PUBLISH_PATH:-}
+if { [ "\${dest##*/}" = "protect-important-paths.ts" ] ||
+     [ "\${publish##*/}" = "protect-important-paths.ts" ]; } &&
+   [ ! -e "$OPENCODE_FINAL_SWAP_MARKER" ]; then
+    : > "$OPENCODE_FINAL_SWAP_MARKER"
+    mv "$OPENCODE_FINAL_SWAP_PLUGIN" "$OPENCODE_FINAL_SWAP_PLUGIN.before-swap" || exit 70
+    ln -s "$OPENCODE_FINAL_SWAP_OUTSIDE" "$OPENCODE_FINAL_SWAP_PLUGIN" || exit 71
+fi
+exec /bin/cp "\$@"
+EOF
+chmod +x "$OPENCODE_FINAL_SWAP_BIN/cp"
+OPENCODE_FINAL_SWAP_STATUS=0
+(
+    cd "$OPENCODE_FINAL_SWAP_REPO"
+    PATH="$OPENCODE_FINAL_SWAP_BIN:$PATH" "$INSTALLER" -a opencode
+) >/dev/null 2>&1 || OPENCODE_FINAL_SWAP_STATUS=$?
+if [ "$OPENCODE_FINAL_SWAP_STATUS" -ne 0 ]; then
+    pass "opencode rejects a final-component swap during publish"
+else
+    fail "opencode rejects a final-component swap during publish"
+fi
+assert_equal "opencode final-component swap preserves outside bytes" \
+    "$OPENCODE_FINAL_SWAP_OUTSIDE_HASH" "$(file_hash "$OPENCODE_FINAL_SWAP_OUTSIDE")"
+
+# The stage itself is attacker-visible. Swap it only after the installer's last
+# identity check, at the mv boundary. A stage-directory design resolves the
+# attacker's replacement as an intermediate symlink and moves the outside entry.
+# A direct-child stage may move only the replacement symlink itself; it must
+# never consume or modify the symlink target outside the anchored directory.
+OPENCODE_STAGE_MV_REPO="$TMP_ROOT/opencode-stage-mv-project"
+make_repo "$OPENCODE_STAGE_MV_REPO"
+mkdir -p "$OPENCODE_STAGE_MV_REPO/.opencode/plugins"
+OPENCODE_STAGE_MV_OUTSIDE_DIR="$TMP_ROOT/opencode-stage-mv-outside"
+mkdir -p "$OPENCODE_STAGE_MV_OUTSIDE_DIR"
+OPENCODE_STAGE_MV_OUTSIDE="$OPENCODE_STAGE_MV_OUTSIDE_DIR/protect-important-paths.ts"
+printf 'outside stage target must survive\n' > "$OPENCODE_STAGE_MV_OUTSIDE"
+OPENCODE_STAGE_MV_OUTSIDE_HASH="$(file_hash "$OPENCODE_STAGE_MV_OUTSIDE")"
+OPENCODE_STAGE_MV_BIN="$TMP_ROOT/opencode-stage-mv-bin"
+OPENCODE_STAGE_MV_MARKER="$TMP_ROOT/opencode-stage-mv-hit"
+mkdir -p "$OPENCODE_STAGE_MV_BIN"
+cat > "$OPENCODE_STAGE_MV_BIN/mv" <<EOF
+#!/bin/sh
+printf '%s\n' "\$@" >> "$TMP_ROOT/opencode-stage-mv-args"
+dest=\$(eval echo "\\\${\$#}")
+src_index=\$((\$# - 1))
+src=\$(eval echo "\\\${\$src_index}")
+if [ ! -e "$OPENCODE_STAGE_MV_MARKER" ]; then
+    case "\$src" in
+        ./.better-rm-opencode.*/*)
+            printf 'hit\n' > "$OPENCODE_STAGE_MV_MARKER"
+            stage_dir=\${src%/*}
+            /bin/mv "\$stage_dir" "\$stage_dir.before-swap" || exit 70
+            ln -s "$OPENCODE_STAGE_MV_OUTSIDE_DIR" "\$stage_dir" || exit 71
+            ;;
+        ./.better-rm-opencode.*)
+            printf 'hit\n' > "$OPENCODE_STAGE_MV_MARKER"
+            /bin/mv "\$src" "\$src.before-swap" || exit 72
+            ln -s "$OPENCODE_STAGE_MV_OUTSIDE" "\$src" || exit 73
+            ;;
+    esac
+fi
+exec /bin/mv "\$@"
+EOF
+chmod +x "$OPENCODE_STAGE_MV_BIN/mv"
+OPENCODE_STAGE_MV_STATUS=0
+OPENCODE_STAGE_MV_OUTPUT=$(
+    cd "$OPENCODE_STAGE_MV_REPO" &&
+    PATH="$OPENCODE_STAGE_MV_BIN:$PATH" "$INSTALLER" -a opencode 2>&1
+) || OPENCODE_STAGE_MV_STATUS=$?
+if [ -s "$OPENCODE_STAGE_MV_MARKER" ]; then
+    pass "the opencode stage swap was injected at the mv boundary"
+else
+    fail "the opencode stage swap was injected at the mv boundary"
+    printf '%s\n' "$OPENCODE_STAGE_MV_OUTPUT" >&2
+    sed -n '1,30p' "$TMP_ROOT/opencode-stage-mv-args" >&2
+fi
+if [ "$OPENCODE_STAGE_MV_STATUS" -ne 0 ]; then
+    pass "opencode fails loudly when the staged leaf changes at publish"
+else
+    fail "opencode fails loudly when the staged leaf changes at publish"
+fi
+if [ -f "$OPENCODE_STAGE_MV_OUTSIDE" ]; then
+    pass "opencode stage publish never moves the outside entry"
+    assert_equal "opencode stage publish preserves outside bytes" \
+        "$OPENCODE_STAGE_MV_OUTSIDE_HASH" "$(file_hash "$OPENCODE_STAGE_MV_OUTSIDE")"
+else
+    fail "opencode stage publish never moves the outside entry"
+    fail "opencode stage publish preserves outside bytes"
+fi
+
+# Cleanup is allowed to unlink only a direct child that still names the held
+# inode. Swap the staged leaf after its fd was populated but before verification;
+# the installer must retain the mismatching leaf and report the residue instead
+# of pretending it safely cleaned an object it no longer owns by identity.
+OPENCODE_CLEANUP_SWAP_REPO="$TMP_ROOT/opencode-cleanup-swap-project"
+make_repo "$OPENCODE_CLEANUP_SWAP_REPO"
+mkdir -p "$OPENCODE_CLEANUP_SWAP_REPO/.opencode/plugins"
+OPENCODE_CLEANUP_SWAP_OUTSIDE="$TMP_ROOT/opencode-cleanup-swap-outside.ts"
+printf 'outside cleanup target must survive\n' > "$OPENCODE_CLEANUP_SWAP_OUTSIDE"
+OPENCODE_CLEANUP_SWAP_OUTSIDE_HASH="$(file_hash "$OPENCODE_CLEANUP_SWAP_OUTSIDE")"
+OPENCODE_CLEANUP_SWAP_BIN="$TMP_ROOT/opencode-cleanup-swap-bin"
+OPENCODE_CLEANUP_SWAP_MARKER="$TMP_ROOT/opencode-cleanup-swap-hit"
+mkdir -p "$OPENCODE_CLEANUP_SWAP_BIN"
+cat > "$OPENCODE_CLEANUP_SWAP_BIN/cp" <<EOF
+#!/bin/sh
+/bin/cp "\$@" || exit \$?
+if [ ! -e "$OPENCODE_CLEANUP_SWAP_MARKER" ]; then
+    for candidate in ./.better-rm-opencode.stage.*; do
+        [ -f "\$candidate" ] || continue
+        printf 'hit\n' > "$OPENCODE_CLEANUP_SWAP_MARKER"
+        /bin/mv "\$candidate" "\$candidate.before-swap" || exit 70
+        ln -s "$OPENCODE_CLEANUP_SWAP_OUTSIDE" "\$candidate" || exit 71
+        break
+    done
+fi
+exit 0
+EOF
+chmod +x "$OPENCODE_CLEANUP_SWAP_BIN/cp"
+OPENCODE_CLEANUP_SWAP_STATUS=0
+OPENCODE_CLEANUP_SWAP_OUTPUT=$(
+    cd "$OPENCODE_CLEANUP_SWAP_REPO" &&
+    PATH="$OPENCODE_CLEANUP_SWAP_BIN:$PATH" "$INSTALLER" -a opencode 2>&1
+) || OPENCODE_CLEANUP_SWAP_STATUS=$?
+if [ -s "$OPENCODE_CLEANUP_SWAP_MARKER" ]; then
+    pass "the opencode cleanup leaf swap was injected"
+else
+    fail "the opencode cleanup leaf swap was injected"
+fi
+if [ "$OPENCODE_CLEANUP_SWAP_STATUS" -ne 0 ]; then
+    pass "opencode fails loudly when the staged leaf changes before cleanup"
+else
+    fail "opencode fails loudly when the staged leaf changes before cleanup"
+fi
+if [ -f "$OPENCODE_CLEANUP_SWAP_OUTSIDE" ]; then
+    pass "opencode cleanup never removes the outside entry"
+    assert_equal "opencode cleanup preserves outside bytes" \
+        "$OPENCODE_CLEANUP_SWAP_OUTSIDE_HASH" "$(file_hash "$OPENCODE_CLEANUP_SWAP_OUTSIDE")"
+else
+    fail "opencode cleanup never removes the outside entry"
+    fail "opencode cleanup preserves outside bytes"
+fi
+assert_contains "opencode cleanup reports retained staging residue" \
+    "$OPENCODE_CLEANUP_SWAP_OUTPUT" "Retained OpenCode staging residue"
+assert_equal "opencode cleanup retains a mismatching direct-child leaf" "1" \
+    "$(find "$OPENCODE_CLEANUP_SWAP_REPO/.opencode/plugins" -maxdepth 1 -type l \
+        -name '.better-rm-opencode.stage.*' | wc -l | tr -d ' ')"
+
+# Verification must read the already-opened stage inode, not resolve the public
+# staging leaf again. Swap only the runtime leaf after cp has populated fd 9;
+# the replacement JavaScript writes a marker if node ever executes it. The
+# install must fail on the later identity check without running that pathname.
+OPENCODE_VERIFY_SWAP_REPO="$TMP_ROOT/opencode-verify-swap-project"
+make_repo "$OPENCODE_VERIFY_SWAP_REPO"
+OPENCODE_VERIFY_SWAP_OUTSIDE="$TMP_ROOT/opencode-verify-swap-outside.js"
+OPENCODE_VERIFY_SWAP_EXECUTED="$TMP_ROOT/opencode-verify-swap-executed"
+cat > "$OPENCODE_VERIFY_SWAP_OUTSIDE" <<EOF
+require('fs').writeFileSync('$OPENCODE_VERIFY_SWAP_EXECUTED', 'executed');
+process.exit(0);
+EOF
+OPENCODE_VERIFY_SWAP_OUTSIDE_HASH="$(file_hash "$OPENCODE_VERIFY_SWAP_OUTSIDE")"
+OPENCODE_VERIFY_SWAP_BIN="$TMP_ROOT/opencode-verify-swap-bin"
+OPENCODE_VERIFY_SWAP_HIT="$TMP_ROOT/opencode-verify-swap-hit"
+mkdir -p "$OPENCODE_VERIFY_SWAP_BIN"
+cat > "$OPENCODE_VERIFY_SWAP_BIN/cp" <<EOF
+#!/bin/sh
+/bin/cp "\$@" || exit \$?
+case "\${BETTER_RM_OPENCODE_PUBLISH_PATH:-}" in
+    */protect-important-paths.js)
+        for candidate in ./.better-rm-opencode.stage.*; do
+            [ -f "\$candidate" ] || continue
+            /bin/mv "\$candidate" "\$candidate.before-swap" || exit 70
+            /bin/ln -s "$OPENCODE_VERIFY_SWAP_OUTSIDE" "\$candidate" || exit 71
+            printf 'hit\n' > "$OPENCODE_VERIFY_SWAP_HIT"
+            break
+        done
+        ;;
+esac
+exit 0
+EOF
+chmod +x "$OPENCODE_VERIFY_SWAP_BIN/cp"
+OPENCODE_VERIFY_SWAP_STATUS=0
+(
+    cd "$OPENCODE_VERIFY_SWAP_REPO"
+    PATH="$OPENCODE_VERIFY_SWAP_BIN:$PATH" "$INSTALLER" -a opencode
+) >/dev/null 2>&1 || OPENCODE_VERIFY_SWAP_STATUS=$?
+if [ -s "$OPENCODE_VERIFY_SWAP_HIT" ]; then
+    pass "the opencode runtime verification leaf swap was injected"
+else
+    fail "the opencode runtime verification leaf swap was injected"
+fi
+if [ "$OPENCODE_VERIFY_SWAP_STATUS" -ne 0 ]; then
+    pass "opencode fails when the runtime staging leaf changes before verification"
+else
+    fail "opencode fails when the runtime staging leaf changes before verification"
+fi
+if [ ! -e "$OPENCODE_VERIFY_SWAP_EXECUTED" ]; then
+    pass "opencode verifies the held runtime inode without executing the replacement pathname"
+else
+    fail "opencode verifies the held runtime inode without executing the replacement pathname"
+fi
+assert_equal "opencode runtime verification never modifies replacement bytes" \
+    "$OPENCODE_VERIFY_SWAP_OUTSIDE_HASH" "$(file_hash "$OPENCODE_VERIFY_SWAP_OUTSIDE")"
+
+# Writing a fail-closed stub into the held stage fd is not the same as publishing
+# it at OpenCode's execution path. Force the candidate verification to fail and
+# then fail only the runtime publish. The error must not claim protection landed.
+OPENCODE_STUB_PUBLISH_REPO="$TMP_ROOT/opencode-stub-publish-project"
+make_repo "$OPENCODE_STUB_PUBLISH_REPO"
+OPENCODE_STUB_PUBLISH_BIN="$TMP_ROOT/opencode-stub-publish-bin"
+mkdir -p "$OPENCODE_STUB_PUBLISH_BIN"
+cat > "$OPENCODE_STUB_PUBLISH_BIN/cp" <<'EOF'
+#!/bin/sh
+dest=$(eval echo "\${$#}")
+case "${BETTER_RM_OPENCODE_PUBLISH_PATH:-}" in
+    */protect-important-paths.js)
+        : > "$dest"
+        exit 0
+        ;;
+esac
+exec /bin/cp "$@"
+EOF
+cat > "$OPENCODE_STUB_PUBLISH_BIN/mv" <<'EOF'
+#!/bin/sh
+dest=$(eval echo "\${$#}")
+case "$dest" in
+    ./protect-important-paths.js) exit 74 ;;
+esac
+exec /bin/mv "$@"
+EOF
+chmod +x "$OPENCODE_STUB_PUBLISH_BIN/cp" "$OPENCODE_STUB_PUBLISH_BIN/mv"
+OPENCODE_STUB_PUBLISH_STATUS=0
+OPENCODE_STUB_PUBLISH_OUTPUT=$(
+    cd "$OPENCODE_STUB_PUBLISH_REPO" &&
+    PATH="$OPENCODE_STUB_PUBLISH_BIN:$PATH" "$INSTALLER" -a opencode 2>&1
+) || OPENCODE_STUB_PUBLISH_STATUS=$?
+if [ "$OPENCODE_STUB_PUBLISH_STATUS" -ne 0 ]; then
+    pass "opencode fails when a fail-closed runtime cannot be published"
+else
+    fail "opencode fails when a fail-closed runtime cannot be published"
+fi
+if [ ! -e "$OPENCODE_STUB_PUBLISH_REPO/hooks/protect-important-paths.js" ] &&
+   [ ! -L "$OPENCODE_STUB_PUBLISH_REPO/hooks/protect-important-paths.js" ]; then
+    pass "a failed fail-closed publish leaves no claimed runtime at the execution path"
+else
+    fail "a failed fail-closed publish leaves no claimed runtime at the execution path"
+fi
+assert_not_contains "opencode does not claim fail-closed before publication succeeds" \
+    "$OPENCODE_STUB_PUBLISH_OUTPUT" "it now fails closed"
+assert_contains "opencode reports that the fail-closed runtime was not published" \
+    "$OPENCODE_STUB_PUBLISH_OUTPUT" "could not be published"
 
 echo ""
 echo "========================================"
