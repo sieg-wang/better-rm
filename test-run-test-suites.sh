@@ -74,6 +74,16 @@ awk '
 assert_equal "fork pull requests trigger the read-only test workflow" \
     "0" "$PULL_REQUEST_TRIGGER_STATUS"
 
+WORKFLOW_DISPATCH_TRIGGER_STATUS=0
+awk '
+    $0 == "on:" { in_on = 1; next }
+    in_on && /^[^[:space:]]/ { in_on = 0 }
+    in_on && /^  workflow_dispatch:/ { found = 1 }
+    END { exit(found ? 0 : 1) }
+' "$WORKFLOW" || WORKFLOW_DISPATCH_TRIGGER_STATUS=$?
+assert_equal "maintainers can trigger the test workflow manually" \
+    "0" "$WORKFLOW_DISPATCH_TRIGGER_STATUS"
+
 WORKFLOW_RUNNER_STATUS=0
 test_job_invokes_public_runner "$WORKFLOW" || WORKFLOW_RUNNER_STATUS=$?
 assert_equal "CI test job invokes the public aggregate runner exactly once" \
