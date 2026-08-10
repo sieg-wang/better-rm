@@ -2596,6 +2596,107 @@ else
 fi
 
 # ============================================================================
+# 測試 15: 受保護清單全覆蓋 (Test 15: every PROTECTED_DIRS entry)
+# ============================================================================
+test_title "測試 15: 受保護清單全覆蓋"
+
+test_item "PROTECTED_DIRS 每一項都被 is_protected 認定為受保護"
+# 先前只有 /、/home、/mnt* 與 .git 測得到，PROTECTED_DIRS 其餘 13 筆（含 $HOME）
+# 可以整批從陣列刪掉而全套仍綠——better-rm 在 .bashrc 裡蓋掉 rm，那等於把
+# `rm -rf ~` 變成把整個家目錄搬進垃圾桶並回傳成功。
+# 這裡抽出 is_protected 與它的依賴單獨評估，不跑 main：拿真正的 /usr、/etc 去跑
+# better-rm，保護一旦失效就是叫測試自己去搬整個檔案系統。清單刻意寫死，從
+# PROTECTED_DIRS 讀回來會隨陣列一起縮小而永遠是綠的。抽函式的手法沿用
+# test-hooks.js 對 install-hooks.sh 既有的做法。
+# Only /, /home, /mnt* and .git were reachable before, so the other 13 entries of
+# PROTECTED_DIRS -- $HOME included -- could be deleted wholesale with the suite
+# green. better-rm is aliased over rm in .bashrc, so that turns `rm -rf ~` into a
+# whole-home move that exits 0. is_protected and its dependencies are evaluated in
+# isolation rather than through main: driving the real /usr or /etc through the
+# binary would, the moment the guard failed, make the test itself move the whole
+# filesystem. The 16+2 names are spelled out on purpose -- reading them back from
+# PROTECTED_DIRS would shrink with the array and keep passing. The extraction idiom
+# is the one test-hooks.js already uses on install-hooks.sh.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+protected_home="$TEST_WORK_DIR/protected-home"
+mkdir -p "$protected_home"
+# 0＝受保護、1＝未受保護、99＝抽取本身壞了（刻意與「未受保護」分開，壞掉的探針
+# 不該被讀成發現）。
+# Exit 0 protected, 1 unprotected, 99 the extraction itself broke -- kept distinct
+# from "unprotected" so a broken probe cannot read as a finding.
+is_protected_says_yes() {
+    HOME="$2" bash -c '
+        eval "$(sed -n "/^PROTECTED_DIRS=(/,/^)/p;/^PROTECTED_PATTERNS=(/,/^)/p" "$1")"
+        eval "$(sed -n "/^normalize_path()/,/^}/p;/^is_protected()/,/^}/p" "$1")"
+        if [ "$(type -t is_protected)" != function ] ||
+           [ "${#PROTECTED_DIRS[@]}" -eq 0 ] ||
+           [ "${#PROTECTED_PATTERNS[@]}" -eq 0 ]; then
+            exit 99
+        fi
+        is_protected "$2"
+    ' better-rm-is-protected "$BETTER_RM" "$1"
+}
+protected_unguarded=""
+protected_probe_broken=""
+for protected_path in / /bin /boot /dev /etc /home /lib /lib64 /mnt /opt \
+                      /proc /root /sbin /sys /usr /var \
+                      "$protected_home" "$protected_home/"; do
+    is_protected_says_yes "$protected_path" "$protected_home"
+    case $? in
+        0) ;;
+        99) protected_probe_broken="$protected_probe_broken $protected_path" ;;
+        *) protected_unguarded="$protected_unguarded $protected_path" ;;
+    esac
+done
+# 負對照：這道探測不是「一律說是」，否則刪掉整個清單也會通過。
+# Negative control: the probe is not simply saying yes to everything -- otherwise
+# deleting the whole list would also pass.
+protected_false_positive=""
+for unprotected_path in "$TEST_WORK_DIR/ordinary.txt" /mnt/c/project \
+                        /usr/local/share/x "$protected_home/keep"; do
+    if is_protected_says_yes "$unprotected_path" "$protected_home"; then
+        protected_false_positive="$protected_false_positive $unprotected_path"
+    fi
+done
+if [ -z "$protected_unguarded" ] && [ -z "$protected_false_positive" ] &&
+   [ -z "$protected_probe_broken" ]; then
+    test_pass "PROTECTED_DIRS 每一項都受保護，且一般路徑未被誤擋"
+else
+    test_fail "未受保護:${protected_unguarded:- 無}；誤擋:${protected_false_positive:- 無}；抽取失敗:${protected_probe_broken:- 無}"
+fi
+
+test_item "\$HOME 被拒絕且內容完好（端到端）"
+# 上一項證明清單被認定為受保護，這一項證明那個判斷真的攔在 move_to_trash 前面。
+# HOME 指向 sandbox，所以就算保護整個壞掉，被搬走的也只是 sandbox。
+# The previous item proves the list is recognised; this one proves that decision
+# really gates move_to_trash. HOME points at a sandbox, so a broken guard moves the
+# sandbox and nothing else.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+sandbox_home="$TEST_WORK_DIR/sandbox-home"
+mkdir -p "$sandbox_home/keep"
+printf 'KEEP\n' > "$sandbox_home/keep/marker.txt"
+home_refusal=$(HOME="$sandbox_home" "$BETTER_RM" -rf "$sandbox_home" 2>&1)
+if printf '%s' "$home_refusal" | grep -q "拒絕刪除受保護的目錄" &&
+   [ -f "$sandbox_home/keep/marker.txt" ]; then
+    test_pass "\$HOME 被拒絕且內容完好"
+else
+    test_fail "\$HOME 未受保護（標記存在=$([ -f "$sandbox_home/keep/marker.txt" ] && echo yes || echo no)）"
+fi
+
+test_item "\$HOME 內的一般目錄仍可刪除"
+# 負對照：保護的是家目錄本身，不是家目錄底下的一切。
+# Negative control: what is protected is the home directory itself, not everything
+# underneath it.
+if HOME="$sandbox_home" "$BETTER_RM" -rf "$sandbox_home/keep" >/dev/null 2>&1 &&
+   [ ! -e "$sandbox_home/keep" ]; then
+    test_pass "家目錄底下的一般目錄未被誤擋"
+else
+    test_fail "誤擋家目錄底下的一般目錄"
+fi
+
+# ============================================================================
 # 測試結果統計 (Test Results Summary)
 # ============================================================================
 cleanup

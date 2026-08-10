@@ -204,6 +204,88 @@ for (let depthLevel = 0; depthLevel < 10; depthLevel += 1) {
 }
 blocked.push(deeplyNestedCarrier);
 
+// Every entry of SYSTEM_DIRS must be denied by name. Only 7 of the 16 were
+// reachable from the tables above, so deleting '/bin', '/dev', '/home', '/lib',
+// '/lib64', '/proc', '/root', '/sbin' or '/sys' from that one array turned
+// `rm -rf /root` into an allow with the whole suite still green — and nothing
+// logs that the list shrank. The 16 names are spelled out here on purpose:
+// reading them back from the module would shrink together with the array and
+// keep passing, which is the exact failure this pins.
+// SYSTEM_DIRS 每一項都必須被指名擋下：先前只有 7 項測得到，其餘 9 項可以整批
+// 從陣列刪掉而全套仍綠。清單刻意寫死——從模組讀回來會隨陣列一起縮小而永遠是綠的。
+for (const systemDir of [
+  '/', '/bin', '/boot', '/dev', '/etc', '/home', '/lib', '/lib64', '/mnt',
+  '/opt', '/proc', '/root', '/sbin', '/sys', '/usr', '/var',
+]) {
+  blocked.push(`rm -rf ${systemDir}`, `rm -rf ${systemDir}/`);
+}
+// The home directory itself, in the spellings a shell can hand over.
+// 家目錄本身的各種寫法。
+blocked.push('rm -rf ~', 'rm -rf $HOME', 'rm -rf /home/tester/');
+
+// A path INSIDE .git is as unrecoverable as .git itself: `.git/objects` or
+// `.git/refs` loses the repository, and there is no trash copy on this path —
+// the hook's job is to stop the command before rm runs. Every .git row above
+// ends AT the .git component, so the mid-path rule could be deleted (it looks
+// redundant next to the endsWith one) while the suite stayed green.
+// .git 內部的路徑與 .git 本身一樣不可還原；先前的案例都只到 .git 那一層為止，
+// 因此看起來多餘的「中段 .git」規則可以刪掉而全套仍綠。
+blocked.push(
+  'rm -rf /workspace/project/.git/objects',
+  'rm -rf .git/objects/pack',
+  'rm -rf ../project/.git/hooks/pre-commit',
+  'rmdir /workspace/project/.git/refs/heads',
+);
+// Negative control: .git has to be a path COMPONENT, not a substring. A widened
+// rule that also matched .gitignore or .github would be a blanket refusal of
+// ordinary repository housekeeping.
+// 負對照：.git 必須是路徑元件而非子字串，否則會誤擋 .gitignore、.github。
+allowed.push('rm -rf build/.gitignore', 'rm -rf .github/workflows');
+
+// `depth >= 8` fails closed in nine places, and the shell carrier above was the
+// only one anybody had exercised. Each wrapper below reaches a DIFFERENT one of
+// them, so each needs its own row: making any single site fail OPEN left the
+// whole suite green and handed out a mechanical bypass, since adding another
+// layer of nesting costs the caller nothing.
+// (The ninth site — an unresolvable command word whose operand is itself a whole
+// command — is not reachable this way: that shape already denies for another
+// reason, so nesting it proves nothing and it stays unpinned.)
+// `depth >= 8` 的失敗關閉共有九處，先前只有上面的 shell carrier 被執行過。下面
+// 每個包裝各自打到不同的一處，因此必須各有一列：任何一處改成 fail open，全套
+// 都仍是綠的，而多包一層對攻擊者毫無成本。
+// （第九處——命令字無法解析、其運算元本身是一整條命令——用這個形狀打不到：那種
+// 寫法本來就會因為別的理由被拒絕，包再多層也證明不了什麼，因此仍未釘住。）
+const recursionCapWrappers = [
+  (inner) => `echo $(${inner})`,                           // command substitution
+  (inner) => `eval ${JSON.stringify(inner)}`,              // eval
+  (inner) => `env -S ${JSON.stringify(inner)}`,            // env -S <string>
+  (inner) => `env -S${JSON.stringify(inner)}`,             // env -S<string>
+  (inner) => `env -ivS ${JSON.stringify(inner)}`,          // env -ivS <string>
+  (inner) => `env -ivS${JSON.stringify(inner)}`,           // env -ivS<string>
+  (inner) => `env --split-string=${JSON.stringify(inner)}`,
+];
+for (const wrapPastCap of recursionCapWrappers) {
+  let pastCapDestructive = 'rm -rf /';
+  let pastCapBenign = 'rm -rf build';
+  let insideCapBenign = 'rm -rf build';
+  for (let depthLevel = 0; depthLevel < 10; depthLevel += 1) {
+    pastCapDestructive = wrapPastCap(pastCapDestructive);
+    pastCapBenign = wrapPastCap(pastCapBenign);
+    if (depthLevel < 8) insideCapBenign = wrapPastCap(insideCapBenign);
+  }
+  // The hazard the cap exists for, and — because past the cap the hook can no
+  // longer reason about the command at all — the same nesting around a harmless
+  // target, which must fail closed too.
+  // 上限存在的理由；以及同樣層數但目標無害的版本，超過上限就無從判斷，也必須關閉。
+  blocked.push(pastCapDestructive, pastCapBenign);
+  // Negative control: the cap is a boundary, not a blanket refusal. Nesting that
+  // stops just inside it (8 levels) must still be allowed, or `depth >= 7` would
+  // pass just as well.
+  // 負對照：上限是邊界而非一律拒絕。剛好在界內（8 層）仍須放行，否則改成 `>= 7`
+  // 也會是綠的。
+  allowed.push(insideCapBenign);
+}
+
 for (const command of blocked) {
   const result = evaluate(claude(command), env);
   assert.equal(result?.hookSpecificOutput?.permissionDecision, 'deny', command);
@@ -536,4 +618,128 @@ hookShapeChecks += 1;
 
 fs.rmSync(scratch, { recursive: true, force: true });
 
-console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks}`);
+// ---------------------------------------------------------------------------
+// The OpenCode plugin's own decision. install-hooks.sh embeds a byte-identical
+// copy of the plugin and test-install-hooks.sh pins the installed file to that
+// source by hash — but nothing ever RAN the handler, so inverting the deny
+// comparison in BOTH copies left all 1079 checks green while OpenCode permitted
+// `rm -rf /`. OpenCode has no PreToolUse JSON hook: this plugin is its entire
+// guard, the one agent whose protection has no second layer.
+// OpenCode 外掛的判斷邏輯。既有測試只用 hash 比對兩份副本的位元組，從未執行
+// handler，因此把 deny 比對同時改在兩份副本上，全套仍綠，而 OpenCode 會放行
+// `rm -rf /`——OpenCode 沒有 PreToolUse hook，這支外掛就是它的全部防護。
+//
+// The plugin is TypeScript and CI runs plain node, so the erasable type syntax
+// is stripped and the hook import is bound to the module this file already
+// loaded. Every rewrite is asserted before it is applied: if the plugin stops
+// having this shape the loader fails loudly instead of quietly measuring
+// nothing. The decision itself is the shipped source, unmodified.
+// ---------------------------------------------------------------------------
+const pluginPath = `${__dirname}/.opencode/plugins/protect-important-paths.ts`;
+const pluginRewrites = [
+  [/^import type \{ Plugin \} from "@opencode-ai\/plugin";$/m, ''],
+  [/^\/\/ @ts-ignore$/m, ''],
+  [
+    /^import \{ evaluate \} from "\.\.\/\.\.\/hooks\/protect-important-paths";$/m,
+    'const { evaluate } = hookModule;',
+  ],
+  [/: Plugin\b/, ''],
+  [/\(ctx as any\)/, 'ctx'],
+  [/^export const /m, 'const '],
+  [/^export default ProtectImportantPathsPlugin;$/m, ''],
+];
+let pluginBody = fs.readFileSync(pluginPath, 'utf8');
+for (const [pattern, replacement] of pluginRewrites) {
+  assert.match(
+    pluginBody,
+    pattern,
+    `the OpenCode plugin no longer matches ${pattern}; update this loader`
+  );
+  pluginBody = pluginBody.replace(pattern, replacement);
+}
+const pluginFactory = new Function(
+  'hookModule',
+  `${pluginBody}\nreturn ProtectImportantPathsPlugin;`
+)({ evaluate });
+
+const pluginDenied = ['rm -rf /', 'rm -rf /etc', 'rm -rf .git', 'CMD=rm; $CMD -rf /'];
+const pluginAllowed = ['rm -rf build', 'ls -la /etc', 'echo rm -rf /'];
+
+async function runOpenCodePluginChecks() {
+  let pluginChecks = 0;
+  const hooks = await pluginFactory({ directory: '/workspace/project' });
+  const before = hooks['tool.execute.before'];
+  assert.equal(typeof before, 'function', 'the OpenCode plugin registers tool.execute.before');
+  pluginChecks += 1;
+
+  for (const command of pluginDenied) {
+    let thrown = null;
+    try {
+      await before({ tool: 'bash' }, { args: { command } });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown, `the OpenCode plugin must refuse: ${command}`);
+    assert.match(
+      thrown.message,
+      /Refused to remove protected directory/,
+      `the OpenCode refusal must name the reason: ${command}`
+    );
+    pluginChecks += 1;
+  }
+
+  // Negative controls: the plugin must not become a blanket refusal, and a tool
+  // that is not bash carries no shell command to inspect.
+  // 負對照：不能變成一律拒絕；非 bash 的工具沒有 shell 命令可檢查。
+  for (const command of pluginAllowed) {
+    try {
+      await before({ tool: 'bash' }, { args: { command } });
+    } catch (error) {
+      assert.fail(`the OpenCode plugin must not refuse: ${command} (${error.message})`);
+    }
+    pluginChecks += 1;
+  }
+  try {
+    await before({ tool: 'read' }, { args: { command: 'rm -rf /' } });
+  } catch (error) {
+    assert.fail(`a tool that is not bash carries no command to inspect (${error.message})`);
+  }
+  pluginChecks += 1;
+
+  // The session directory has to reach evaluate(): a relative BETTER_RM_PROTECTED_DIRS
+  // entry is resolved against it, so dropping `cwd` from the payload silently
+  // moves every relative decision to the node process's own directory.
+  // ctx.directory 必須傳到 evaluate()：相對的 BETTER_RM_PROTECTED_DIRS 是以它為
+  // 基準解析的，payload 少了 cwd 會讓所有相對判斷改用 node 行程自己的目錄。
+  const previousExtraDirs = process.env.BETTER_RM_PROTECTED_DIRS;
+  process.env.BETTER_RM_PROTECTED_DIRS = 'secrets';
+  try {
+    let thrown = null;
+    try {
+      await before({ tool: 'bash' }, { args: { command: 'rm -rf /workspace/project/secrets' } });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown, 'the OpenCode plugin must pass ctx.directory to evaluate as cwd');
+    pluginChecks += 1;
+  } finally {
+    if (previousExtraDirs === undefined) delete process.env.BETTER_RM_PROTECTED_DIRS;
+    else process.env.BETTER_RM_PROTECTED_DIRS = previousExtraDirs;
+  }
+
+  return pluginChecks;
+}
+
+// The plugin handler is async, so its checks cannot run before the summary is
+// printed the way every check above does. Exit non-zero until they finish:
+// a file that exited 0 without having run them would look green.
+// 外掛 handler 是 async，無法在總結列印前完成，因此先設為失敗，跑完才清為 0——
+// 否則「沒跑到」會看起來是綠的。
+process.exitCode = 1;
+runOpenCodePluginChecks().then((pluginChecks) => {
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + pluginChecks}`);
+  process.exitCode = 0;
+}).catch((error) => {
+  console.error(error && error.stack ? error.stack : error);
+  process.exitCode = 1;
+});
