@@ -1579,6 +1579,21 @@ if (!changed && existed) {
 
 const directory = path.dirname(settingsPath);
 fs.mkdirSync(directory, { recursive: true, mode: scope === 'global' ? 0o700 : 0o755 });
+if (scope === 'global') {
+  // The mode above applies only to directories this call actually CREATES.
+  // Measured with umask 022: a fresh ~/.claude comes out 0700, but one that
+  // already exists — the normal case for anyone who has run the agent before —
+  // keeps whatever it had, typically 0755. The global settings file holds hook
+  // configuration and sits beside credentials, so repair the directory too.
+  // Only ever tighten: a directory already at 0700 or stricter is left alone,
+  // and the change is announced rather than done silently.
+  const current = fs.statSync(directory).mode & 0o777;
+  if (current & 0o077) {
+    fs.chmodSync(directory, 0o700);
+    process.stderr.write(
+      `tightened ${directory} from ${current.toString(8)} to 700\n`);
+  }
+}
 
 let backupPath = '';
 if (existed) {

@@ -290,6 +290,36 @@ mkdir -p "$GLOBAL_HOME"
 GLOBAL_SETTINGS="$GLOBAL_HOME/.claude/settings.json"
 assert_file "global settings use HOME fallback" "$GLOBAL_SETTINGS"
 assert_equal "new global settings use mode 600" "600" "$(file_mode "$GLOBAL_SETTINGS")"
+# The DIRECTORY's mode was asserted nowhere. mkdirSync's mode applies only to
+# directories the call creates, so this half passed on its own while the case
+# below — an existing config dir — kept 0755 forever.
+assert_equal "new global config dir uses mode 700" "700" "$(file_mode "$GLOBAL_HOME/.claude")"
+
+# An ALREADY-EXISTING config dir must be tightened too. This is the normal case:
+# anyone who has run the agent before already has ~/.claude, and mkdirSync will
+# not touch its mode. Measured before the fix: fresh 700, pre-existing 755.
+PREEXIST_HOME="$TMP_ROOT/global-home-preexisting"
+mkdir -p "$PREEXIST_HOME/.claude"
+chmod 755 "$PREEXIST_HOME/.claude"
+assert_equal "fixture really starts at 755" "755" "$(file_mode "$PREEXIST_HOME/.claude")"
+(
+    cd "$TMP_ROOT"
+    CLAUDE_CONFIG_DIR= HOME="$PREEXIST_HOME" "$INSTALLER" --agent claude --global >/dev/null
+)
+assert_equal "existing global config dir is tightened to 700" "700" \
+    "$(file_mode "$PREEXIST_HOME/.claude")"
+
+# ...and never loosened. A dir already stricter than 0700 keeps its mode, so the
+# repair above cannot be satisfied by an unconditional chmod 700.
+STRICT_HOME="$TMP_ROOT/global-home-strict"
+mkdir -p "$STRICT_HOME/.claude"
+chmod 500 "$STRICT_HOME/.claude"
+(
+    cd "$TMP_ROOT"
+    CLAUDE_CONFIG_DIR= HOME="$STRICT_HOME" "$INSTALLER" --agent claude --global >/dev/null 2>&1
+) || true
+assert_equal "a stricter existing config dir is left alone" "500" \
+    "$(file_mode "$STRICT_HOME/.claude")"
 
 CUSTOM_CONFIG="$TMP_ROOT/custom config"
 (
