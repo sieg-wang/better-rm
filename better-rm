@@ -32,8 +32,14 @@ get_deletion_log_file() {
 # Protected directories list - prevent deletion of these critical directories
 PROTECTED_DIRS=(
     "/"
+    "/Applications"
+    "/Library"
+    "/Network"
+    "/System"
+    "/Users"
     "/bin"
     "/boot"
+    "/cores"
     "/dev"
     "/etc"
     "/home"
@@ -41,6 +47,7 @@ PROTECTED_DIRS=(
     "/lib64"
     "/mnt"
     "/opt"
+    "/private"
     "/proc"
     "/root"
     "/sbin"

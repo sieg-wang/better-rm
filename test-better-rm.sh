@@ -2995,7 +2995,7 @@ test_item "PROTECTED_DIRS 每一項都被 is_protected 認定為受保護"
 # whole-home move that exits 0. is_protected and its dependencies are evaluated in
 # isolation rather than through main: driving the real /usr or /etc through the
 # binary would, the moment the guard failed, make the test itself move the whole
-# filesystem. The 16+2 names are spelled out on purpose -- reading them back from
+# filesystem. The 23+2 names are spelled out on purpose -- reading them back from
 # PROTECTED_DIRS would shrink with the array and keep passing. The extraction idiom
 # is the one test-hooks.js already uses on install-hooks.sh.
 setup
@@ -3020,8 +3020,9 @@ is_protected_says_yes() {
 }
 protected_unguarded=""
 protected_probe_broken=""
-for protected_path in / /bin /boot /dev /etc /home /lib /lib64 /mnt /opt \
-                      /proc /root /sbin /sys /usr /var \
+for protected_path in / /Applications /Library /Network /System /Users \
+                      /bin /boot /cores /dev /etc /home /lib /lib64 /mnt /opt \
+                      /private /proc /root /sbin /sys /usr /var \
                       "$protected_home" "$protected_home/"; do
     is_protected_says_yes "$protected_path" "$protected_home"
     case $? in
@@ -3031,11 +3032,22 @@ for protected_path in / /bin /boot /dev /etc /home /lib /lib64 /mnt /opt \
     esac
 done
 # 負對照：這道探測不是「一律說是」，否則刪掉整個清單也會通過。
+# 受保護的是那個目錄本身，不是它底下的一切：/Applications 是使用者可寫的，移除
+# 單一 app bundle 是日常操作。清單一旦改成前綴比對，這裡的每一列都會轉紅——
+# 那會是比原本的缺漏更嚴重的退化。
 # Negative control: the probe is not simply saying yes to everything -- otherwise
-# deleting the whole list would also pass.
+# deleting the whole list would also pass. What is protected is the directory
+# itself, not everything underneath it: /Applications is user-writable and
+# removing a single app bundle is ordinary work. Every row below goes red if the
+# comparison is ever widened to a prefix match, which would be a worse regression
+# than the missing entries were.
 protected_false_positive=""
 for unprotected_path in "$TEST_WORK_DIR/ordinary.txt" /mnt/c/project \
-                        /usr/local/share/x "$protected_home/keep"; do
+                        /usr/local/share/x "$protected_home/keep" \
+                        /Applications/BetterRmProbe.app /Library/Preferences \
+                        /Network/Servers /System/Library \
+                        /Users/better-rm-probe /cores/core.1 \
+                        /private/tmp/better-rm-probe; do
     if is_protected_says_yes "$unprotected_path" "$protected_home"; then
         protected_false_positive="$protected_false_positive $unprotected_path"
     fi
