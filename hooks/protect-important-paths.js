@@ -289,6 +289,22 @@ function normalizedTarget(value, cwd, home) {
   // truncated here too; otherwise the guard compares '/etc\0' (never a match)
   // while the shell actually runs rm on '/etc'.
   const truncated = String(value).split('\0')[0];
+  // A trailing slash is dropped here, and with it the one thing that would tell
+  // this guard the argument reaches a symlink's TARGET: `rm -rf link/` resolves
+  // the final component, destroys what the link points at and leaves the link.
+  // better-rm refuses those spellings because it can see the filesystem. This
+  // cannot: it is a PreToolUse gate on every agent command, and a stat that blocks
+  // -- an unresponsive network or cloud mount -- would block the agent itself, so
+  // it stays filesystem-free by design. Refusing every trailing-slash argument
+  // instead would refuse `rm -rf build/`, which is ordinary work. So this is a
+  // known, deliberate gap on the agent path, declared as such in the differential
+  // parity suite (test-guard-parity.js, section 3b) rather than left to be
+  // rediscovered.
+  // 結尾斜線在這裡被去掉，連同「這個引數會碰到 symlink target」的唯一線索：`rm -rf
+  // link/` 解析最後一段，毀掉的是 target 的內容。better-rm 看得見檔案系統所以會拒絕；
+  // 這支不行——它是每一次 agent 命令都會經過的閘門，一次會阻塞的 stat 就卡住整個
+  // agent。而「一律拒絕結尾斜線」會連 `rm -rf build/` 都擋掉。這是刻意留下的缺口，
+  // 在差分測試 test-guard-parity.js 的 3b 節逐條宣告。
   const expanded = expandHome(truncated.replace(/[\\/]+$/, '') || '/', home);
   if (/[*?\[\]{}]/.test(expanded)) return expanded;
   return path.resolve(cwd, expanded);

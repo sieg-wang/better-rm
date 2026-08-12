@@ -26,8 +26,18 @@
 // outside its own temporary sandbox.
 // 兩邊都只是純判斷式：hook 完全不碰檔案系統，is_protected 只做 stat 與解析。
 //
+// A few spellings cannot agree, because the two guards do not observe the same
+// thing: one reads command text before the shell expands it, the other reads argv
+// after, and one may touch the filesystem while the other must not. Those are
+// declared one by one in section 3b with their direction and reason, and the
+// declarations are checked in both directions so the list cannot become a place
+// to hide rows -- see the comment there.
+// 有幾種拼寫不可能一致（兩邊觀察的不是同一個東西），在 3b 逐條宣告方向與理由，並且
+// 雙向檢查，詳見該處註解。
+//
 // Exit codes / 結束碼:
-//   0  every row agrees and every expectation holds
+//   0  every row agrees (or is a declared cross-layer difference that still holds)
+//      and every expectation holds
 //   1  at least one divergence or expectation failure (the work list)
 //  99  the harness itself is broken (extraction empty, probe not two-valued,
 //      quoting distorted an operand) -- kept distinct from 1 so a broken probe
@@ -393,6 +403,94 @@ for (const parent of mountParents) {
     `the corpus generator dropped a mount parent: ${parent}`);
 }
 require_(corpus.length > 0, 'the corpus is empty');
+
+// ---------------------------------------------------------------------------
+// 3b. Differences that belong to the two guards' different positions
+//     兩道守衛所處位置不同而必然存在的差異
+// ---------------------------------------------------------------------------
+// A handful of spellings cannot be made to agree by fixing either guard, because
+// the two do not observe the same thing. Deleting the row would make the suite
+// green by making it blind; leaving the row undeclared would make the suite
+// permanently red and train everyone to ignore it. So each one is declared here,
+// with its direction and its reason, and the declarations are checked in BOTH
+// directions: an undeclared divergence still fails, and a declaration whose row
+// has converged (or flipped) fails too, so this list cannot quietly rot into a
+// suppression file. A row the corpus requires both guards to deny or to allow can
+// never be declared here at all.
+// 有幾種拼寫不可能靠修哪一邊來收斂，因為兩道守衛觀察的根本不是同一個東西。刪掉那
+// 幾列是把測試弄瞎，留著不宣告則是讓它永遠紅、訓練所有人忽略它。因此逐條宣告方向
+// 與理由，並且雙向檢查：未宣告的分歧照樣失敗，已宣告卻收斂（或反向）的宣告也失敗。
+// 語料要求「兩邊都必須拒絕／都必須放行」的列，不得出現在這份清單裡。
+const crossLayer = new Map();
+
+function declareCrossLayer(spelling, hookVerdictDeclared, cliVerdictDeclared, why) {
+  require_(typeof why === 'string' && why.length > 0,
+    `a cross-layer declaration carries no reason: ${spelling}`);
+  require_(hookVerdictDeclared !== cliVerdictDeclared,
+    `a cross-layer declaration declares agreement, which is not a difference: ${spelling}`);
+  const rows = corpus.filter((row) => row.spelling === spelling);
+  require_(rows.length === 1,
+    `a cross-layer declaration names ${rows.length} corpus rows: ${spelling}`);
+  // The escape hatch must not be usable on a row whose verdict this harness has an
+  // opinion about. 'deny' means the protection itself; 'allow' means the
+  // anti-tautology half. Only 'agree' rows -- where the corpus asks for consistency
+  // and nothing more -- can be answered with "these two cannot be consistent".
+  // 逃生口不得用在本檔有主張的列上：deny 是保護本身，allow 是反恆真的另一半。
+  require_(rows[0].expect === 'agree',
+    `a cross-layer declaration was used on a row the corpus requires both guards to ${rows[0].expect}: ${spelling}`);
+  require_(!crossLayer.has(spelling), `a cross-layer declaration is duplicated: ${spelling}`);
+  crossLayer.set(spelling, { hook: hookVerdictDeclared, cli: cliVerdictDeclared, why });
+}
+
+// -- the hook reads command text, better-rm reads argv ---------------------
+// The hook is handed the command BEFORE the shell expands it, and it cannot know
+// what the expansion will produce -- not even for HOME, which the same command can
+// override (`HOME=/ rm "$HOME/etc"`). It therefore reads `~`, `$HOME` and `${HOME}`
+// as the home directory and refuses. better-rm is handed argv AFTER expansion: if
+// the shell expanded them it never sees these spellings at all, and if it did not
+// (they were quoted), they are ordinary filenames -- a file literally named `~`,
+// or `*` left behind when a glob matched nothing. Refusing those would be a false
+// positive at better-rm's layer, and reading them literally would be a hole at the
+// hook's. Both sides are right where they stand; there is no third answer, and
+// weakening the hook to reach agreement would be a regression.
+// hook 看到的是展開前的命令文字，連 HOME 都可能被同一條命令覆寫，所以只能失敗關閉；
+// better-rm 收到的是展開後的 argv，那裡的 `~`、`*` 就只是普通檔名。兩邊在各自的層
+// 都是對的，為了一致而放寬 hook 會是退化。
+for (const [spelling, why] of [
+  ['~', 'the hook cannot know what the shell will expand ~ to; in argv it is a filename'],
+  ['$HOME', 'the same command can override HOME, so the hook must fail closed'],
+  ['${HOME}', 'the same command can override HOME, so the hook must fail closed'],
+  ['/usr\\', 'a trailing backslash continues a line in command text and is a filename character in argv'],
+  [path.join(sandbox, '*'), 'the hook cannot expand a glob, so it refuses anything that could select .git'],
+  [path.join(sandbox, '.gi*'), 'the hook cannot expand a glob, so it refuses anything that could select .git'],
+  [path.join(sandbox, '{.git,dist}'), 'the hook cannot expand a brace list, so it refuses anything that could select .git'],
+]) declareCrossLayer(spelling, 'DENY', 'ALLOW', why);
+
+// -- the hook never touches the filesystem, better-rm must ------------------
+// A trailing slash (and `/.`, and `/..`) forces resolution of the final component,
+// so `link/` reaches the TARGET: measured, `rm -rf link/` returns 0, destroys the
+// target's contents and leaves the link behind. better-rm sees that -- it has to,
+// because its own move would follow the link -- and refuses. The hook resolves the
+// path lexically and cannot see it.
+// It stays that way on purpose. The hook runs as a PreToolUse gate on EVERY agent
+// command; a stat that blocks blocks the agent itself, and this machine mounts a
+// cloud filesystem that has hard-deadlocked on exactly that kind of access. The
+// alternative -- refusing every trailing-slash argument -- would refuse
+// `rm -rf build/`, which is ordinary work, and the brief is explicit that ordinary
+// directory removals must keep working. So the hook accepts that it cannot see a
+// symlink, and the residual gap (`rm -rf ~/applink/` on the agent path) is recorded
+// as an open item rather than papered over.
+// 結尾斜線會強制解析最後一段，所以 `link/` 碰到的是 target；better-rm 看得見（它自己
+// 的搬移也會跟過去）因此拒絕，hook 只做字面解析看不見。這是刻意的：hook 是每一次
+// agent 命令都會經過的閘門，一次會阻塞的 stat 就會卡住整個 agent，而這台機器上就掛著
+// 一個曾經因為這種存取而硬死鎖的雲端檔案系統；而「一律拒絕結尾斜線」會連 `rm -rf
+// build/` 都擋掉。殘留的缺口列為待辦，不是假裝不存在。
+for (const [spelling, why] of [
+  [`${LINK_TO_PROTECTED}/`, 'a trailing slash resolves the link; the hook cannot follow it without touching the filesystem'],
+  [`${LINK_TO_PROTECTED}/.`, 'the /. spelling resolves the link, for the same reason'],
+  [`${LINK_TO_PROTECTED}/..`, 'the /.. spelling resolves through the link to /, which the hook collapses lexically to the sandbox'],
+  [`${LINK_TO_GIT_DIR}/`, 'a trailing slash resolves the link onto a .git directory the hook cannot see'],
+]) declareCrossLayer(spelling, 'ALLOW', 'DENY', why);
 const groups = [...new Set(corpus.map((row) => row.group))];
 require_(groups.length >= 9, `the corpus lost a whole group (${groups.join(', ')})`);
 
@@ -553,6 +651,21 @@ const divergences = corpus.filter((row) => row.hook !== row.cli);
 const expectationFailures = corpus.filter((row) => row.hook === row.cli
   && ((row.expect === 'deny' && row.hook === 'ALLOW') || (row.expect === 'allow' && row.hook === 'DENY')));
 
+// A divergence counts as answered only if it was declared in exactly the
+// direction it actually has. A declaration is checked the other way round too:
+// once its row converges, or flips, the declaration is wrong and saying so is the
+// only thing that keeps this list from becoming a place to hide rows.
+// 分歧必須連方向都與宣告相符才算已回答；反過來，宣告的列一旦收斂或反向，宣告本身
+// 就是錯的——這是這份清單不會退化成藏東西的地方的唯一理由。
+const undeclaredDivergences = divergences.filter((row) => {
+  const declared = crossLayer.get(row.spelling);
+  return !(declared && declared.hook === row.hook && declared.cli === row.cli);
+});
+const staleDeclarations = [...crossLayer.entries()]
+  .map(([spelling, declared]) => ({ declared, row: corpus.find((item) => item.spelling === spelling) }))
+  .filter(({ declared, row }) => !(row.hook !== row.cli
+    && row.hook === declared.hook && row.cli === declared.cli));
+
 // The corpus header belongs with whichever report is being produced. Splitting
 // it across stdout and stderr let the two streams interleave differently on
 // different runners, which made two identical results look unequal.
@@ -564,18 +677,50 @@ const header = [
   `  $HOME    = ${HOME}`,
 ].join('\n');
 
-if (divergences.length === 0 && expectationFailures.length === 0) {
+// The declared differences are printed on the GREEN path too. A difference nobody
+// ever reads is one nobody ever revisits, and these are open holes, not settled
+// facts: the trailing-slash symlink one is a live gap on the agent path.
+// 綠燈時也要把已宣告的差異印出來：沒人看見的差異就沒人會回頭處理，而這幾條是還開著
+// 的洞，不是已經結案的事實。
+function declaredReport() {
+  const rows = [...crossLayer.entries()].map(([spelling, declared]) => ({ spelling, declared }));
+  return [
+    `已宣告的跨層差異 / Declared cross-layer differences: ${rows.length}`,
+    table(rows, [
+      { header: 'hook', value: ({ declared }) => declared.hook },
+      { header: 'better-rm', value: ({ declared }) => declared.cli },
+      { header: 'path', value: ({ spelling }) => display(spelling) },
+      { header: 'why', value: ({ declared }) => declared.why },
+    ]),
+  ].join('\n');
+}
+
+if (undeclaredDivergences.length === 0 && staleDeclarations.length === 0
+  && expectationFailures.length === 0) {
   console.log(header);
-  console.log(`Guard parity 測試通過 / Guard parity checks passed: ${corpus.length * 2}`);
+  console.log(declaredReport());
+  console.log(`Guard parity 測試通過 / Guard parity checks passed: ${corpus.length * 2 + crossLayer.size}`);
   process.exit(0);
 }
 
 console.error(header);
 
-if (divergences.length > 0) {
+if (staleDeclarations.length > 0) {
   console.error('');
-  console.error(`兩道守衛判定不一致 / The two guards disagree on ${divergences.length} of ${corpus.length} spellings:`);
-  console.error(table(divergences, [
+  console.error(`宣告與實測不符 / ${staleDeclarations.length} declared cross-layer differences no longer hold:`);
+  console.error(table(staleDeclarations, [
+    { header: 'declared', value: ({ declared }) => `hook ${declared.hook} / better-rm ${declared.cli}` },
+    { header: 'measured', value: ({ row }) => `hook ${row.hook} / better-rm ${row.cli}` },
+    { header: 'path', value: ({ row }) => display(row.spelling) },
+  ]));
+  console.error('已收斂的宣告要刪掉；方向反過來的是新發現，不是宣告過的差異。');
+  console.error('A converged declaration must be deleted; a flipped one is a new finding, not a declared difference.');
+}
+
+if (undeclaredDivergences.length > 0) {
+  console.error('');
+  console.error(`兩道守衛判定不一致 / The two guards disagree on ${undeclaredDivergences.length} of ${corpus.length} spellings:`);
+  console.error(table(undeclaredDivergences, [
     { header: 'group', value: (row) => row.group },
     { header: 'hook', value: (row) => row.hook },
     { header: 'better-rm', value: (row) => row.cli },
