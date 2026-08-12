@@ -5,7 +5,7 @@
 'use strict';
 
 const assert = require('assert');
-const { SYSTEM_DIRS, evaluate } = require('./hooks/protect-important-paths');
+const { MOUNT_PARENTS, SYSTEM_DIRS, evaluate } = require('./hooks/protect-important-paths');
 
 const env = { HOME: '/home/tester', BETTER_RM_PROTECTED_DIRS: '/workspace/secrets' };
 
@@ -274,10 +274,32 @@ const cliMountParents = cliMountParentLine[1].trim().split(/\s+/);
 for (const entry of cliMountParents) {
   assert.match(entry, /^\//, `the mount-parent loop parsed a non-path entry: ${entry}`);
 }
+// Same two-source comparison as the list above, for the same reason: the mount
+// rule is duplicated in both guards and diverged once already.
+// 與上面同樣的雙來源比對：掛載規則同樣兩邊各有一份，而且已經走岔過一次。
+assert.deepStrictEqual(
+  [...MOUNT_PARENTS].sort(),
+  [...cliMountParents].sort(),
+  'the hook\'s MOUNT_PARENTS and better-rm\'s mount-parent loop have drifted apart',
+);
 for (const protectedDir of cliProtectedSet) {
   blocked.push(`rm -rf ${protectedDir}`, `rm -rf ${protectedDir}/`);
   if (protectedDir === '/' || cliMountParents.includes(protectedDir)) continue;
   allowed.push(`rm -rf ${protectedDir}/inside-item`);
+}
+
+// Under a mount parent the first level is not an ordinary directory: it is where
+// a whole disk is attached, so `rm -rf /Volumes/Backup` is the backup disk and
+// `rm -rf /mnt/c` is the Windows filesystem. better-rm protects the first level
+// of every mount parent and allows what is inside it, and the hook had that rule
+// for /mnt alone while better-rm's loop covered /mnt and /Volumes. The parents
+// are read from that loop rather than restated, so a third one added there is
+// exercised here without anyone remembering to.
+// 掛載父目錄底下的第一層不是普通目錄，而是整顆磁碟的掛載點。better-rm 保護每個掛載
+// 父目錄的第一層、放行其內容；hook 先前只有 /mnt。父目錄清單直接從那個迴圈讀出來。
+for (const mountParent of cliMountParents) {
+  blocked.push(`rm -rf ${mountParent}/probe-disk`, `rm -rf ${mountParent}/probe-disk/`);
+  allowed.push(`rm -rf ${mountParent}/probe-disk/inside-item`);
 }
 // The home directory itself, in the spellings a shell can hand over.
 // 家目錄本身的各種寫法。

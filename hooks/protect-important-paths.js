@@ -16,6 +16,11 @@ const SYSTEM_DIRS = [
   '/opt', '/private', '/proc', '/root', '/sbin', '/sys', '/usr', '/var',
 ];
 
+// The directories whose first level is a mount root rather than an ordinary
+// directory, as better-rm's own is_protected loops over them.
+// 第一層是掛載根而非普通目錄的父目錄，與 better-rm 的 is_protected 迴圈一致。
+const MOUNT_PARENTS = ['/mnt', '/Volumes'];
+
 function decodeAnsiCEscape(input, slashIndex) {
   const escape = input[slashIndex + 1];
   if (escape === undefined) return { value: '\\', end: slashIndex };
@@ -302,15 +307,19 @@ function protectedReason(target, cwd, home, extraDirs = []) {
 
   if (exactDirs.includes(normalized)) return normalized;
 
-  // Protect first-level mount roots under /mnt (such as /mnt/c), while allowing items inside them.
-  // 保護 /mnt 的第一層掛載根（如 /mnt/c），但允許操作掛載點內的項目（如 /mnt/c/project）。
-  const mntRelative = path.relative('/mnt', normalized);
-  if (
-    mntRelative &&
-    !mntRelative.startsWith('..') &&
-    !path.isAbsolute(mntRelative) &&
-    !mntRelative.includes(path.sep)
-  ) return normalized;
+  // Protect the first-level mount roots under each mount parent (such as /mnt/c on
+  // WSL and /Volumes/Backup on macOS), while allowing items inside them.
+  // 保護各掛載父目錄的第一層掛載根（如 WSL 的 /mnt/c、macOS 的 /Volumes/Backup），
+  // 但允許操作掛載點內的項目（如 /mnt/c/project）。
+  for (const mountParent of MOUNT_PARENTS) {
+    const mountRelative = path.relative(mountParent, normalized);
+    if (
+      mountRelative &&
+      !mountRelative.startsWith('..') &&
+      !path.isAbsolute(mountRelative) &&
+      !mountRelative.includes(path.sep)
+    ) return normalized;
+  }
 
   if (normalized === '.git' || normalized.endsWith(`${path.sep}.git`)) return normalized;
 
@@ -729,4 +738,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { SYSTEM_DIRS, commandTargets, evaluate, globCanMatchGit, normalizedTarget, protectedReason, shellWords };
+module.exports = { MOUNT_PARENTS, SYSTEM_DIRS, commandTargets, evaluate, globCanMatchGit, normalizedTarget, protectedReason, shellWords };
