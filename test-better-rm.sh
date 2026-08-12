@@ -413,6 +413,47 @@ else
     test_fail "-rf 組合參數失敗"
 fi
 
+test_item "-- 之後的引數一律視為檔名"
+# 少了 --) 分支時，裸 -- 會掉進 -*) 的組合參數解析，並在 *) 以
+# 「無效的選項 -- '-'」結束，於是 `rm -- -foo.txt`（唯一可攜、能刪掉破折號開頭
+# 檔名的寫法）在這裡什麼都刪不掉，真正的 rm 卻會刪。
+# Without a `--)` case the bare -- fell into the combined-option branch and died
+# at its default with "invalid option -- '-'", so `rm -- -foo.txt` -- the only
+# portable way to delete a file whose name starts with a dash -- deleted nothing
+# here while the real rm deletes it.
+printf '%s\n' "DASH CONTENT" > ./-dash.txt
+dash_status=0
+"$BETTER_RM" -- -dash.txt >/dev/null 2>&1 || dash_status=$?
+if [ "$dash_status" -eq 0 ] && [ ! -e ./-dash.txt ] && verify_in_trash "dash.txt"; then
+    test_pass "-- 之後的 -dash.txt 被當成檔名刪除"
+else
+    test_fail "-- 之後的引數未被當成檔名 (status=$dash_status)"
+fi
+
+test_item "-- 之前的選項仍然生效"
+mkdir -p ./-dashdir/sub
+echo "content" > ./-dashdir/sub/file.txt
+dashdir_status=0
+"$BETTER_RM" -rf -- -dashdir >/dev/null 2>&1 || dashdir_status=$?
+if [ "$dashdir_status" -eq 0 ] && [ ! -e ./-dashdir ]; then
+    test_pass "-rf -- 破折號開頭目錄遞迴刪除成功"
+else
+    test_fail "-- 之前的 -rf 未生效 (status=$dashdir_status)"
+fi
+
+test_item "沒有 -- 時破折號開頭仍視為選項"
+# 反套套邏輯：修好的是 -- 這個終止符，不是「把所有引數都當檔名」。
+# Anti-tautology: what got fixed is the terminator, not "treat every argument as
+# a pathname" -- an unguarded dash-leading argument must still be an option.
+printf '%s\n' "STILL AN OPTION" > ./-zz.txt
+zz_status=0
+"$BETTER_RM" -zz.txt >/dev/null 2>&1 || zz_status=$?
+if [ "$zz_status" -ne 0 ] && [ -f ./-zz.txt ]; then
+    test_pass "沒有 -- 時 -zz.txt 仍被當成無效選項"
+else
+    test_fail "沒有 -- 時破折號開頭被誤當成檔名 (status=$zz_status)"
+fi
+
 # ============================================================================
 # 測試 9: 受保護目錄 (Test 9: Protected Directories)
 # ============================================================================

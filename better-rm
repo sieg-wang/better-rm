@@ -1635,6 +1635,28 @@ main() {
                 interactive=0
                 shift
                 ;;
+            --)
+                # 選項終止符：其後全部是路徑，即使以破折號開頭。必須排在 -*) 之前，
+                # 否則裸 -- 會被當成組合參數並以「無效的選項 -- '-'」失敗。
+                # Option terminator: everything after it is a pathname, dash-leading
+                # names included. It has to precede -*) or the bare -- is parsed as a
+                # combined option bundle and dies with "invalid option -- '-'".
+                shift
+                while [ $# -gt 0 ]; do
+                    # 破折號開頭的相對路徑要補 ./：後面用來釘住來源 inode 的 stat
+                    # 會把 -dash.txt 當成自己的選項，刪除便以「無法確認 inode 身分」
+                    # 中止。釘住 parent 之後的每一步本來就是操作 ./basename。
+                    # A dash-leading relative path needs the ./ prefix: the stat that
+                    # pins the source inode would parse -dash.txt as its own option and
+                    # the delete would abort on "could not verify inode identity". Every
+                    # step after the parent is pinned already operates on ./basename.
+                    case "$1" in
+                        -*) files+=("./$1") ;;
+                        *) files+=("$1") ;;
+                    esac
+                    shift
+                done
+                ;;
             -*)
                 # 處理其他組合參數
                 # Handle other combined parameters
