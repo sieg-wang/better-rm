@@ -1364,30 +1364,45 @@ restore_file() {
         return 1
     fi
 
-    # rename(2) 只有在「目的地不是真目錄」且「來源不是真目錄」時才能原子取代目的地：
+    # 覆蓋等於刪除，而 better-rm 的全部價值就是刪除必須可還原：佔著目的地的那個物件
+    # 一律要先讓位，publish 才可以發生——不管 rename 換不換得掉它。
+    # 先前只有 rename(2) 無法原子取代的兩種形狀才讓位：
     #   rename(檔案, 真目錄)  -> EISDIR / ENOTEMPTY
     #   rename(真目錄, 非目錄) -> ENOTDIR      <- 還原一個目錄到既有檔案/symlink 上
-    # 這兩種形狀都得先把目的地移開。Linux 的 `mv -T` 一樣是 rename(2)，所以這不是
+    # 其餘情況倚賴 rename 自己把舊 inode 解除連結，於是 `rm -f --restore -- <檔案>`
+    # 會 exit 0、不提示、把佔位的檔案或 symlink 就地銷毀，垃圾桶與工作目錄都不留——
+    # 那正是這個工具存在要禁止的事。Linux 的 `mv -T` 一樣是 rename(2)，所以這不是
     # macOS 專屬。
     #
-    # 移開的方式是「送進垃圾桶」，不是 rm -rf。覆蓋等於刪除，而 better-rm 的全部價值
-    # 就是刪除必須可還原；先前用 rm -rf 讓位，等於在這個工具內部做了它存在的理由要
-    # 禁止的事。走 move_to_trash 還一併拿到它已經硬化過的邏輯：pin 住 parent、
-    # 唯一化目標路徑、寫入 deletion log，於是舊目的地用 `rm --restore` 就能取回。
-    # rename(2) can only replace the destination atomically when neither side is
-    # a real directory:
+    # 讓位的方式是「送進垃圾桶」，不是 rm -rf。走 move_to_trash 還一併拿到它已經硬化
+    # 過的邏輯：pin 住 parent、唯一化目標路徑、寫入 deletion log，於是舊目的地用
+    # `rm --restore` 就能取回。
+    #
+    # 順序本身就是保證：讓位在 publish 之前完成，讓不了位就 restore_unwind 並中止，
+    # 目的地連碰都沒被碰過。反過來（先 publish、再處理舊目的地）在任何失敗下都等於
+    # 已經把它吃掉了。
+    # An overwrite is a deletion, and better-rm's entire point is that deletions
+    # are recoverable: whatever occupies the destination is always cleared out of
+    # the way before the publish, whether or not rename could replace it.
+    # Only the two shapes rename(2) cannot replace atomically used to be cleared:
     #   rename(file, real dir)  -> EISDIR / ENOTEMPTY
     #   rename(real dir, non-dir) -> ENOTDIR   <- restoring a directory onto an
     #                                             existing file or symlink
-    # Both shapes need the destination moved out of the way first. Linux's
+    # Everything else relied on rename unlinking the old inode itself, so
+    # `rm -f --restore -- <file>` exited 0 with no prompt and destroyed the
+    # occupying file or symlink outright, leaving it in neither the trash nor the
+    # working directory — exactly what this tool exists to prevent. Linux's
     # `mv -T` is rename(2) as well, so this is not macOS-specific.
     #
-    # It is moved out of the way by going INTO THE TRASH, not by rm -rf. An
-    # overwrite is a deletion, and better-rm's entire point is that deletions are
-    # recoverable; clearing the way with rm -rf did inside the tool exactly what
-    # the tool exists to prevent. Routing it through move_to_trash also inherits
-    # that function's hardening — pinned parent, uniquified target, deletion-log
-    # record — so the old destination comes back with `rm --restore`.
+    # It is cleared by going INTO THE TRASH, not by rm -rf. Routing it through
+    # move_to_trash also inherits that function's hardening — pinned parent,
+    # uniquified target, deletion-log record — so the old destination comes back
+    # with `rm --restore`.
+    #
+    # The ordering is the guarantee: the set-aside completes before the publish,
+    # and a set-aside that cannot complete unwinds and aborts with the destination
+    # never touched. The reverse order (publish first, deal with the old
+    # destination after) means any failure has already eaten it.
     #
     # 讓位有兩條路：
     #   1. 移入垃圾桶（預設）：有 deletion log，可用 rm --restore 取回。
@@ -1441,116 +1456,106 @@ restore_file() {
 
     if [ "$dest_existed" = "1" ] &&
        { [ -e "$dest_path" ] || [ -L "$dest_path" ]; }; then
-        local dest_is_real_dir=0
-        local staged_is_real_dir=0
-        if [ -d "$dest_path" ] && [ ! -L "$dest_path" ]; then
-            dest_is_real_dir=1
+        dest_identity=$(path_identity "$dest_path")
+        if [ -z "$dest_identity" ]; then
+            restore_unwind
+            error_msg "還原失敗：無法確認既有 '$dest_filename' 的 inode 身分"
+            error_msg "Restore failed: cannot confirm the inode identity of the existing '$dest_filename'"
+            return 1
         fi
-        if [ -d "$incoming" ] && [ ! -L "$incoming" ]; then
-            staged_is_real_dir=1
+        # 受保護的路徑不適用就地讓位：那是 move_to_trash 的拒絕理由，不是空間
+        # 問題，繞過去等於自己拆掉保護。
+        # A protected path never takes the in-place route: move_to_trash
+        # refuses it on principle rather than for lack of space, and routing
+        # around that refusal would dismantle the protection.
+        local displace_in_place=0
+        local displaceable=1
+        if is_protected "$dest_path" >/dev/null 2>&1; then
+            displaceable=0
         fi
-        if [ "$dest_is_real_dir" = "1" ] || [ "$staged_is_real_dir" = "1" ]; then
-            dest_identity=$(path_identity "$dest_path")
-            if [ -z "$dest_identity" ]; then
-                restore_unwind
-                error_msg "還原失敗：無法確認既有 '$dest_filename' 的 inode 身分"
-                error_msg "Restore failed: cannot confirm the inode identity of the existing '$dest_filename'"
-                return 1
+        if [ "$displaceable" = "1" ]; then
+            local trash_probe=""
+            local trash_device=""
+            local trash_free_kb=""
+            local dest_size_kb=""
+            # 落點目錄要用「解析過 symlink 的 parent」算，move_to_trash 自己就是
+            # 這樣決定垃圾桶路徑的（abs_path 是「cd 進來源 parent 後的 pwd -P」
+            # 接上最後一段）。用未解析的 pwd 會算出一個不存在的落點，於是退回去
+            # 量垃圾桶根目錄——在根目錄底下掛了別的卷宗時，那量到的是另一顆磁碟。
+            # The landing directory has to be derived from the symlink-resolved
+            # parent, because that is how move_to_trash itself builds the trash
+            # path (abs_path is the pwd -P of the pinned source parent joined
+            # with the final component). An unresolved pwd yields a landing that
+            # does not exist, falling back to the trash root — which is the wrong
+            # disk whenever another volume is mounted below it.
+            local dest_parent_real
+            dest_parent_real=$(cd "$(dirname "$dest_path")" 2>/dev/null && pwd -P)
+            if [ -z "$dest_parent_real" ]; then
+                dest_parent_real=$(dirname "$dest_path")
             fi
-            # 受保護的路徑不適用就地讓位：那是 move_to_trash 的拒絕理由，不是空間
-            # 問題，繞過去等於自己拆掉保護。
-            # A protected path never takes the in-place route: move_to_trash
-            # refuses it on principle rather than for lack of space, and routing
-            # around that refusal would dismantle the protection.
-            local displace_in_place=0
-            local displaceable=1
-            if is_protected "$dest_path" >/dev/null 2>&1; then
-                displaceable=0
+            trash_probe=$(trash_landing_probe "$(absolute_trash_root)" "$dest_parent_real")
+            if [ -n "$trash_probe" ]; then
+                trash_device=$(path_identity "$trash_probe")
+                trash_device="${trash_device%%:*}"
             fi
-            if [ "$displaceable" = "1" ]; then
-                local trash_probe=""
-                local trash_device=""
-                local trash_free_kb=""
-                local dest_size_kb=""
-                # 落點目錄要用「解析過 symlink 的 parent」算，move_to_trash 自己就是
-                # 這樣決定垃圾桶路徑的（abs_path 是「cd 進來源 parent 後的 pwd -P」
-                # 接上最後一段）。用未解析的 pwd 會算出一個不存在的落點，於是退回去
-                # 量垃圾桶根目錄——在根目錄底下掛了別的卷宗時，那量到的是另一顆磁碟。
-                # The landing directory has to be derived from the symlink-resolved
-                # parent, because that is how move_to_trash itself builds the trash
-                # path (abs_path is the pwd -P of the pinned source parent joined
-                # with the final component). An unresolved pwd yields a landing that
-                # does not exist, falling back to the trash root — which is the wrong
-                # disk whenever another volume is mounted below it.
-                local dest_parent_real
-                dest_parent_real=$(cd "$(dirname "$dest_path")" 2>/dev/null && pwd -P)
-                if [ -z "$dest_parent_real" ]; then
-                    dest_parent_real=$(dirname "$dest_path")
-                fi
-                trash_probe=$(trash_landing_probe "$(absolute_trash_root)" "$dest_parent_real")
-                if [ -n "$trash_probe" ]; then
-                    trash_device=$(path_identity "$trash_probe")
-                    trash_device="${trash_device%%:*}"
-                fi
-                # 量不出來就照舊走垃圾桶那條路：不知道並不等於裝不下。
-                # An unmeasurable filesystem keeps the trash route: "unknown" is
-                # not "does not fit".
-                if [ -n "$trash_device" ] &&
-                   [ "$trash_device" != "${dest_identity%%:*}" ]; then
-                    trash_free_kb=$(filesystem_free_kb "$trash_probe")
-                    dest_size_kb=$(path_size_kb "$dest_path")
-                    if [ -n "$trash_free_kb" ] && [ -n "$dest_size_kb" ] &&
-                       [ "$dest_size_kb" -ge "$trash_free_kb" ] 2>/dev/null; then
-                        displace_in_place=1
-                        warn_msg "垃圾桶所在磁碟只剩 ${trash_free_kb}KB，裝不下 ${dest_size_kb}KB 的既有 '$dest_filename'；不移入垃圾桶"
-                        warn_msg "The trash volume has ${trash_free_kb}KB free, too little for the existing '$dest_filename' (${dest_size_kb}KB); it is not going into the trash"
-                    fi
-                fi
-            fi
-            if [ "$displace_in_place" = "0" ]; then
-                # 把驗證過的 inode 交給 move_to_trash：從這裡到實際移動之間若被掉包，
-                # 它會中止而不是移動別人的東西。
-                # Hand the proven inode to move_to_trash: if the path is swapped
-                # between here and the actual move it aborts instead of moving an
-                # unrelated object.
-                move_to_trash "$dest_path" 0 "$dest_identity"
-                local displace_status=$?
-                if [ "$displace_status" -eq 0 ]; then
-                    displaced_trashed=1
-                elif [ "$displace_status" -eq 3 ]; then
-                    # 東西進了垃圾桶，但刪除日誌沒寫成功——rm --restore 找不到它，
-                    # 訊息不能照抄成功版本。
-                    # It is in the trash but the deletion log was not written, so
-                    # rm --restore cannot find it and the message must not claim
-                    # otherwise.
-                    displaced_trashed=1
-                    displaced_unlogged=1
-                elif [ "$displaceable" = "1" ] &&
-                     [ "$(path_identity "$dest_path")" = "$dest_identity" ]; then
-                    # 沒能移入垃圾桶，但舊目的地確實還是那個已驗證的物件（例如空間在
-                    # 量完之後才不夠、或垃圾桶暫時寫不進去）：改走就地讓位，使用者同意
-                    # 的覆蓋仍然完成，而舊目的地一樣不會被銷毀。身分不符就不是它了，
-                    # 一律中止。
-                    # The trash route failed but the old destination really is
-                    # still the object that was verified (space ran out after the
-                    # measurement, the trash is momentarily unwritable, …): fall
-                    # back to the in-place route so the consented overwrite still
-                    # completes and the old destination still is not destroyed. A
-                    # mismatching identity is a different object; abort instead.
+            # 量不出來就照舊走垃圾桶那條路：不知道並不等於裝不下。
+            # An unmeasurable filesystem keeps the trash route: "unknown" is
+            # not "does not fit".
+            if [ -n "$trash_device" ] &&
+               [ "$trash_device" != "${dest_identity%%:*}" ]; then
+                trash_free_kb=$(filesystem_free_kb "$trash_probe")
+                dest_size_kb=$(path_size_kb "$dest_path")
+                if [ -n "$trash_free_kb" ] && [ -n "$dest_size_kb" ] &&
+                   [ "$dest_size_kb" -ge "$trash_free_kb" ] 2>/dev/null; then
                     displace_in_place=1
-                else
-                    restore_unwind
-                    error_msg "還原失敗：無法把既有的 '$dest_filename' 移入垃圾桶讓位"
-                    error_msg "Restore failed: cannot move the existing '$dest_filename' into the trash to make room"
-                    return 1
+                    warn_msg "垃圾桶所在磁碟只剩 ${trash_free_kb}KB，裝不下 ${dest_size_kb}KB 的既有 '$dest_filename'；不移入垃圾桶"
+                    warn_msg "The trash volume has ${trash_free_kb}KB free, too little for the existing '$dest_filename' (${dest_size_kb}KB); it is not going into the trash"
                 fi
             fi
-            if [ "$displace_in_place" = "1" ] && ! displace_destination_locally; then
+        fi
+        if [ "$displace_in_place" = "0" ]; then
+            # 把驗證過的 inode 交給 move_to_trash：從這裡到實際移動之間若被掉包，
+            # 它會中止而不是移動別人的東西。
+            # Hand the proven inode to move_to_trash: if the path is swapped
+            # between here and the actual move it aborts instead of moving an
+            # unrelated object.
+            move_to_trash "$dest_path" 0 "$dest_identity"
+            local displace_status=$?
+            if [ "$displace_status" -eq 0 ]; then
+                displaced_trashed=1
+            elif [ "$displace_status" -eq 3 ]; then
+                # 東西進了垃圾桶，但刪除日誌沒寫成功——rm --restore 找不到它，
+                # 訊息不能照抄成功版本。
+                # It is in the trash but the deletion log was not written, so
+                # rm --restore cannot find it and the message must not claim
+                # otherwise.
+                displaced_trashed=1
+                displaced_unlogged=1
+            elif [ "$displaceable" = "1" ] &&
+                 [ "$(path_identity "$dest_path")" = "$dest_identity" ]; then
+                # 沒能移入垃圾桶，但舊目的地確實還是那個已驗證的物件（例如空間在
+                # 量完之後才不夠、或垃圾桶暫時寫不進去）：改走就地讓位，使用者同意
+                # 的覆蓋仍然完成，而舊目的地一樣不會被銷毀。身分不符就不是它了，
+                # 一律中止。
+                # The trash route failed but the old destination really is
+                # still the object that was verified (space ran out after the
+                # measurement, the trash is momentarily unwritable, …): fall
+                # back to the in-place route so the consented overwrite still
+                # completes and the old destination still is not destroyed. A
+                # mismatching identity is a different object; abort instead.
+                displace_in_place=1
+            else
                 restore_unwind
-                error_msg "還原失敗：無法把既有的 '$dest_filename' 移到旁邊讓位"
-                error_msg "Restore failed: cannot set the existing '$dest_filename' aside to make room"
+                error_msg "還原失敗：無法把既有的 '$dest_filename' 移入垃圾桶讓位"
+                error_msg "Restore failed: cannot move the existing '$dest_filename' into the trash to make room"
                 return 1
             fi
+        fi
+        if [ "$displace_in_place" = "1" ] && ! displace_destination_locally; then
+            restore_unwind
+            error_msg "還原失敗：無法把既有的 '$dest_filename' 移到旁邊讓位"
+            error_msg "Restore failed: cannot set the existing '$dest_filename' aside to make room"
+            return 1
         fi
     fi
 

@@ -2678,6 +2678,394 @@ else
     test_fail "空間不足時繞過了保護、把受保護的目的地搬走 (status=$protected_status, aside='$protected_aside')"
 fi
 
+# 覆蓋等於刪除，而這個工具的全部前提是「刪除一定救得回來」。先前只有 rename 換不掉的
+# 目的地（兩種真目錄形狀）會被移進垃圾桶讓位，其餘一律由核心在 rename 當下解除連結：
+# 實測 `rm -f --restore -- <檔案>` exit 0、沒有任何提示、垃圾桶項目 1 → 0，而原本佔著
+# 目的地的那個物件在垃圾桶與工作目錄都不存在，沒有任何取回的方法。
+# 這一組把每一種佔位物件都跑一遍，並且逐一驗證它真的能「用自己的名字再被還原回來」
+# ——那需要一筆真的 deletion log 紀錄，不是「垃圾桶底下找得到某個檔案」而已。
+# An overwrite is a deletion, and this tool's whole premise is that a deletion can
+# be undone. Only a destination rename could not replace (the two real-directory
+# shapes) used to be moved into the trash; every other one was unlinked by the
+# kernel as part of the rename. Measured: `rm -f --restore -- <file>` exited 0 with
+# no prompt, took the trash from one entry to zero, and left the object that had
+# been occupying the destination in neither the trash nor the working directory,
+# with no recovery path at all.
+# Every occupant kind below is checked for coming back under its own name with a
+# second --restore, which needs a real deletion-log record rather than merely
+# "something exists under the trash root".
+for occupant_kind in file symlink symlink-to-dir hardlink empty-dir non-empty-dir; do
+    test_item "還原：既有的 $occupant_kind 佔著目的地時要進垃圾桶，且之後仍還原得回來"
+    setup
+    cd "$TEST_WORK_DIR" || exit 1
+    printf '%s\n' "RESTORED CONTENT" > occupant.txt
+    "$BETTER_RM" occupant.txt
+    case "$occupant_kind" in
+        file)
+            printf '%s\n' "OCCUPANT CONTENT" > occupant.txt
+            ;;
+        symlink)
+            printf '%s\n' "BYSTANDER CONTENT" > occupant_link_target.txt
+            ln -s occupant_link_target.txt occupant.txt
+            ;;
+        symlink-to-dir)
+            mkdir -p occupant_link_dir
+            printf '%s\n' "BYSTANDER CONTENT" > occupant_link_dir/inside.txt
+            ln -s occupant_link_dir occupant.txt
+            ;;
+        hardlink)
+            printf '%s\n' "OCCUPANT CONTENT" > occupant_peer.txt
+            ln occupant_peer.txt occupant.txt
+            ;;
+        empty-dir)
+            mkdir -p occupant.txt
+            ;;
+        non-empty-dir)
+            mkdir -p occupant.txt
+            printf '%s\n' "OCCUPANT CONTENT" > occupant.txt/keep.txt
+            ;;
+    esac
+    occupant_status=0
+    occupant_output=$("$BETTER_RM" -f --restore -- occupant.txt 2>&1) || occupant_status=$?
+    occupant_trashed=$(find "$TEST_TRASH_DIR" -maxdepth 6 -name 'occupant.txt__*' 2>/dev/null | wc -l | tr -d ' ')
+    occupant_litter=$(find "$TEST_WORK_DIR" -maxdepth 1 \
+        -name 'occupant.txt.better-rm-*' 2>/dev/null | wc -l | tr -d ' ')
+    # 讓位的物件必須以自己的名字回得來：把還原出來的檔案挪開，再還原一次。
+    # The displaced occupant must come back under its own name: move the restored
+    # item aside and restore once more.
+    occupant_back_status=0
+    mv occupant.txt occupant_restored_away.txt 2>/dev/null
+    "$BETTER_RM" --restore -- occupant.txt >/dev/null 2>&1 || occupant_back_status=$?
+
+    occupant_ok=1
+    if [ "$occupant_status" -ne 0 ] || [ "$occupant_back_status" -ne 0 ]; then
+        occupant_ok=0
+    fi
+    if [ "$(cat occupant_restored_away.txt 2>/dev/null)" != "RESTORED CONTENT" ]; then
+        occupant_ok=0
+    fi
+    # 讓位一律走垃圾桶：既不是銷毀（0 筆），也不是就地讓位（那會留下 displaced 目錄）。
+    # The occupant goes to the trash: neither destroyed (zero entries) nor set
+    # aside in place, which would leave a displaced directory behind.
+    if [ "$occupant_trashed" -ne 1 ] || [ "$occupant_litter" -ne 0 ]; then
+        occupant_ok=0
+    fi
+    # 使用者同意的是覆蓋，不是銷毀：舊目的地去了哪裡必須主動說。
+    # The user consented to an overwrite, not to destruction: say where it went.
+    case "$occupant_output" in
+        *"--restore"*) ;;
+        *) occupant_ok=0 ;;
+    esac
+    case "$occupant_kind" in
+        file|hardlink)
+            if [ ! -f occupant.txt ] || [ -L occupant.txt ] ||
+               [ "$(cat occupant.txt 2>/dev/null)" != "OCCUPANT CONTENT" ]; then
+                occupant_ok=0
+            fi
+            ;;
+        symlink)
+            # 連結本身進垃圾桶，絕不跟隨：指向的檔案必須原封不動留在原處。
+            # The link itself is trashed and never followed: its target stays put.
+            if [ ! -L occupant.txt ] ||
+               [ "$(readlink occupant.txt)" != "occupant_link_target.txt" ] ||
+               [ "$(cat occupant_link_target.txt 2>/dev/null)" != "BYSTANDER CONTENT" ]; then
+                occupant_ok=0
+            fi
+            ;;
+        symlink-to-dir)
+            if [ ! -L occupant.txt ] ||
+               [ "$(readlink occupant.txt)" != "occupant_link_dir" ] ||
+               [ "$(cat occupant_link_dir/inside.txt 2>/dev/null)" != "BYSTANDER CONTENT" ]; then
+                occupant_ok=0
+            fi
+            ;;
+        empty-dir)
+            if [ ! -d occupant.txt ] || [ -L occupant.txt ] ||
+               [ -n "$(ls -A occupant.txt 2>/dev/null)" ]; then
+                occupant_ok=0
+            fi
+            ;;
+        non-empty-dir)
+            if [ ! -d occupant.txt ] || [ -L occupant.txt ] ||
+               [ "$(cat occupant.txt/keep.txt 2>/dev/null)" != "OCCUPANT CONTENT" ]; then
+                occupant_ok=0
+            fi
+            ;;
+    esac
+    # hardlink 的另一端不屬於這次覆蓋，必須完全不受影響。
+    # The other end of a hardlink is not part of this overwrite and must not move.
+    if [ "$occupant_kind" = "hardlink" ] &&
+       [ "$(cat occupant_peer.txt 2>/dev/null)" != "OCCUPANT CONTENT" ]; then
+        occupant_ok=0
+    fi
+
+    if [ "$occupant_ok" -eq 1 ]; then
+        test_pass "既有的 $occupant_kind 讓位進垃圾桶，還原完成且讓位物件仍可還原"
+    else
+        test_fail "既有的 $occupant_kind 被銷毀或無法再還原 (status=$occupant_status, back=$occupant_back_status, trashed=$occupant_trashed, litter=$occupant_litter)"
+    fi
+done
+
+test_item "還原：讓位物件的名字在垃圾桶已經有紀錄時，兩筆都必須留得住"
+# 讓位走的是 move_to_trash，垃圾桶路徑由「原始路徑＋時間戳＋hash」組成，同一個原始
+# 路徑被刪過好幾次時就得靠既有的唯一化機制錯開。若讓位那一筆覆蓋掉先前的紀錄或項目，
+# 使用者會在「還原一次」之後永久失去更早的那一份——而他根本沒有要求刪掉它。
+# The set-aside goes through move_to_trash, whose trash path is the original path
+# plus a timestamp and a hash, so several deletions of one path rely on the
+# existing uniquification to stay apart. If the set-aside clobbered an earlier
+# record or item, one restore would permanently destroy an earlier version the
+# user never asked to remove.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+printf '%s\n' "OLDER TRASHED" > collide.txt
+"$BETTER_RM" collide.txt
+printf '%s\n' "NEWER TRASHED" > collide.txt
+"$BETTER_RM" collide.txt
+printf '%s\n' "COLLIDE OCCUPANT" > collide.txt
+collide_status=0
+"$BETTER_RM" -f --restore collide.txt >/dev/null 2>&1 || collide_status=$?
+collide_entries=$(find "$TEST_TRASH_DIR" -maxdepth 6 -name 'collide.txt__*' 2>/dev/null | wc -l | tr -d ' ')
+collide_first=$(cat collide.txt 2>/dev/null)
+# 讓位那一筆是最新的，先回來；再還原一次就必須拿到更早的那一筆。
+# The set-aside entry is the newest and comes back first; the restore after it
+# must hand back the older entry that was already in the trash.
+collide_second_status=0
+mv collide.txt collide_newer_away.txt 2>/dev/null
+"$BETTER_RM" --restore collide.txt >/dev/null 2>&1 || collide_second_status=$?
+collide_second=$(cat collide.txt 2>/dev/null)
+collide_third_status=0
+mv collide.txt collide_occupant_away.txt 2>/dev/null
+"$BETTER_RM" --restore collide.txt >/dev/null 2>&1 || collide_third_status=$?
+collide_third=$(cat collide.txt 2>/dev/null)
+
+if [ "$collide_status" -eq 0 ] && \
+   [ "$collide_second_status" -eq 0 ] && \
+   [ "$collide_third_status" -eq 0 ] && \
+   [ "$collide_entries" -eq 2 ] && \
+   [ "$collide_first" = "NEWER TRASHED" ] && \
+   [ "$collide_second" = "COLLIDE OCCUPANT" ] && \
+   [ "$collide_third" = "OLDER TRASHED" ]; then
+    test_pass "讓位那一筆與既有的同名紀錄各自獨立，三份資料依序都還原得回來"
+else
+    test_fail "同名紀錄相撞時遺失其中一份 (entries=$collide_entries, 1='$collide_first', 2='$collide_second', 3='$collide_third')"
+fi
+
+test_item "還原：檔案讓位到垃圾桶失敗時改用就地讓位，絕不可就這樣把它覆蓋掉"
+# 垃圾桶暫時寫不進去時，舊目的地若確實還是那個已驗證的物件，就沿用既有的就地讓位
+# 退路（同裝置 rename，不需要空間），使用者同意過的覆蓋照樣完成，而舊目的地一樣不會
+# 被銷毀。這條退路先前只有真目錄的目的地走得到；一般檔案是直接被 rename 蓋掉。
+# When the trash is momentarily unwritable and the old destination really is still
+# the verified object, the existing in-place route (a same-device rename, needing
+# no space) still applies: the consented overwrite completes and the destination is
+# still not destroyed. Only a real-directory destination used to reach that route;
+# a plain file was simply overwritten by the rename.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+filefail_bin="$TEST_WORK_DIR/restore-filefail-bin"
+mkdir -p "$filefail_bin"
+cat > "$filefail_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+dst=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+    if [ "$i" -eq "$count" ]; then dst="$a"; fi
+done
+# 只讓「把東西搬進垃圾桶」這一次失敗；從垃圾桶取出不受影響。
+# Fail only the move INTO the trash; taking things out of it is unaffected.
+case "$dst" in
+  "$BETTER_RM_FILEFAIL_TRASH"/*)
+    case "$src" in
+      "$BETTER_RM_FILEFAIL_TRASH"/*) exec "$BETTER_RM_REAL_MV" "$@" ;;
+      *) exit 1 ;;
+    esac
+    ;;
+esac
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$filefail_bin/mv"
+
+printf '%s\n' "FILEFAIL RESTORED" > filefail.txt
+"$BETTER_RM" filefail.txt
+printf '%s\n' "FILEFAIL OCCUPANT" > filefail.txt
+filefail_status=0
+filefail_output=$(BETTER_RM_FILEFAIL_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$filefail_bin:$PATH" \
+    "$BETTER_RM" -f --restore filefail.txt 2>&1) || filefail_status=$?
+filefail_aside=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'filefail.txt.better-rm-displaced-*' -print -quit)
+
+if [ "$filefail_status" -eq 0 ] && \
+   [ -f filefail.txt ] && [ ! -L filefail.txt ] && \
+   [ "$(cat filefail.txt)" = "FILEFAIL RESTORED" ] && \
+   [ -n "$filefail_aside" ] && \
+   [ "$(cat "$filefail_aside/filefail.txt" 2>/dev/null)" = "FILEFAIL OCCUPANT" ] && \
+   [[ "$filefail_output" == *"$filefail_aside"* ]]; then
+    test_pass "檔案讓位到垃圾桶失敗時改用就地讓位，舊目的地完好並被指名"
+else
+    test_fail "檔案讓位到垃圾桶失敗時舊目的地被銷毀或沒說去向 (status=$filefail_status, aside='$filefail_aside')"
+fi
+
+test_item "還原：讓位物件本身受保護時，整個還原必須中止且目的地一動也不能動"
+# 受保護的路徑不能被移進垃圾桶（原則性拒絕），也不能改走就地讓位（那等於自己拆掉
+# 保護）。兩條路都不通時唯一正確的行為是中止：目的地保持原樣、垃圾桶項目放回原處、
+# 結束碼非 0。這正是 fail-closed 的形狀——沒有任何一步先動了目的地才發現讓不了位。
+# 訊息也必須說出真正的原因；同樣非 0 的「找不到紀錄」是完全不同的事，不能混為一談。
+# A protected path can be neither moved into the trash (a refusal on principle) nor
+# routed around by the in-place set-aside, which would dismantle the protection.
+# With both routes closed the only correct behaviour is to abort: the destination
+# untouched, the trashed item put back, a nonzero exit. That is the fail-closed
+# shape -- nothing touches the destination before the set-aside is known to work.
+# The message must state the real reason, too: an equally nonzero "no record found"
+# is a different event and must not be mistaken for this one.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+# better-rm 自己不會把 .git 移入垃圾桶（那正是保護的用意），所以紀錄與垃圾桶項目
+# 直接造出來，才能測到「還原一個受保護名稱到既有的同名檔案上」。
+# better-rm will not trash a .git itself -- that is the protection -- so the record
+# and the trashed item are fabricated to reach "restore a protected name over an
+# existing file of the same name".
+mkdir -p "$TEST_TRASH_DIR$TEST_WORK_DIR"
+protfile_trash="$TEST_TRASH_DIR$TEST_WORK_DIR/.git__20260101_000000_000000000__nohash"
+printf '%s\n' "PROTFILE ORIGINAL" > "$protfile_trash"
+mkdir -p "$TEST_STATE_DIR"
+{
+    printf '%s\n' "# Better-RM Deletion Log"
+    printf '%s | %s | %s | %s | %s\n' \
+        "20260101_000000_000000000" \
+        "$TEST_WORK_DIR/.git" \
+        "$protfile_trash" \
+        "nohash" \
+        "file"
+} > "$TEST_STATE_DIR/deletion.log"
+printf '%s\n' "PROTFILE DESTINATION" > .git
+protfile_status=0
+protfile_output=$("$BETTER_RM" -f --restore .git 2>&1) || protfile_status=$?
+protfile_litter=$(find "$TEST_WORK_DIR" -maxdepth 1 -name '.git.better-rm-*' 2>/dev/null | wc -l | tr -d ' ')
+
+if [ "$protfile_status" -ne 0 ] && \
+   [ -f .git ] && [ ! -L .git ] && \
+   [ "$(cat .git)" = "PROTFILE DESTINATION" ] && \
+   [ -f "$protfile_trash" ] && \
+   [ "$(cat "$protfile_trash")" = "PROTFILE ORIGINAL" ] && \
+   [ "$protfile_litter" -eq 0 ] && \
+   [[ "$protfile_output" == *"讓位"* ]]; then
+    test_pass "受保護的讓位物件讓還原整個中止，目的地與垃圾桶項目都沒被動到"
+else
+    test_fail "受保護的讓位物件被銷毀、被搬走或中止原因說錯 (status=$protfile_status, litter=$protfile_litter)"
+fi
+
+test_item "還原：垃圾桶與目的地不同檔案系統時，讓位物件一樣要進垃圾桶"
+# 跨裝置時「讓位＝移進垃圾桶」是一次完整複製，比同裝置的 rename 慢也更容易失敗——
+# 但它一樣不可以退化成「直接覆蓋掉」。這裡用既有的兩支 shim 重現決定性性質（垃圾桶
+# 子樹回報不同 device、從垃圾桶取出改以 copy+unlink 執行）。
+# Across devices the set-aside is a full copy rather than a rename: slower and more
+# failure-prone, but it still must not degrade into "just overwrite it". The two
+# existing shims reproduce the decisive properties (the trash subtree reports a
+# different device; extraction from the trash runs as copy+unlink).
+setup
+cd "$TEST_WORK_DIR" || exit 1
+xdevocc_bin="$TEST_WORK_DIR/restore-xdevocc-bin"
+make_xdev_stat_shim "$xdevocc_bin"
+cat > "$xdevocc_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+dst=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+    if [ "$i" -eq "$count" ]; then dst="$a"; fi
+done
+case "$src" in
+  "$BETTER_RM_XDEV_TRASH"/*) ;;
+  *) exec "$BETTER_RM_REAL_MV" "$@" ;;
+esac
+if [ -e "$dst" ] || [ -L "$dst" ]; then exec "$BETTER_RM_REAL_MV" "$@"; fi
+cp -R "$src" "$dst" || exit 1
+"$BETTER_RM_REAL_RM" -rf "$src" || exit 1
+exit 0
+EOF
+chmod +x "$xdevocc_bin/mv"
+
+printf '%s\n' "XDEVOCC RESTORED" > xdevocc.txt
+"$BETTER_RM" xdevocc.txt
+printf '%s\n' "XDEVOCC OCCUPANT" > xdevocc.txt
+xdevocc_status=0
+BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_REAL_STAT="$(command -v stat)" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_REAL_RM="$(command -v rm)" \
+PATH="$xdevocc_bin:$PATH" \
+    "$BETTER_RM" -f --restore xdevocc.txt >/dev/null 2>&1 || xdevocc_status=$?
+xdevocc_litter=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'xdevocc.txt.better-rm-*' 2>/dev/null | wc -l | tr -d ' ')
+# 沒有 shim 的第二次還原必須把讓位物件交回來：那需要一筆真的 deletion log 紀錄。
+# A second restore without the shims must hand the occupant back, which needs a
+# real deletion-log record.
+xdevocc_back_status=0
+mv xdevocc.txt xdevocc_restored_away.txt 2>/dev/null
+"$BETTER_RM" --restore xdevocc.txt >/dev/null 2>&1 || xdevocc_back_status=$?
+
+if [ "$xdevocc_status" -eq 0 ] && \
+   [ "$xdevocc_back_status" -eq 0 ] && \
+   [ "$(cat xdevocc_restored_away.txt 2>/dev/null)" = "XDEVOCC RESTORED" ] && \
+   [ "$(cat xdevocc.txt 2>/dev/null)" = "XDEVOCC OCCUPANT" ] && \
+   [ "$xdevocc_litter" -eq 0 ]; then
+    test_pass "跨裝置還原時讓位物件進了垃圾桶，兩份資料都在且都還原得回來"
+else
+    test_fail "跨裝置還原銷毀了讓位物件 (status=$xdevocc_status, back=$xdevocc_back_status, litter=$xdevocc_litter)"
+fi
+
+test_item "還原：互動確認回答 n 時，垃圾桶項目與既有目的地都不得被動到"
+# 沒有 -f 的覆蓋要先問過使用者。回答 n 就是什麼都不做：目的地留在原地、垃圾桶項目
+# 也不能被消耗掉（否則下一次 --restore 會說找不到）。
+# An overwrite without -f asks first. Answering n does nothing at all: the
+# destination stays and the trashed item must not be consumed, or the next
+# --restore reports it as missing.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+printf '%s\n' "PROMPT RESTORED" > prompt.txt
+"$BETTER_RM" prompt.txt
+printf '%s\n' "PROMPT OCCUPANT" > prompt.txt
+promptn_status=0
+echo "n" | "$BETTER_RM" --restore prompt.txt >/dev/null 2>&1 || promptn_status=$?
+promptn_entries=$(find "$TEST_TRASH_DIR" -maxdepth 6 -name 'prompt.txt__*' 2>/dev/null | wc -l | tr -d ' ')
+promptn_litter=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'prompt.txt.better-rm-*' 2>/dev/null | wc -l | tr -d ' ')
+
+if [ "$promptn_status" -eq 0 ] && \
+   [ "$(cat prompt.txt)" = "PROMPT OCCUPANT" ] && \
+   [ "$promptn_entries" -eq 1 ] && \
+   [ "$promptn_litter" -eq 0 ]; then
+    test_pass "回答 n 時還原沒有發生，兩邊都原封不動"
+else
+    test_fail "回答 n 時仍動了目的地或垃圾桶 (status=$promptn_status, entries=$promptn_entries, litter=$promptn_litter)"
+fi
+
+test_item "還原：互動確認回答 y 時，被覆蓋的目的地同樣要進垃圾桶"
+# 同意覆蓋跟 -f 是同一件事——差別只在同意是怎麼取得的，不在被覆蓋的那個物件值不值得
+# 保留。回答 y 之後舊目的地一樣必須可以用 rm --restore 取回。
+# Consenting at the prompt is the same act as -f: what differs is how the consent
+# was obtained, not whether the overwritten object is worth keeping. After a y the
+# old destination must be recoverable with rm --restore just the same.
+prompty_status=0
+echo "y" | "$BETTER_RM" --restore prompt.txt >/dev/null 2>&1 || prompty_status=$?
+prompty_back_status=0
+mv prompt.txt prompt_restored_away.txt 2>/dev/null
+"$BETTER_RM" --restore prompt.txt >/dev/null 2>&1 || prompty_back_status=$?
+
+if [ "$prompty_status" -eq 0 ] && \
+   [ "$prompty_back_status" -eq 0 ] && \
+   [ "$(cat prompt_restored_away.txt 2>/dev/null)" = "PROMPT RESTORED" ] && \
+   [ "$(cat prompt.txt 2>/dev/null)" = "PROMPT OCCUPANT" ]; then
+    test_pass "回答 y 的覆蓋與 -f 一致，舊目的地進垃圾桶且還原得回來"
+else
+    test_fail "回答 y 時舊目的地被銷毀 (status=$prompty_status, back=$prompty_back_status)"
+fi
+
 test_item "含 | 的檔名可完整刪除並還原"
 # 日誌以 | 分隔且還原時逐一切開，合法檔名裡的 | 會讓紀錄無法被解析。
 # The pipe-delimited log cannot represent a legal filename containing '|',
