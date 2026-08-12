@@ -266,7 +266,15 @@ is_protected() {
     # Get absolute path
     if [ -e "$path" ] || [ -L "$path" ]; then
         # 如果檔案存在，使用 readlink/realpath
-        real_path=$(readlink -f "$path" 2>/dev/null)
+        # 狀態非零就丟掉輸出：BSD 的 readlink -f 解析不完仍會把半途結果印出來
+        # （實測斷連結印出 /Volumes/NotMounted12345 並 exit 1），採信那半截路徑等於
+        # 拿一個沒人指名的目錄去比對保護清單。丟掉之後照舊往下走既有的 fallback。
+        # Discard the output when the status is non-zero: BSD readlink -f still
+        # prints the partial resolution when it cannot finish (measured: a dangling
+        # link prints /Volumes/NotMounted12345 and exits 1). Trusting that half-path
+        # compares a directory nobody named against the protected list. Discarding it
+        # falls through to the existing fallbacks.
+        real_path=$(readlink -f "$path" 2>/dev/null) || real_path=""
         if [ -z "$real_path" ]; then
             real_path=$(realpath "$path" 2>/dev/null)
         fi

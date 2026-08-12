@@ -3518,6 +3518,87 @@ else
     test_fail "誤擋家目錄底下的一般目錄"
 fi
 
+test_item "readlink -f 失敗時印出的半途結果不得被採信"
+# BSD 的 readlink -f 解析不到就 exit 1，但仍然把「走到一半」的結果印到 stdout。
+# 實測：一條指向 /Volumes/NotMounted12345/a/b/c.txt 的斷連結（外接碟拔掉後就長這樣）
+# 印出 /Volumes/NotMounted12345 並 exit 1。is_protected 只看 stdout 非空就採用，那半截
+# 路徑於是撞上掛載根規則——外接碟一拔，指進去的每一條路徑都變成刪不掉的「受保護目錄」，
+# 訊息還把它講成一個目錄。
+# 這裡用 PATH stub 重現那個契約（印半截 + exit 1），不靠一顆真的沒掛載的磁碟：契約在
+# 兩個平台上都要成立，而 GNU readlink 失敗時不印東西、本來就走得到 fallback，拿真磁碟
+# 當條件只會讓這一列在 Linux 上永遠是綠的。stub 走 PATH 的手法沿用上面 symlink race
+# 那一項既有的做法。探測路徑刻意用一般檔案而不是 symlink：這一列驗的是「失敗的解析
+# 怎麼被消費」，不能被「symlink 依自身路徑判定」那條規則蓋過去。
+# BSD readlink -f exits 1 when it cannot finish resolving, yet still prints the
+# partial resolution on stdout. Measured: a link to /Volumes/NotMounted12345/a/b/c.txt
+# -- what a link into an unplugged external disk looks like -- prints
+# /Volumes/NotMounted12345 and exits 1. is_protected accepts any non-empty stdout, so
+# that half-resolved path hits the mount-root rule and every path into the unplugged
+# disk becomes an undeletable "protected directory", named as a directory at that.
+# The contract (partial stdout, non-zero status) is reproduced with a PATH stub rather
+# than a really unmounted disk: it has to hold on both platforms, and GNU readlink
+# prints nothing on failure and already reaches the fallback, so a real disk would
+# leave this row permanently green on Linux. The PATH-stub idiom is the one the
+# symlink race item above already uses. The probe path is deliberately a regular file,
+# not a symlink: this row is about how a FAILED resolution is consumed and must not be
+# masked by the "a symlink is judged by its own path" rule.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+readlink_home="$TEST_WORK_DIR/readlink-home"
+mkdir -p "$readlink_home"
+printf 'PROBE\n' > "$TEST_WORK_DIR/readlink-probe.txt"
+readlink_fail_bin="$TEST_WORK_DIR/readlink-fail-bin"
+readlink_ok_bin="$TEST_WORK_DIR/readlink-ok-bin"
+mkdir -p "$readlink_fail_bin" "$readlink_ok_bin"
+cat > "$readlink_fail_bin/readlink" <<'EOF'
+#!/bin/sh
+# BSD 對斷連結的實測行為：印出半途結果，狀態非零。
+# Measured BSD behaviour on a dangling link: partial resolution, non-zero status.
+printf '%s\n' "/Volumes/NotMounted12345"
+exit 1
+EOF
+cat > "$readlink_ok_bin/readlink" <<'EOF'
+#!/bin/sh
+# 同一個字串，但這次是成功的解析：必須照舊採用。
+# The same string, but a successful resolution this time: it must still be used.
+printf '%s\n' "/Volumes/NotMounted12345"
+exit 0
+EOF
+chmod +x "$readlink_fail_bin/readlink" "$readlink_ok_bin/readlink"
+readlink_faults=""
+# 失敗的解析不得把一般檔案變成受保護目錄。
+# A failed resolution must not turn an ordinary file into a protected directory.
+( PATH="$readlink_fail_bin:$PATH"; is_protected_says_yes "$TEST_WORK_DIR/readlink-probe.txt" "$readlink_home" )
+case $? in
+    0) readlink_faults="$readlink_faults 失敗的解析仍被採信" ;;
+    99) readlink_faults="$readlink_faults 探針壞掉（失敗版）" ;;
+esac
+# 丟掉失敗的解析不得順手拆掉清單保護：未解析的拼寫本來就該擋下 $HOME。
+# Discarding a failed resolution must not dismantle the list: the unresolved
+# spelling still has to refuse $HOME.
+( PATH="$readlink_fail_bin:$PATH"; is_protected_says_yes "$readlink_home" "$readlink_home" )
+case $? in
+    0) ;;
+    99) readlink_faults="$readlink_faults 探針壞掉（HOME）" ;;
+    *) readlink_faults="$readlink_faults 丟掉失敗的解析後 \$HOME 不再受保護" ;;
+esac
+# 判準是 exit status，不是「乾脆不看 readlink」：中途元件是 symlink 時，解析出來的
+# 路徑才是真的會被動到的東西，成功的解析仍然要採用。
+# The criterion is the exit status, not "stop consulting readlink": when an
+# intermediate component is a symlink the resolved path is what actually gets
+# touched, so a successful resolution must still be honoured.
+( PATH="$readlink_ok_bin:$PATH"; is_protected_says_yes "$TEST_WORK_DIR/readlink-probe.txt" "$readlink_home" )
+case $? in
+    0) ;;
+    99) readlink_faults="$readlink_faults 探針壞掉（成功版）" ;;
+    *) readlink_faults="$readlink_faults 成功的解析被忽略" ;;
+esac
+if [ -z "$readlink_faults" ]; then
+    test_pass "失敗的 readlink -f 輸出被丟棄，成功的照舊採用，清單保護不受影響"
+else
+    test_fail "readlink -f 失敗輸出的處理有誤:$readlink_faults"
+fi
+
 # ============================================================================
 # 測試結果統計 (Test Results Summary)
 # ============================================================================
