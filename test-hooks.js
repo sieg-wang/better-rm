@@ -320,16 +320,18 @@ blocked.push('rm -rf ~', 'rm -rf $HOME', 'rm -rf /home/tester/');
 // a device and an inode, and so do /Applications and its Data-volume spelling. A
 // firmlink is not a symlink -- readlink -f hands either spelling straight back --
 // so no canonicalisation brings the two together and each guard has to carry the
-// rule separately. better-rm gained it; this hook did not, and the list check
-// above cannot see that, because the rule lives in a function body rather than in
-// a list. The gap was live: `rm -rf /System/Volumes/Data/Users` was allowed on the
-// agent path, where there is no alias over rm, no trash and no undo.
+// rule separately. Both carry it now; for one round better-rm did and this hook
+// did not, and the list check above could not see that, because the rule lives in
+// a function body rather than in a list. The gap was live: `rm -rf
+// /System/Volumes/Data/Users` was allowed on the agent path, where there is no
+// alias over rm, no trash and no undo. These rows are what keeps it closed.
 // The prefix is read out of better-rm rather than transcribed, for the same
 // reason the two lists above are: a copy here would keep passing after better-rm
 // changed it, and the rows would then prove the wrong thing.
 // macOS firmlink：/System/Volumes/Data/X 與 /X 是同一個 device、同一個 inode，而
 // firmlink 不是 symlink，沒有任何正規化會讓兩種拼寫碰面，所以兩道守衛各自都要有
-// 這條規則。better-rm 有，hook 沒有，而清單比對看不見寫在函式本體裡的規則。
+// 這條規則。現在兩邊都有了；曾有一輪只有 better-rm 有、hook 沒有，而清單比對看不見
+// 寫在函式本體裡的規則——下面這幾列就是把它釘住的東西。
 // 前綴從 better-rm 讀出來而不是抄寫，理由與上面兩份清單相同。
 const firmlinkPrefixMatch = betterRmSource.match(/^\s*(?:local\s+)?firmlink_prefix="([^"]+)"$/m);
 assert.ok(firmlinkPrefixMatch, 'the firmlink prefix was not found in better-rm; this extraction is broken');
