@@ -1694,12 +1694,29 @@ restore_file() {
         fi
     fi
 
+    local restore_status=0
     if [ -n "$displaced_local" ]; then
         # 就地讓位的東西不在垃圾桶裡，`rm --restore` 對它無效，所以必須指名實際路徑。
+        # 這是降級的結果，不是乾淨的完成：讓位的那一個躺在垃圾桶外面、也不在刪除日誌
+        # 裡，收拾它是使用者的事。因此結束碼不能與什麼都沒發生的成功相同，用既有的 2
+        # （「部分成功、殘留物已指名、絕不回 0」，與暫存目錄沒清掉時同一個意思）；
+        # 路徑也同時印在 stdout，把 stderr 丟掉的呼叫端才有辦法知道東西去了哪裡。
+        # 那兩行刻意不上色也不走 warn_msg：它是給呼叫端讀的資料，不是裝飾。
         # An in-place set-aside is not in the trash and `rm --restore` does not
-        # reach it, so the actual path has to be named.
+        # reach it, so the actual path has to be named. It is a degraded outcome
+        # rather than a clean completion: the displaced object sits outside the
+        # trash and outside the deletion log, and clearing it up is the user's job.
+        # The exit code therefore must not be the one a clean success returns; it is
+        # the existing 2 -- "partial success, the residue is named, never 0", the
+        # same meaning it already carries for a staging directory that could not be
+        # removed. The path also goes to stdout, so a caller that discards stderr
+        # can still learn where the object went. Those two lines are deliberately
+        # uncoloured and not warn_msg: they are data for a caller, not decoration.
         warn_msg "既有的 '$dest_filename' 已移到 '$displaced_local' 讓位；它不在垃圾桶裡，rm --restore 取不回，請自行搬回或刪除"
         warn_msg "The existing '$dest_filename' was set aside at '$displaced_local'; it is not in the trash, rm --restore cannot reach it, so move it back or remove it yourself"
+        echo "rm: 既有的 '$dest_filename' 已移到 '$displaced_local' 讓位（不在垃圾桶裡）"
+        echo "rm: the existing '$dest_filename' was set aside at '$displaced_local' (not in the trash)"
+        restore_status=2
     fi
 
     if ! rmdir "$staging_dir" 2>/dev/null; then
@@ -1711,7 +1728,7 @@ restore_file() {
     if [ "$verbose" = "1" ]; then
         success_msg "已還原 '$dest_filename' 到目前資料夾 (restored to: $dest_path)"
     fi
-    return 0
+    return "$restore_status"
 }
 
 # 主程式

@@ -356,6 +356,16 @@ back door:
   only while the destination is still, by inode, the object that was verified. A
   mismatching identity is a different object and aborts as before.
 
+It is a **degraded** outcome and says so at every channel a caller might read.
+The displaced object is outside the trash and outside the deletion log, so
+clearing it up is work the user has to do, and an outcome that leaves work behind
+must not be spelled the same way as one that does not. `--restore` therefore
+exits `2` on this route — the code it already used for "the item was restored but
+a named residue is left" — and the set-aside path is printed on **stdout as well
+as stderr**, uncoloured, so a caller that discards stderr still learns where the
+object went. Measured before that change: exit `0`, zero bytes of stdout, and the
+only trace on a stream the shape `rm -f --restore x 2>/dev/null` throws away.
+
 Same-device destinations are untouched by all of this: that clearing step is a
 `rename`, which never needed space. The measurement is a decision input, not a
 guarantee — `du` and `df` can both be wrong about a compressed, sparse or

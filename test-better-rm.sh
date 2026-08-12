@@ -2117,7 +2117,10 @@ PATH="$nospace_bin:$PATH" \
 nospace_aside=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'nospace.txt.better-rm-displaced-*' -print -quit)
 nospace_trashed=$(find "$TEST_TRASH_DIR" -name 'nospace.txt__*' 2>/dev/null | wc -l | tr -d ' ')
 
-if [ "$nospace_status" -eq 0 ] && \
+# 就地讓位是降級結果，結束碼是 2 而不是 0（見下面「降級結果」那一項）。
+# The in-place set-aside is a degraded outcome and exits 2, not 0 (see the
+# "degraded outcome" item below).
+if [ "$nospace_status" -eq 2 ] && \
    [ -f nospace.txt ] && [ ! -L nospace.txt ] && \
    [ "$(cat nospace.txt)" = "NOSPACE ORIGINAL" ] && \
    [ -n "$nospace_aside" ] && \
@@ -2179,7 +2182,10 @@ PATH="$trashfail_bin:$PATH" \
     "$BETTER_RM" -f --restore trashfail.txt 2>&1) || trashfail_status=$?
 trashfail_aside=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'trashfail.txt.better-rm-displaced-*' -print -quit)
 
-if [ "$trashfail_status" -eq 0 ] && \
+# 就地讓位是降級結果，結束碼是 2 而不是 0（見下面「降級結果」那一項）。
+# The in-place set-aside is a degraded outcome and exits 2, not 0 (see the
+# "degraded outcome" item below).
+if [ "$trashfail_status" -eq 2 ] && \
    [ -f trashfail.txt ] && [ ! -L trashfail.txt ] && \
    [ "$(cat trashfail.txt)" = "TRASHFAIL ORIGINAL" ] && \
    [ -n "$trashfail_aside" ] && \
@@ -2898,7 +2904,10 @@ PATH="$filefail_bin:$PATH" \
     "$BETTER_RM" -f --restore filefail.txt 2>&1) || filefail_status=$?
 filefail_aside=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'filefail.txt.better-rm-displaced-*' -print -quit)
 
-if [ "$filefail_status" -eq 0 ] && \
+# 就地讓位是降級結果，結束碼是 2 而不是 0（見下面「降級結果」那一項）。
+# The in-place set-aside is a degraded outcome and exits 2, not 0 (see the
+# "degraded outcome" item below).
+if [ "$filefail_status" -eq 2 ] && \
    [ -f filefail.txt ] && [ ! -L filefail.txt ] && \
    [ "$(cat filefail.txt)" = "FILEFAIL RESTORED" ] && \
    [ -n "$filefail_aside" ] && \
@@ -2907,6 +2916,98 @@ if [ "$filefail_status" -eq 0 ] && \
     test_pass "檔案讓位到垃圾桶失敗時改用就地讓位，舊目的地完好並被指名"
 else
     test_fail "檔案讓位到垃圾桶失敗時舊目的地被銷毀或沒說去向 (status=$filefail_status, aside='$filefail_aside')"
+fi
+
+test_item "還原：就地讓位是降級結果，結束碼不得與乾淨完成相同，落腳處也要印在 stdout"
+# 就地讓位保住了資料，但它是降級的結果，不是乾淨的完成：讓位的那一個躺在垃圾桶外面、
+# 也不在刪除日誌裡，`rm --restore` 對它完全無效，收拾它是使用者的事。這條退路現在檔案、
+# 符號連結、硬連結、FIFO 都走得到，觸發條件也從「垃圾桶那顆磁碟滿了」放寬到一般的權限
+# 失敗，所以它不再是罕見角落。實測改動前：exit 0、stdout 0 bytes，唯一的線索只在 stderr。
+# 對一個把 stderr 丟掉的呼叫端（`rm -f --restore x 2>/dev/null`、CI step、包一層的腳本）
+# 來說，這與什麼事都沒發生的成功完全無法區分，而它得自己去收的那個目錄叫什麼，它永遠
+# 不會知道。所以：結束碼走既有的 2（「部分成功、殘留物已指名、絕不回 0」，與暫存目錄
+# 沒清掉時同一個意思），路徑同時印在 stdout。
+# stdout 那兩行刻意不上色也不走 warn_msg：它是給呼叫端讀的資料，不是給人看的裝飾。
+# The in-place set-aside keeps the data, but it is a degraded outcome rather than a
+# clean completion: the displaced object sits OUTSIDE the trash and outside the
+# deletion log, `rm --restore` cannot reach it, and clearing it up is the user's
+# job. Files, symlinks, hardlinks and FIFOs all reach this route now, and it is
+# entered from ordinary permission failures rather than only from a full trash
+# volume, so it is no longer a rare corner. Measured before this change: exit 0 and
+# 0 bytes of stdout, with the only trace on stderr. To a caller that discards stderr
+# (`rm -f --restore x 2>/dev/null`, a CI step, any wrapper) that is indistinguishable
+# from a clean success, and the directory it now has to clean up is one it can never
+# learn the name of. So: the exit code becomes the existing 2 -- "partial success,
+# the residue is named, never 0", the same meaning it already has for a staging
+# directory that could not be removed -- and the path is printed on stdout as well.
+# Those stdout lines are deliberately uncoloured and not warn_msg: they are data for
+# a caller, not decoration for a human.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+loud_bin="$TEST_WORK_DIR/restore-loud-bin"
+mkdir -p "$loud_bin"
+cat > "$loud_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+dst=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+    if [ "$i" -eq "$count" ]; then dst="$a"; fi
+done
+# 只讓「把東西搬進垃圾桶」這一次失敗；從垃圾桶取出不受影響。
+# Fail only the move INTO the trash; taking things out of it is unaffected.
+case "$dst" in
+  "$BETTER_RM_LOUD_TRASH"/*)
+    case "$src" in
+      "$BETTER_RM_LOUD_TRASH"/*) exec "$BETTER_RM_REAL_MV" "$@" ;;
+      *) exit 1 ;;
+    esac
+    ;;
+esac
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$loud_bin/mv"
+
+printf '%s\n' "LOUD RESTORED" > loud.txt
+"$BETTER_RM" loud.txt
+printf '%s\n' "LOUD OCCUPANT" > loud.txt
+loud_status=0
+BETTER_RM_LOUD_TRASH="$TEST_TRASH_DIR" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$loud_bin:$PATH" \
+    "$BETTER_RM" -f --restore loud.txt \
+    > "$TEST_WORK_DIR/loud.out" 2> "$TEST_WORK_DIR/loud.err" || loud_status=$?
+loud_out=$(cat "$TEST_WORK_DIR/loud.out")
+loud_err=$(cat "$TEST_WORK_DIR/loud.err")
+loud_aside=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'loud.txt.better-rm-displaced-*' -print -quit)
+
+# 負對照：乾淨完成的那條路徑必須維持 exit 0，而且 stdout 不得冒出讓位訊息。少了這一列，
+# 「一律回 2、一律印」也會通過，那是比原本更糟的退化。
+# Negative control: the clean route must still exit 0 with no set-aside line on
+# stdout. Without this row, "always return 2 and always print" would also pass,
+# which is a worse regression than the silence was.
+printf '%s\n' "QUIET RESTORED" > quiet.txt
+"$BETTER_RM" quiet.txt
+printf '%s\n' "QUIET OCCUPANT" > quiet.txt
+quiet_status=0
+"$BETTER_RM" -f --restore quiet.txt > "$TEST_WORK_DIR/quiet.out" 2>/dev/null || quiet_status=$?
+quiet_out=$(cat "$TEST_WORK_DIR/quiet.out")
+
+if [ "$loud_status" -eq 2 ] && \
+   [ -n "$loud_aside" ] && \
+   [[ "$loud_out" == *"$loud_aside/loud.txt"* ]] && \
+   [[ "$loud_err" == *"$loud_aside/loud.txt"* ]] && \
+   [ "$(cat loud.txt)" = "LOUD RESTORED" ] && \
+   [ "$(cat "$loud_aside/loud.txt" 2>/dev/null)" = "LOUD OCCUPANT" ] && \
+   [ "$quiet_status" -eq 0 ] && \
+   [[ "$quiet_out" != *"better-rm-displaced"* ]] && \
+   [ "$(cat quiet.txt)" = "QUIET RESTORED" ]; then
+    test_pass "就地讓位回傳 2 並在 stdout 指名落腳處，乾淨完成的那條路徑仍是 0 且不多話"
+else
+    test_fail "降級的就地讓位與乾淨完成無法區分 (讓位 status=$loud_status, stdout='$loud_out', aside='$loud_aside'；乾淨 status=$quiet_status, stdout='$quiet_out')"
 fi
 
 test_item "還原：讓位物件本身受保護時，整個還原必須中止且目的地一動也不能動"
