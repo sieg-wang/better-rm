@@ -348,8 +348,11 @@ A safer alternative to the rm command
   -i                     每次刪除前提示確認
   -I                     刪除超過三個檔案或遞迴刪除前提示一次
   -v, --verbose          顯示詳細操作過程
+  --                     選項終止符，其後一律視為檔名（含破折號開頭的名稱）
+                         Option terminator; everything after it is a pathname
   --restore <檔案>       還原最後一次刪除的檔案到目前資料夾
                          Restore the last deleted file to the current directory
+                         破折號開頭的名稱寫成 --restore -- <檔案>
   --help                 顯示此說明訊息
   --version              顯示版本資訊
 
@@ -369,6 +372,8 @@ A safer alternative to the rm command
   rm file.txt                    # 刪除單一檔案
   rm -r directory/               # 刪除目錄
   rm -rf old_project/            # 強制刪除目錄
+  rm -- -dash.txt                # 刪除以破折號開頭的檔名
+  rm --restore -- -dash.txt      # 還原以破折號開頭的檔名
   TRASH_DIR=/tmp/trash rm file   # 使用自訂垃圾桶目錄
 
 EOF
