@@ -356,10 +356,14 @@ is_protected() {
     # 建立的家目錄同樣不能被穿過去；而且逐條 stat 整份清單會讓每一次刪除都變慢。
     # 前綴必須整段對齊（/System/Volumes/DataDrive 不算），對應之後照舊送進同一份
     # 逐條比對，所以只會多出拒絕、不會少掉任何一條既有的保護。
-    # 侷限：這是拼寫層面的對應，不是身分證明。Data 卷宗上沒有的東西（例如唯讀系統
-    # 卷宗上的 /System/Volumes/Data/usr）會被對應成 /usr 而一併拒絕——多擋一條不存在
-    # 的路徑，方向是安全的那一邊。反過來，別種掛載方式造出的同一顆 inode 兩種拼寫
-    # （bind mount、hardlink 目錄）不在這條規則的涵蓋範圍內。
+    # 侷限：這是拼寫層面的對應，不是身分證明——而這裡原本舉的例子方向剛好相反。
+    # /System/Volumes/Data/usr 不是「不存在」：它是實際存在的目錄，裝著 /usr/local、
+    # /usr/libexec/cups、/usr/share/snmp 這幾條 firmlink 在資料卷宗上的本體（見
+    # /usr/share/firmlinks），而且與 /usr 的 inode 不同（同一個 stat -f '%d:%i' 實測）。
+    # 它仍會被對應成 /usr 一併拒絕：擋下的是一個真實存在、卻不是 /usr 的目錄。方向是
+    # 安全的那一邊，代價也小——真正與 /usr/local 同一顆 inode 的
+    # /System/Volumes/Data/usr/local 對應成 /usr/local，照舊可刪。反過來，別種掛載方式
+    # 造出的同一顆 inode 兩種拼寫（bind mount、hardlink 目錄）不在這條規則的涵蓋範圍內。
     # macOS firmlink: /System/Volumes/Data/X and /X are the same object. Measured with
     # stat -f '%d:%i', /Users/sieg and /System/Volumes/Data/Users/sieg share a device
     # and an inode, and so does /Applications. A firmlink is not a symlink and
@@ -372,12 +376,17 @@ is_protected() {
     # a whole component (/System/Volumes/DataDrive is not a match) and the result
     # goes through the same exact-match comparisons as before, so this can only add
     # refusals, never remove one.
-    # Limits: this is a spelling correspondence, not proof of identity. Something the
-    # Data volume does not hold -- /System/Volumes/Data/usr, say, when /usr lives on
-    # the read-only system volume -- maps to /usr and is refused with it: one extra
-    # non-existent path refused, which is the safe direction. Conversely, two
-    # spellings of one inode produced by any other mechanism (a bind mount, a
-    # hard-linked directory) are outside this rule.
+    # Limits: this is a spelling correspondence, not proof of identity -- and the
+    # example that used to stand here had it backwards. /System/Volumes/Data/usr is
+    # not absent: it is a real directory holding the data-volume side of the
+    # /usr/local, /usr/libexec/cups and /usr/share/snmp firmlinks (see
+    # /usr/share/firmlinks), and its inode differs from /usr's under the same
+    # stat -f '%d:%i'. It is mapped onto /usr and refused with it all the same, so
+    # what gets refused is an existing directory that is not /usr. That is the
+    # fail-closed direction and it costs little: /System/Volumes/Data/usr/local,
+    # which really is the same inode as /usr/local, maps to /usr/local and stays
+    # removable. Conversely, two spellings of one inode produced by any other
+    # mechanism (a bind mount, a hard-linked directory) are outside this rule.
     # 對應後的結果沿用上面「去掉結尾斜線」的表示法：根目錄在這個函式裡一路是空字串
     # （清單裡的 "/" 也被 ${protected%/} 削成空字串），所以 Data 卷宗根對應過去就是
     # 空字串，不能寫成 "/"，否則它反而比對不到 "/" 那一列。

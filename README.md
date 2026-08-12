@@ -376,9 +376,12 @@ macOS 用 firmlink 把資料卷宗接進根目錄，所以 `/Users/you` 與 `/Sy
 - 判準不是「路徑存在」：`/System/Volumes/Data/Users/<還沒建立的名字>` 一樣被拒絕。
 - 對應之後仍是逐條完全比對，不是前綴：`/System/Volumes/Data/Users/you/project` 照舊可刪。
 - 前綴必須整段對齊：`/System/Volumes/DataDrive/...` 不會被當成 Data 卷宗。
-- 侷限：這是拼寫上的對應，不是身分證明。資料卷宗上沒有的東西（例如
-  `/System/Volumes/Data/usr`）會被對應成 `/usr` 而一併拒絕，方向是安全的那一邊；反過來，
-  bind mount、hardlink 目錄之類「同一顆 inode、兩種拼寫」不在這條規則涵蓋範圍內。
+- 侷限：這是拼寫上的對應，不是身分證明。`/System/Volumes/Data/usr` **是存在的**——它裝著
+  `/usr/local`、`/usr/libexec/cups`、`/usr/share/snmp` 這幾條 firmlink 在資料卷宗上的本體
+  （見 `/usr/share/firmlinks`），inode 也與 `/usr` 不同，卻仍會被對應成 `/usr` 一併拒絕：
+  擋下的是一個真實存在、但不是 `/usr` 的目錄。方向是安全的那一邊，代價也小——真正與
+  `/usr/local` 同一顆 inode 的 `/System/Volumes/Data/usr/local` 對應成 `/usr/local`，照舊可刪。
+  反過來，bind mount、hardlink 目錄之類「同一顆 inode、兩種拼寫」不在這條規則涵蓋範圍內。
 
 清單其餘各項以完全相同的路徑比對，保護的是那個目錄本身而非其內容：`/Applications/Xcode.app`、
 `/Library/Caches/foo` 這類目錄內的項目仍可正常移除。`/private` 同樣只涵蓋 `/private` 本身；
