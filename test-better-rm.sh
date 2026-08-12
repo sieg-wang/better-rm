@@ -499,24 +499,38 @@ else
     test_fail "--restore 未接受 -- 終止符 (status=$dash_restore_status)"
 fi
 
+# 每個探測都是一個完整的引數陣列，不是一個要靠 word splitting 拆開的字串。
+# 舊寫法用 $restore_bad_args 不加引號展開，得靠一行 SC2086 的抑制註解壓警告，而且
+# 含空白的引數根本測不了——那正好是「破折號開頭」判斷最容易出錯的形狀。
+# Each probe is a full argument array rather than a string relying on word
+# splitting. The previous form expanded $restore_bad_args unquoted, needed a
+# suppression comment for SC2086, and could not express an argument containing a
+# space -- exactly the shape where a dash-leading test is easiest to get wrong.
+check_restore_refusal() {
+    local label="$1"
+    shift
+    local status=0
+    "$BETTER_RM" "$@" >/dev/null 2>&1 || status=$?
+    if [ "$status" -eq 0 ]; then
+        restore_contract_ok=0
+        printf '  %s：未報錯 / did not fail\n' "$label" >&2
+    fi
+}
+
 test_item "--restore 的引數契約沒有被 -- 放寬"
 # 反套套邏輯：加的是終止符，不是「什麼都當成引數」。缺引數、-- 後面沒有東西、
-# 以及誤打成另一個選項，三種都必須照舊報錯。
+# 誤打成另一個選項，以及含空白的破折號開頭引數，都必須照舊報錯。
 # Anti-tautology: what was added is the terminator, not "accept anything as the
-# argument". A missing argument, a bare terminator with nothing after it, and a
-# mistyped option must all still be errors.
+# argument". A missing argument, a bare terminator with nothing after it, a
+# mistyped option, and a dash-leading argument containing a space must all still
+# be errors.
 restore_contract_ok=1
-for restore_bad_args in "--restore" "--restore --" "--restore -v"; do
-    restore_bad_status=0
-    # shellcheck disable=SC2086
-    "$BETTER_RM" $restore_bad_args >/dev/null 2>&1 || restore_bad_status=$?
-    if [ "$restore_bad_status" -eq 0 ]; then
-        restore_contract_ok=0
-        echo "  '$restore_bad_args' 未報錯 / did not fail" >&2
-    fi
-done
+check_restore_refusal "--restore（沒有引數）" --restore
+check_restore_refusal "--restore --（後面沒有東西）" --restore --
+check_restore_refusal "--restore -v（沒有 --）" --restore -v
+check_restore_refusal "--restore '-v oops.txt'（含空白）" --restore "-v oops.txt"
 if [ "$restore_contract_ok" -eq 1 ]; then
-    test_pass "--restore 缺引數／裸 --／誤打選項仍然報錯"
+    test_pass "--restore 缺引數／裸 --／誤打選項／含空白選項仍然報錯"
 else
     test_fail "--restore 的引數契約被放寬了"
 fi
