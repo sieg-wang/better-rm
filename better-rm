@@ -365,6 +365,9 @@ A safer alternative to the rm command
   --restore <檔案>       還原最後一次刪除的檔案到目前資料夾
                          Restore the last deleted file to the current directory
                          破折號開頭的名稱寫成 --restore -- <檔案>
+                         目的地已被佔用時，佔著的那個先移入垃圾桶才覆蓋
+                         Whatever occupies the destination goes to the trash
+                         first, so it stays recoverable with --restore
   --help                 顯示此說明訊息
   --version              顯示版本資訊
 
