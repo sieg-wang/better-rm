@@ -319,6 +319,7 @@ export BETTER_RM_STATE_DIR="$HOME/.local/state/better-rm"
 - `/Network` - 網路掛載點根目錄
 - `/System` - 作業系統本體
 - `/Users` - 使用者主目錄根目錄
+- `/Volumes` 與其第一層掛載根目錄 - 掛載磁碟（外接碟、Time Machine、網路共享，例如 `/Volumes/Backup`）
 - `/cores` - 核心傾印檔目錄
 - `/private` - `/etc`、`/tmp`、`/var` 的實體位置
 
@@ -332,6 +333,8 @@ export BETTER_RM_STATE_DIR="$HOME/.local/state/better-rm"
 
 `/mnt` 的保護只涵蓋掛載根本身；仍可正常移除 `/mnt/c/project/tmp` 等掛載磁碟內的項目。
 WSL 可透過 `/etc/wsl.conf` 更改 Windows 磁碟的 automount root；非預設位置不在本規則的保護範圍內。
+`/Volumes` 是 macOS 的對應物，走同一段程式：`/Volumes` 與 `/Volumes/<磁碟>` 會被拒絕，
+`/Volumes/Backup/old.log` 這類掛載磁碟內的項目仍可正常移除。
 
 清單其餘各項以完全相同的路徑比對，保護的是那個目錄本身而非其內容：`/Applications/Xcode.app`、
 `/Library/Caches/foo` 這類目錄內的項目仍可正常移除。`/private` 同樣只涵蓋 `/private` 本身；

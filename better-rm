@@ -37,6 +37,7 @@ PROTECTED_DIRS=(
     "/Network"
     "/System"
     "/Users"
+    "/Volumes"
     "/bin"
     "/boot"
     "/cores"
@@ -313,16 +314,18 @@ is_protected() {
         fi
     done
 
-    # 保護 /mnt 本身及其第一層掛載根（例如 WSL 的 /mnt/c），但允許操作掛載點內的項目
-    # Protect /mnt and its immediate mount roots (for example /mnt/c on WSL), while allowing items inside them
-    local candidate remainder
-    for candidate in "$real_path" "$norm_path"; do
-        if [[ "$candidate" = /mnt/* ]]; then
-            remainder="${candidate#/mnt/}"
-            if [ -n "$remainder" ] && [[ "$remainder" != */* ]]; then
-                return 0
+    # 保護掛載根本身及其第一層掛載根（例如 WSL 的 /mnt/c、macOS 的 /Volumes/Backup），但允許操作掛載點內的項目
+    # Protect the mount parents and their immediate mount roots (for example /mnt/c on WSL, /Volumes/Backup on macOS), while allowing items inside them
+    local mount_parent candidate remainder
+    for mount_parent in /mnt /Volumes; do
+        for candidate in "$real_path" "$norm_path"; do
+            if [[ "$candidate" = "$mount_parent"/* ]]; then
+                remainder="${candidate#"$mount_parent"/}"
+                if [ -n "$remainder" ] && [[ "$remainder" != */* ]]; then
+                    return 0
+                fi
             fi
-        fi
+        done
     done
 
     # 檢查是否符合受保護的模式

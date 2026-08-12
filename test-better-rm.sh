@@ -2995,7 +2995,7 @@ test_item "PROTECTED_DIRS 每一項都被 is_protected 認定為受保護"
 # whole-home move that exits 0. is_protected and its dependencies are evaluated in
 # isolation rather than through main: driving the real /usr or /etc through the
 # binary would, the moment the guard failed, make the test itself move the whole
-# filesystem. The 23+2 names are spelled out on purpose -- reading them back from
+# filesystem. The 24+2 names are spelled out on purpose -- reading them back from
 # PROTECTED_DIRS would shrink with the array and keep passing. The extraction idiom
 # is the one test-hooks.js already uses on install-hooks.sh.
 setup
@@ -3020,7 +3020,7 @@ is_protected_says_yes() {
 }
 protected_unguarded=""
 protected_probe_broken=""
-for protected_path in / /Applications /Library /Network /System /Users \
+for protected_path in / /Applications /Library /Network /System /Users /Volumes \
                       /bin /boot /cores /dev /etc /home /lib /lib64 /mnt /opt \
                       /private /proc /root /sbin /sys /usr /var \
                       "$protected_home" "$protected_home/"; do
@@ -3057,6 +3057,47 @@ if [ -z "$protected_unguarded" ] && [ -z "$protected_false_positive" ] &&
     test_pass "PROTECTED_DIRS 每一項都受保護，且一般路徑未被誤擋"
 else
     test_fail "未受保護:${protected_unguarded:- 無}；誤擋:${protected_false_positive:- 無}；抽取失敗:${protected_probe_broken:- 無}"
+fi
+
+test_item "/Volumes 與 /mnt 的第一層掛載根受保護，掛載磁碟內的項目不受影響"
+# /Volumes 是 macOS 的 /mnt：外接碟、Time Machine、網路共享都掛在它下面，移走
+# /Volumes/<disk> 就是把整顆磁碟的掛載點帶走。保護必須停在掛載根，否則
+# /Volumes/Backup/old.log 這種日常刪除也會被擋。
+# 兩個根共用同一段程式，所以 /mnt 那幾列留在這裡：把那段改寫成只認 /Volumes 會讓
+# /mnt 轉紅。這裡走 is_protected 探針而不跑 better-rm——/Volumes 在 macOS 上是真的，
+# 保護一旦失效就是叫測試自己去搬真的掛載點。
+# /Volumes is the macOS /mnt: external disks, Time Machine and network shares all
+# mount under it, and removing /Volumes/<disk> takes the whole disk's mount point
+# with it. The protection has to stop at the mount root, or an ordinary deletion
+# inside a mounted disk is refused. Both roots share one block, so the /mnt rows
+# stay here: a rewrite that only knows about /Volumes turns them red. Driven
+# through the is_protected probe rather than better-rm because /Volumes really
+# exists on macOS, and a failed guard would make the test move a real mount point.
+mount_root_unguarded=""
+mount_root_probe_broken=""
+for mount_root_path in /Volumes /Volumes/BetterRmProbeDisk "/Volumes/Probe Disk" \
+                       /Volumes/../Volumes/BetterRmProbeDisk \
+                       /mnt /mnt/c /mnt/../mnt/wsl; do
+    is_protected_says_yes "$mount_root_path" "$protected_home"
+    case $? in
+        0) ;;
+        99) mount_root_probe_broken="$mount_root_probe_broken $mount_root_path" ;;
+        *) mount_root_unguarded="$mount_root_unguarded $mount_root_path" ;;
+    esac
+done
+mount_inside_blocked=""
+for mount_inside_path in /Volumes/BetterRmProbeDisk/file.txt \
+                         "/Volumes/Probe Disk/project/tmp" \
+                         /mnt/c/project /mnt/c/project/tmp; do
+    if is_protected_says_yes "$mount_inside_path" "$protected_home"; then
+        mount_inside_blocked="$mount_inside_blocked $mount_inside_path"
+    fi
+done
+if [ -z "$mount_root_unguarded" ] && [ -z "$mount_inside_blocked" ] &&
+   [ -z "$mount_root_probe_broken" ]; then
+    test_pass "/Volumes 與 /mnt 的掛載根受保護，掛載磁碟內的項目未被誤擋"
+else
+    test_fail "掛載根未受保護:${mount_root_unguarded:- 無}；掛載磁碟內誤擋:${mount_inside_blocked:- 無}；抽取失敗:${mount_root_probe_broken:- 無}"
 fi
 
 test_item "\$HOME 被拒絕且內容完好（端到端）"
