@@ -420,6 +420,22 @@ path_split() {
     fi
 }
 
+# path_split 的反向操作：把 parent 與最後一段接回絕對路徑，結果放進 PATH_JOIN_RESULT。
+# parent 已經以斜線結尾（"/" 就是唯一會發生的情況）時不能再補一條：abs_path 會變成
+# //name，而那個字串會原封不動寫進刪除日誌與垃圾桶鏡像路徑，記下來的寫法就跟使用者
+# 指名的不是同一個。
+# 回傳走全域變數的理由與 path_split 相同：$(path_join …) 會再吃掉結尾換行。
+# The inverse of path_split: join a parent and a final component back into an
+# absolute path. A parent that already ends in a slash -- "/" being the only case
+# that actually occurs -- must not get a second one, or abs_path becomes //name and
+# that string lands verbatim in the deletion log and the trash mirror path, spelled
+# differently from what the user named.
+# Returning through a global is for the same reason as path_split's:
+# $(path_join …) would eat the trailing newlines again.
+path_join() {
+    PATH_JOIN_RESULT="${1%/}/$2"
+}
+
 # 移動檔案至垃圾桶
 # Move file to trash
 move_to_trash() (
@@ -546,7 +562,8 @@ move_to_trash() (
         # substitution -- which eats a filename's trailing newlines, records the
         # trash entry and the log under a different name, and leaves --restore
         # unable to put the original name back.
-        abs_path="$(pwd -P)/$source_basename"
+        path_join "$(pwd -P)" "$source_basename"
+        abs_path="$PATH_JOIN_RESULT"
     else
         if [[ "$source" = /* ]]; then
             abs_path="$source"

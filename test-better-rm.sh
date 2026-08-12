@@ -2593,6 +2593,76 @@ else
     test_fail "以斜線結尾的目錄刪除失敗 (status=$slash_status)"
 fi
 
+test_item "parent 是根目錄時記下的路徑不得多一條斜線"
+# abs_path 由「實體 parent + 最後一段」組成，而 parent 是 "/" 時直接接斜線會得到
+# //name。那個字串會原封不動寫進刪除日誌與垃圾桶鏡像路徑，記下來的寫法就跟使用者
+# 指名的不一樣。
+# 為什麼不端到端驗：要讓 pinned parent 的 pwd -P 等於 "/"，來源必須是 / 底下一個真實
+# 的項目，而兩個目標平台都不允許測試建立這種東西——macOS 的系統卷是封裝唯讀，CI 的
+# ubuntu runner 上 / 由 root 擁有（實測 [ -w / ] 皆為否）。/ 底下的項目本身沒有被
+# is_protected 擋掉（實測 `better-rm /不存在` 停在「沒有此一檔案或目錄」，不是「受
+# 保護」），所以這條路徑對寫得進 / 的人是走得到的。
+# 折衷是直接從 better-rm 抽出組路徑的那個函式來驗：抽的是檔案裡真正在跑的那一份。
+# abs_path is composed from the physical parent plus the final component, and a
+# "/" parent given another slash yields //name -- a string that goes verbatim into
+# the deletion log and the trash mirror path, spelled differently from what the
+# user named.
+# Why this is not end-to-end: making the pinned parent's pwd -P equal "/" requires
+# a real entry directly under /, and neither target platform lets a test create
+# one (macOS ships a sealed read-only system volume; / on the ubuntu CI runner is
+# root-owned -- [ -w / ] is false on both). Entries under / are not themselves
+# refused by is_protected (`better-rm /does-not-exist` stops at "No such file or
+# directory", not at "protected"), so the path is reachable for anyone who can
+# write to /.
+# So the join is exercised directly, extracted from better-rm itself, which means
+# the function under test is the one that actually ships.
+setup
+eval "$(sed -n '/^path_join() {$/,/^}$/p' "$BETTER_RM")"
+join_failures=""
+for join_case in "/|name|/name" "/parent|name|/parent/name" "/parent/|name|/parent/name"; do
+    join_parent="${join_case%%|*}"
+    join_rest="${join_case#*|}"
+    join_child="${join_rest%%|*}"
+    join_expected="${join_rest#*|}"
+    PATH_JOIN_RESULT=""
+    path_join "$join_parent" "$join_child"
+    if [ "$PATH_JOIN_RESULT" != "$join_expected" ]; then
+        join_failures="$join_failures '$join_parent'+'$join_child'=>'$PATH_JOIN_RESULT' (期望 $join_expected)"
+    fi
+done
+if [ -z "$join_failures" ]; then
+    test_pass "根目錄 parent 組出單一斜線的絕對路徑"
+else
+    test_fail "組出的絕對路徑有誤：$join_failures"
+fi
+
+test_item "含雙斜線的既有日誌紀錄仍可還原"
+# 上一版曾把 / 底下的來源記成 //name。那些紀錄不會因為改回單斜線而失效。
+# The previous revision recorded a source under / as //name. Those records must
+# keep restoring after the composition goes back to a single slash.
+setup
+cd "$TEST_WORK_DIR"
+printf '%s\n' "DOUBLE SLASH LEDGER" > double_slash.txt
+"$BETTER_RM" double_slash.txt
+double_slash_trash=$(find "$TEST_TRASH_DIR" -type f -name 'double_slash.txt__*' | head -1)
+{
+    printf '%s\n' "# Better-RM Deletion Log"
+    printf '%s | %s | %s | %s | %s\n' \
+        "20260101_000000_000000000" \
+        "/${TEST_WORK_DIR}/double_slash.txt" \
+        "$double_slash_trash" \
+        "0123456789abcdef" \
+        "file"
+} > "$TEST_STATE_DIR/deletion.log"
+double_slash_status=0
+"$BETTER_RM" --restore double_slash.txt >/dev/null 2>&1 || double_slash_status=$?
+if [ "$double_slash_status" -eq 0 ] && [ -f double_slash.txt ] && \
+   [ "$(cat double_slash.txt)" = "DOUBLE SLASH LEDGER" ]; then
+    test_pass "雙斜線紀錄仍可還原"
+else
+    test_fail "雙斜線紀錄無法還原 (status=$double_slash_status)"
+fi
+
 test_item "升級前寫下的舊格式日誌仍可還原"
 # 本機既有的垃圾桶紀錄都是舊格式；新格式必須照樣讀得懂，否則升級即斷。
 # Trash logs written before this change are in the old format; the reader must
