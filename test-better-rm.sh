@@ -3599,6 +3599,169 @@ else
     test_fail "readlink -f 失敗輸出的處理有誤:$readlink_faults"
 fi
 
+test_item "符號連結依自身路徑判定，但會穿過去的拼寫仍依解析後的路徑判定"
+# 刪除一條符號連結不會動到它指向的東西——move_exact 用的是 -h／-T，上面「連結本身進
+# 垃圾桶，絕不跟隨」那一項就是在釘這件事。既然如此，拿 target 去比對保護清單就是憑
+# 空造出來的誤判：受保護清單補上 macOS 那幾筆之後，~/applink -> /Applications 這種
+# 再普通不過的捷徑整批變成刪不掉，-f 也蓋不過去。
+# 危險的是「會穿過去的拼寫」：macOS 上 link/ 解析到的是目錄而不是連結，所以判定不能
+# 一律改用未解析的路徑。實測 [ -L "link/" ]、[ -L "link/." ] 在 macOS 與 Linux 上都是
+# false（結尾斜線依 POSIX 會強制解析最後一段），所以「引數自己就是一條連結」這個條件
+# 剛好把兩類拼寫分在正確的兩邊；下面兩組列把這件事釘死，不是靠推論。
+# Deleting a symlink cannot touch what it points at -- move_exact uses -h/-T, which
+# is what the "the link itself is trashed and never followed" item above pins. So
+# judging it by its target is a false positive by construction: once the macOS
+# entries joined the protected list, an ordinary shortcut such as
+# ~/applink -> /Applications became undeletable and -f did not override it.
+# The dangerous half is the spellings that resolve THROUGH the link: on macOS
+# `link/` denotes the directory, not the link, so the judgement cannot simply switch
+# to the unresolved path for everything. Measured on both platforms:
+# [ -L "link/" ] and [ -L "link/." ] are false, because a trailing slash forces
+# resolution of the final component -- so "the argument is itself a symlink" splits
+# the two classes exactly right. The two row groups below pin that rather than
+# reasoning about it.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+# 沙箱 $HOME 必須用實體路徑（pwd -P）：macOS 的 /tmp 本身就是 /private/tmp 的連結，
+# 拿 /tmp/… 那個寫法當 $HOME 的話，解析後的路徑永遠對不上清單裡的 $HOME，於是「穿過
+# 連結」那幾列在 macOS 上恆綠、在 Linux 上才紅——正好是最會漏掉的那種平台差異。
+# The sandbox $HOME has to be the physical path (pwd -P): on macOS /tmp is itself a
+# link to /private/tmp, so a $HOME spelled /tmp/… never matches the resolved path and
+# the resolve-through rows would be permanently green on macOS and red only on Linux
+# -- exactly the platform difference that is easiest to ship by accident.
+symlink_work=$(pwd -P)
+symlink_home="$symlink_work/symlink-home"
+mkdir -p "$symlink_home/keep" "$symlink_work/plain-dir"
+ln -s "$symlink_home" "$symlink_work/link-to-home"
+ln -s "$symlink_home/keep" "$symlink_work/link-to-keep"
+ln -s /usr "$symlink_work/link-to-usr"
+ln -s / "$symlink_work/link-to-root"
+ln -s "$symlink_work/plain-dir" "$symlink_work/.git"
+symlink_false_positive=""
+symlink_probe_broken=""
+# 引數自己就是一條連結：刪掉它動不到 target，一律依自身路徑判定。
+# The argument is itself a link: deleting it cannot reach the target, so it is
+# judged by its own path.
+for symlink_allowed_path in "$symlink_work/link-to-home" "$symlink_work/link-to-usr" \
+                            "$symlink_work/link-to-root" "$symlink_work/link-to-keep"; do
+    is_protected_says_yes "$symlink_allowed_path" "$symlink_home"
+    case $? in
+        0) symlink_false_positive="$symlink_false_positive $symlink_allowed_path" ;;
+        99) symlink_probe_broken="$symlink_probe_broken $symlink_allowed_path" ;;
+    esac
+done
+symlink_unguarded=""
+# 真目錄本身的每一種拼寫、會穿過連結的每一種拼寫，以及「自己就是連結但名字本身受保護」
+# 的清單項與模式項（Linux 的 /bin、macOS 的 /etc、名為 .git 的連結）都必須照舊拒絕。
+# Every spelling of the real directories, every spelling that resolves through a
+# link, and the list/pattern entries that are themselves symlinks (/bin on Linux,
+# /etc on macOS, a link named .git) all have to stay refused.
+for symlink_protected_path in "$symlink_home" "$symlink_home/" \
+                              /usr /usr/ //usr /usr/. / \
+                              /bin /etc /var \
+                              "$symlink_work/link-to-home/" \
+                              "$symlink_work/link-to-home/." \
+                              "$symlink_work/link-to-usr/" \
+                              "$symlink_work/link-to-keep/.." \
+                              "$symlink_work/.git"; do
+    is_protected_says_yes "$symlink_protected_path" "$symlink_home"
+    case $? in
+        0) ;;
+        99) symlink_probe_broken="$symlink_probe_broken $symlink_protected_path" ;;
+        *) symlink_unguarded="$symlink_unguarded $symlink_protected_path" ;;
+    esac
+done
+if [ -z "$symlink_false_positive" ] && [ -z "$symlink_unguarded" ] &&
+   [ -z "$symlink_probe_broken" ]; then
+    test_pass "連結依自身路徑判定，穿過連結的拼寫與清單／模式項照舊受保護"
+else
+    test_fail "連結誤擋:${symlink_false_positive:- 無}；穿過去或清單項未受保護:${symlink_unguarded:- 無}；抽取失敗:${symlink_probe_broken:- 無}"
+fi
+
+test_item "指向 \$HOME 的連結可以刪除，且進垃圾桶的是連結本身（端到端）"
+# 上一項證明判斷改了，這一項證明改的是真的會發生的事，而且刪掉的確實是連結：垃圾桶裡
+# 那一筆必須是 symlink 而且還指著原來的地方，$HOME 底下的內容一個字都不能少。
+# HOME 指向 sandbox，所以就算跟隨了連結，被搬走的也只是 sandbox。
+# The previous item proves the judgement changed; this one proves the change reaches
+# real behaviour and that what was removed is the link: the trash entry has to be a
+# symlink still pointing where it did, and nothing under $HOME may move.
+# HOME points at a sandbox, so even a followed link would only move the sandbox.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+# 沙箱 $HOME 用實體路徑，理由同上一項。
+# The sandbox $HOME is the physical path, for the reason given in the previous item.
+linkhome_home="$(pwd -P)/linkhome-home"
+mkdir -p "$linkhome_home/keep"
+printf 'KEEP\n' > "$linkhome_home/keep/marker.txt"
+ln -s "$linkhome_home" homelink
+linkhome_status=0
+linkhome_output=$(HOME="$linkhome_home" "$BETTER_RM" homelink 2>&1) || linkhome_status=$?
+linkhome_trashed=$(find "$TEST_TRASH_DIR" -maxdepth 12 -type l -name 'homelink__*' 2>/dev/null |
+    head -n 1)
+if [ "$linkhome_status" -eq 0 ] && [ ! -L homelink ] &&
+   [ -n "$linkhome_trashed" ] &&
+   [ "$(readlink "$linkhome_trashed")" = "$linkhome_home" ] &&
+   [ "$(cat "$linkhome_home/keep/marker.txt" 2>/dev/null)" = "KEEP" ]; then
+    test_pass "連結本身進了垃圾桶，\$HOME 的內容原封不動"
+else
+    test_fail "指向 \$HOME 的連結未被正確刪除（exit=${linkhome_status}；垃圾桶連結=${linkhome_trashed:-無}；訊息=${linkhome_output}）"
+fi
+
+test_item "結尾斜線的連結拼寫仍被當成它指到的目錄而拒絕（端到端）"
+# 這是上一項的安全網：macOS 的 `rm -rf ~/applink/` 動的是 target 的內容，所以這個拼寫
+# 一旦被放行，放行的就是刪除 $HOME 本身。連結與 marker 都必須原封不動。
+# 把上面的判斷條件改成先剝掉結尾斜線（例如 [ -L "${path%/}" ]），這一列就會轉紅。
+# The safety net for the previous item: on macOS `rm -rf ~/applink/` operates on the
+# target's contents, so allowing this spelling would allow deleting $HOME itself.
+# Both the link and the marker have to survive untouched. Rewriting the condition to
+# strip the trailing slash first (say [ -L "${path%/}" ]) turns this row red.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+slashlink_home="$(pwd -P)/slashlink-home"
+mkdir -p "$slashlink_home/keep"
+printf 'KEEP\n' > "$slashlink_home/keep/marker.txt"
+ln -s "$slashlink_home" homelink
+slashlink_output=$(HOME="$slashlink_home" "$BETTER_RM" -rf homelink/ 2>&1)
+if printf '%s' "$slashlink_output" | grep -q "拒絕刪除受保護的目錄" &&
+   [ -L homelink ] &&
+   [ "$(cat "$slashlink_home/keep/marker.txt" 2>/dev/null)" = "KEEP" ]; then
+    test_pass "結尾斜線的拼寫照舊被拒絕，連結與 \$HOME 內容都在"
+else
+    test_fail "結尾斜線的拼寫未被拒絕（連結存在=$([ -L homelink ] && echo yes || echo no)；marker=$(cat "$slashlink_home/keep/marker.txt" 2>/dev/null)；訊息=${slashlink_output}）"
+fi
+
+test_item "還原：目的地被指向 \$HOME 的連結佔著時，讓位仍走垃圾桶而不是整個中止"
+# is_protected 說「受保護」時 --restore 不讓位也不覆蓋，直接中止；於是目的地只要被一條
+# 指向受保護目錄的連結佔著，那筆還原就永遠做不成，即使那條連結刪掉完全無害。
+# 這一列驗的是還原真的完成、而且佔位的連結是「移入垃圾桶」而不是被銷毀。
+# --restore neither displaces nor overwrites a destination is_protected calls
+# protected: it aborts. So a destination occupied by a link to a protected directory
+# made the restore permanently impossible, even though removing that link is
+# harmless. This row checks the restore actually completes and that the occupying
+# link went INTO the trash rather than being destroyed.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+restorelink_home="$(pwd -P)/restorelink-home"
+mkdir -p "$restorelink_home/keep"
+printf 'KEEP\n' > "$restorelink_home/keep/marker.txt"
+printf '%s\n' "RESTORED CONTENT" > occupant.txt
+HOME="$restorelink_home" "$BETTER_RM" occupant.txt >/dev/null 2>&1
+ln -s "$restorelink_home" occupant.txt
+restorelink_status=0
+restorelink_output=$(HOME="$restorelink_home" "$BETTER_RM" -f --restore -- occupant.txt 2>&1) ||
+    restorelink_status=$?
+restorelink_trashed=$(find "$TEST_TRASH_DIR" -maxdepth 12 -type l -name 'occupant.txt__*' 2>/dev/null |
+    wc -l | tr -d ' ')
+if [ "$restorelink_status" -eq 0 ] &&
+   [ -f occupant.txt ] && [ ! -L occupant.txt ] &&
+   [ "$(cat occupant.txt 2>/dev/null)" = "RESTORED CONTENT" ] &&
+   [ "$restorelink_trashed" -eq 1 ] &&
+   [ "$(cat "$restorelink_home/keep/marker.txt" 2>/dev/null)" = "KEEP" ]; then
+    test_pass "佔位的連結移入垃圾桶讓位，還原完成且 \$HOME 內容原封不動"
+else
+    test_fail "還原未完成或佔位連結未進垃圾桶（exit=${restorelink_status}；垃圾桶連結=${restorelink_trashed}；訊息=${restorelink_output}）"
+fi
+
 # ============================================================================
 # 測試結果統計 (Test Results Summary)
 # ============================================================================

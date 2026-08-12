@@ -264,7 +264,22 @@ is_protected() {
     
     # 取得絕對路徑
     # Get absolute path
-    if [ -e "$path" ] || [ -L "$path" ]; then
+    # 引數自己就是一條符號連結時不解析：刪掉一條連結不會動到它指向的東西
+    # （move_exact 用 -h／-T），拿 target 去比對保護清單是憑空造出來的誤判——
+    # ~/applink -> /Applications 這種捷徑會整批變成刪不掉，-f 也蓋不過去。
+    # 條件寫成 [ ! -L "$path" ] 而不是先剝掉結尾斜線：macOS 上 `link/` 指的是那個目錄
+    # 而不是連結，實測 [ -L "link/" ] 與 [ -L "link/." ] 在 macOS 與 Linux 上都是 false
+    # （結尾斜線依 POSIX 會強制解析最後一段），所以會穿過去的拼寫剛好留在解析這一側。
+    # A symlink argument is not resolved: deleting a link cannot touch what it points
+    # at (move_exact uses -h/-T), so comparing the target against the protected list
+    # is a false positive by construction -- it made shortcuts such as
+    # ~/applink -> /Applications undeletable, with -f unable to override.
+    # The condition is [ ! -L "$path" ] rather than a trailing-slash strip: on macOS
+    # `link/` denotes the directory, not the link, and [ -L "link/" ] and
+    # [ -L "link/." ] are measured false on both macOS and Linux (a trailing slash
+    # forces resolution of the final component), so every spelling that resolves
+    # through the link stays on the resolving side.
+    if [ ! -L "$path" ] && [ -e "$path" ]; then
         # 如果檔案存在，使用 readlink/realpath
         # 狀態非零就丟掉輸出：BSD 的 readlink -f 解析不完仍會把半途結果印出來
         # （實測斷連結印出 /Volumes/NotMounted12345 並 exit 1），採信那半截路徑等於
@@ -288,8 +303,9 @@ is_protected() {
             real_path=$(normalize_path "$real_path")
         fi
     else
-        # 如果路徑不存在，嘗試解析相對路徑
-        # If path doesn't exist, try to resolve relative path
+        # 連結本身，或根本不存在的路徑：一律用未解析的寫法解相對路徑
+        # The link itself, or a path that does not exist: resolve the spelling as
+        # given, without following anything
         if [[ "$path" = /* ]]; then
             real_path="$path"
         else
