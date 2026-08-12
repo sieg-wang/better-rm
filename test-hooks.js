@@ -300,6 +300,16 @@ for (const protectedDir of cliProtectedSet) {
 for (const mountParent of cliMountParents) {
   blocked.push(`rm -rf ${mountParent}/probe-disk`, `rm -rf ${mountParent}/probe-disk/`);
   allowed.push(`rm -rf ${mountParent}/probe-disk/inside-item`);
+  // A mount root whose name begins with '..' is still a mount root -- a volume can
+  // be named that, and better-rm protects it: measured, it refuses /Volumes/..disk
+  // and still allows /Volumes/..disk/inside-item. Expressing "did not escape the
+  // parent" as "the relative path does not start with .." reads those leading dots
+  // as an escape and hands the disk over, which is the one shape where the two
+  // guards' spelling of the same rule disagrees.
+  // 名字以 '..' 開頭的掛載根仍然是掛載根（磁碟可以取這種名字），better-rm 實測會擋。
+  // 用「相對路徑不以 .. 開頭」表達「沒有跳出父目錄」會把這種名字誤判成跳脫而放行。
+  blocked.push(`rm -rf ${mountParent}/..probe-disk`);
+  allowed.push(`rm -rf ${mountParent}/..probe-disk/inside-item`);
 }
 // The home directory itself, in the spellings a shell can hand over.
 // 家目錄本身的各種寫法。

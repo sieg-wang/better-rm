@@ -312,10 +312,15 @@ function protectedReason(target, cwd, home, extraDirs = []) {
   // 保護各掛載父目錄的第一層掛載根（如 WSL 的 /mnt/c、macOS 的 /Volumes/Backup），
   // 但允許操作掛載點內的項目（如 /mnt/c/project）。
   for (const mountParent of MOUNT_PARENTS) {
+    // Only the exact '..' means the target sits outside the parent: anything that
+    // escapes further carries a separator and is excluded below, while a mount root
+    // may legitimately be NAMED '..something'.
+    // 只有剛好等於 '..' 才代表跳出父目錄；跳更多層一定帶分隔符，而掛載根本身可以叫做
+    // '..某某'。
     const mountRelative = path.relative(mountParent, normalized);
     if (
       mountRelative &&
-      !mountRelative.startsWith('..') &&
+      mountRelative !== '..' &&
       !path.isAbsolute(mountRelative) &&
       !mountRelative.includes(path.sep)
     ) return normalized;
