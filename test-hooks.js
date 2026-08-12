@@ -315,6 +315,46 @@ for (const mountParent of cliMountParents) {
 // 家目錄本身的各種寫法。
 blocked.push('rm -rf ~', 'rm -rf $HOME', 'rm -rf /home/tester/');
 
+// macOS firmlinks: /System/Volumes/Data/X and /X are the same object. Measured
+// with stat -f '%d:%i', /Users/<user> and /System/Volumes/Data/Users/<user> share
+// a device and an inode, and so do /Applications and its Data-volume spelling. A
+// firmlink is not a symlink -- readlink -f hands either spelling straight back --
+// so no canonicalisation brings the two together and each guard has to carry the
+// rule separately. better-rm gained it; this hook did not, and the list check
+// above cannot see that, because the rule lives in a function body rather than in
+// a list. The gap was live: `rm -rf /System/Volumes/Data/Users` was allowed on the
+// agent path, where there is no alias over rm, no trash and no undo.
+// The prefix is read out of better-rm rather than transcribed, for the same
+// reason the two lists above are: a copy here would keep passing after better-rm
+// changed it, and the rows would then prove the wrong thing.
+// macOS firmlink：/System/Volumes/Data/X 與 /X 是同一個 device、同一個 inode，而
+// firmlink 不是 symlink，沒有任何正規化會讓兩種拼寫碰面，所以兩道守衛各自都要有
+// 這條規則。better-rm 有，hook 沒有，而清單比對看不見寫在函式本體裡的規則。
+// 前綴從 better-rm 讀出來而不是抄寫，理由與上面兩份清單相同。
+const firmlinkPrefixMatch = betterRmSource.match(/^\s*(?:local\s+)?firmlink_prefix="([^"]+)"$/m);
+assert.ok(firmlinkPrefixMatch, 'the firmlink prefix was not found in better-rm; this extraction is broken');
+const firmlinkPrefix = firmlinkPrefixMatch[1];
+assert.match(firmlinkPrefix, /^\/[^"\s]+[^/]$/, `the firmlink prefix parsed as a non-path: ${firmlinkPrefix}`);
+blocked.push(`rm -rf ${firmlinkPrefix}`, `rm -rf ${firmlinkPrefix}/`);
+for (const protectedDir of cliProtectedSet) {
+  // The root's Data-volume spelling is the prefix itself, pushed above.
+  // 根目錄的 Data 卷宗拼寫就是前綴本身，已在上面加入。
+  if (protectedDir === '/') continue;
+  blocked.push(`rm -rf ${firmlinkPrefix}${protectedDir}`);
+  // The same anti-tautology half as the list rows above: what is protected is the
+  // directory, not everything on the data volume. Mount parents are excluded for
+  // the same reason as above -- their first level is a mount root.
+  // 反恆真的另一半：受保護的是那個目錄，不是整顆資料卷宗。
+  if (cliMountParents.includes(protectedDir)) continue;
+  allowed.push(`rm -rf ${firmlinkPrefix}${protectedDir}/inside-item`);
+}
+// The prefix has to align on a whole component: a volume merely NAMED Data...
+// is a different disk, and folding it into the root spelling would refuse
+// /System/Volumes/DataDrive/file.txt, an ordinary file on an ordinary disk.
+// 前綴必須整段對齊：名字剛好以 Data 開頭的另一顆磁碟不能被折進根拼寫。
+allowed.push(`rm -rf ${firmlinkPrefix}Drive/file.txt`);
+allowed.push(`rm -rf ${firmlinkPrefix}/not-a-protected-name`);
+
 // A path INSIDE .git is as unrecoverable as .git itself: `.git/objects` or
 // `.git/refs` loses the repository, and there is no trash copy on this path —
 // the hook's job is to stop the command before rm runs. Every .git row above

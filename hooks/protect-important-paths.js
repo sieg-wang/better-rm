@@ -27,6 +27,13 @@ const SYSTEM_DIRS = [
 // /System/Volumes 是現代 Mac 掛載自己那幾顆 APFS 卷宗的地方，第一層同樣是掛載根。
 const MOUNT_PARENTS = ['/mnt', '/Volumes', '/System/Volumes'];
 
+// The macOS data volume, whose contents appear a second time at the root.
+// Kept identical to better-rm's firmlink_prefix, which carries the long-form
+// reasoning; test-hooks.js reads that one and drives this rule with it.
+// macOS 資料卷宗的掛載點，其內容會在根目錄再出現一次。與 better-rm 的
+// firmlink_prefix 保持一致（完整理由寫在那裡）。
+const FIRMLINK_PREFIX = '/System/Volumes/Data';
+
 function decodeAnsiCEscape(input, slashIndex) {
   const escape = input[slashIndex + 1];
   if (escape === undefined) return { value: '\\', end: slashIndex };
@@ -308,7 +315,30 @@ function globCanMatchGit(value) {
 }
 
 function protectedReason(target, cwd, home, extraDirs = []) {
-  const normalized = normalizedTarget(target, cwd, home);
+  let normalized = normalizedTarget(target, cwd, home);
+
+  // macOS firmlink: /System/Volumes/Data/X and /X are the same object. Measured
+  // with stat -f '%d:%i', /Users/<user> and /System/Volumes/Data/Users/<user>
+  // share a device and an inode, and so does /Applications. A firmlink is not a
+  // symlink, so nothing canonicalises one spelling into the other -- the whole
+  // home directory was removable here under the Data-volume spelling, on the one
+  // path where this hook is the only guard. Rewriting the prefix onto the root
+  // spelling before any comparison is what better-rm's is_protected does; the
+  // rule is stated once there in full, including why it is a spelling
+  // correspondence rather than an inode comparison (an inode needs the path to
+  // exist, and a home directory that has not been created yet must not be walked
+  // through either).
+  // The prefix has to align on a WHOLE component: /System/Volumes/DataDrive is a
+  // different disk and must keep its own spelling, or removing a file on it
+  // becomes a refusal.
+  // macOS firmlink：/System/Volumes/Data/X 與 /X 是同一個物件（同 device 同
+  // inode），firmlink 不是 symlink，沒有任何正規化會讓兩種拼寫碰面——整個家目錄
+  // 本來可以用 Data 卷宗的拼寫在這裡被放行。比對前先把前綴改寫回根拼寫，與
+  // better-rm 的 is_protected 相同（完整理由寫在那裡）。前綴必須整段對齊。
+  if (normalized === FIRMLINK_PREFIX || normalized.startsWith(`${FIRMLINK_PREFIX}/`)) {
+    normalized = normalized.slice(FIRMLINK_PREFIX.length) || '/';
+  }
+
   const exactDirs = [...SYSTEM_DIRS, home, ...extraDirs].map((item) => path.resolve(item));
 
   if (exactDirs.includes(normalized)) return normalized;
