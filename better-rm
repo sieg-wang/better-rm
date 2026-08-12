@@ -349,7 +349,9 @@ A safer alternative to the rm command
   -I                     刪除超過三個檔案或遞迴刪除前提示一次
   -v, --verbose          顯示詳細操作過程
   --                     選項終止符，其後一律視為檔名（含破折號開頭的名稱）
-                         Option terminator; everything after it is a pathname
+                         刪除接受多個；--restore 只接受一個，多的會被拒絕
+                         Option terminator; everything after it is a pathname.
+                         Deletion takes any number, --restore takes exactly one
   --restore <檔案>       還原最後一次刪除的檔案到目前資料夾
                          Restore the last deleted file to the current directory
                          破折號開頭的名稱寫成 --restore -- <檔案>
@@ -1679,6 +1681,24 @@ main() {
                 if [ $# -gt 0 ] && { [ "$restore_terminated" -eq 1 ] || [[ "$1" != -* ]]; }; then
                     restore_target="$1"
                     shift
+                    # -- 之後只收這一個檔名。刪除端的 -- 吃掉所有剩下的引數，還原端
+                    # 只吃一個，範圍本來就不同；多出來的那個絕不能默默變成旗標——實測
+                    # `--restore -- victim.txt -f` 會以 -f 強制覆蓋，目的地無提示地被
+                    # 換掉且完全沒進垃圾桶。默默丟掉也不行：還原路徑上「安靜地不照你
+                    # 說的做」是最糟的失敗模式。旗標寫在 --restore 前面依然照舊。
+                    # After --, exactly one pathname is taken. The delete side's --
+                    # consumes every remaining argument and this side consumes one, so
+                    # the scopes genuinely differ, and the extra must never turn into a
+                    # flag: measured, `--restore -- victim.txt -f` force-overwrote the
+                    # destination with no prompt and left nothing in the trash. Silently
+                    # dropping it is no better -- quietly not doing what you were told is
+                    # the worst failure mode on a restore path. A flag written before
+                    # --restore keeps working exactly as it did.
+                    if [ "$restore_terminated" -eq 1 ] && [ $# -gt 0 ]; then
+                        error_msg "'--restore --' 之後只接受一個路徑，多出來的引數：'$1'"
+                        error_msg "'--restore --' takes exactly one pathname; unexpected extra argument: '$1'"
+                        return 1
+                    fi
                 else
                     error_msg "選項 '--restore' 需要一個引數"
                     error_msg "option '--restore' requires an argument"

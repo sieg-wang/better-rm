@@ -575,6 +575,72 @@ else
     test_fail "--restore 的引數契約被放寬了"
 fi
 
+test_item "--restore -- 之後多出來的引數要被拒絕"
+# 刪除端的 -- 吃掉「所有」剩下的引數，還原端只吃「一個」，兩邊範圍不同。多出來的
+# 那個以前會被當成選項：實測 `rm --restore -- victim.txt -f` 結束碼 0，目的地被無
+# 提示地換掉，而且垃圾桶裡一筆紀錄都沒有（那份內容直接沒了）。使用者看到的說明卻
+# 寫著「-- 之後都是檔名」。
+# 默默丟掉（`--restore -- a b` 的舊行為）同樣不行：還原路徑上「安靜地不照你說的做」
+# 是最糟的失敗模式，拒絕才是保守方向。
+# The delete side's -- consumes ALL remaining arguments; the restore side consumes
+# exactly ONE. The extra used to be parsed as an option: measured,
+# `rm --restore -- victim.txt -f` exited 0, replaced the destination with no
+# prompt, and left zero trash entries -- that content was simply gone -- while the
+# documentation told the user everything after -- was a pathname.
+# Silently dropping it (the old `--restore -- a b` behaviour) is no better: quietly
+# not doing what you were told is the worst failure mode on a restore path, and
+# refusing is the conservative direction.
+restore_scope_ok=1
+setup
+cd "$TEST_WORK_DIR"
+printf '%s\n' "TRASHED VERSION" > scope_flag.txt
+"$BETTER_RM" scope_flag.txt >/dev/null 2>&1
+printf '%s\n' "PRECIOUS OCCUPANT" > scope_flag.txt
+scope_flag_status=0
+"$BETTER_RM" --restore -- scope_flag.txt -f </dev/null >/dev/null 2>&1 || scope_flag_status=$?
+if [ "$scope_flag_status" -eq 0 ] || [ "$(cat scope_flag.txt)" != "PRECIOUS OCCUPANT" ]; then
+    restore_scope_ok=0
+    printf '  尾隨的 -f 未被拒絕 / trailing -f was not refused (status=%s, 目的地=%s)\n' \
+        "$scope_flag_status" "$(cat scope_flag.txt)" >&2
+fi
+
+setup
+cd "$TEST_WORK_DIR"
+printf '%s\n' "TRASHED VERSION" > scope_extra.txt
+"$BETTER_RM" scope_extra.txt >/dev/null 2>&1
+printf '%s\n' "PRECIOUS OCCUPANT" > scope_extra.txt
+scope_extra_status=0
+"$BETTER_RM" --restore -- scope_extra.txt second.txt </dev/null >/dev/null 2>&1 || scope_extra_status=$?
+if [ "$scope_extra_status" -eq 0 ] || [ "$(cat scope_extra.txt)" != "PRECIOUS OCCUPANT" ]; then
+    restore_scope_ok=0
+    printf '  尾隨的第二個檔名未被拒絕 / a trailing second pathname was not refused (status=%s)\n' \
+        "$scope_extra_status" >&2
+fi
+
+# 反套套邏輯：拒絕的是 -- 之後多出來的引數，不是「--restore 不能跟旗標一起用」。
+# 旗標寫在 --restore 前面（README 記載的寫法）必須照舊生效，含強制覆蓋。
+# Anti-tautology: what is refused is a trailing argument after --, not "--restore
+# cannot be combined with a flag". A flag placed before --restore -- the spelling
+# the README documents -- must keep working, force-overwrite included.
+setup
+cd "$TEST_WORK_DIR"
+printf '%s\n' "TRASHED VERSION" > scope_force.txt
+"$BETTER_RM" scope_force.txt >/dev/null 2>&1
+printf '%s\n' "PRECIOUS OCCUPANT" > scope_force.txt
+scope_force_status=0
+"$BETTER_RM" -f --restore -- scope_force.txt </dev/null >/dev/null 2>&1 || scope_force_status=$?
+if [ "$scope_force_status" -ne 0 ] || [ "$(cat scope_force.txt)" != "TRASHED VERSION" ]; then
+    restore_scope_ok=0
+    printf '  -f 寫在 --restore 前面卻失效 / -f before --restore stopped working (status=%s, 目的地=%s)\n' \
+        "$scope_force_status" "$(cat scope_force.txt)" >&2
+fi
+
+if [ "$restore_scope_ok" -eq 1 ]; then
+    test_pass "-- 之後多出來的引數被拒絕，--restore 前面的旗標照舊生效"
+else
+    test_fail "--restore -- 的引數範圍不正確"
+fi
+
 # ============================================================================
 # 測試 9: 受保護目錄 (Test 9: Protected Directories)
 # ============================================================================
