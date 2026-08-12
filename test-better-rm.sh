@@ -128,6 +128,34 @@ else
     test_fail "--help 未顯示說明訊息"
 fi
 
+test_item "-- 的說明不得從 --help 與 README 消失"
+# 文件漂移護欄。-- 是使用者唯一能指名破折號開頭檔案的寫法，說明從 --help 或 README
+# 掉了，這個功能對使用者就等於不存在，而測試套件不會有任何一項變紅。
+# 兩邊都只釘「選項那一欄」——--help 的選項欄位與 README 選項表格的那一列：描述文字
+# 怎麼改寫都不會紅，整條被刪掉才會紅。刻意不比對描述本身，也不掃整份 README（-- 在
+# README 出現三處，只掃全檔的話刪掉選項表格那一列仍然會綠，護欄就只剩一半）。
+# Documentation-drift guard. -- is the only way a user can name a file whose name
+# starts with a dash, so an entry quietly dropped from --help or the README makes
+# the feature nonexistent for users without turning anything in this suite red.
+# Both checks pin only the option column -- the option field in --help and the
+# option-table row in the README: rewording the description stays green, deleting
+# the entry goes red. The description text is deliberately not compared, and the
+# README is deliberately not searched as a whole (-- is mentioned in three places,
+# so a whole-file grep would stay green after the table row was deleted, which is
+# half a guard).
+terminator_doc_gaps=""
+if ! "$BETTER_RM" --help | grep -q '^  -- '; then
+    terminator_doc_gaps="$terminator_doc_gaps --help"
+fi
+if ! grep -q "^| \`--\` |" "$SCRIPT_DIR/README.md"; then
+    terminator_doc_gaps="$terminator_doc_gaps README.md"
+fi
+if [ -z "$terminator_doc_gaps" ]; then
+    test_pass "--help 與 README 都還列著 -- 選項"
+else
+    test_fail "以下文件不再列出 -- 選項：$terminator_doc_gaps"
+fi
+
 # ============================================================================
 # 測試 2: 基本檔案刪除 (Test 2: Basic File Deletion)
 # ============================================================================
