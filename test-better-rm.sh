@@ -2786,29 +2786,51 @@ fi
 
 test_item "含雙斜線的既有日誌紀錄仍可還原"
 # 上一版曾把 / 底下的來源記成 //name。那些紀錄不會因為改回單斜線而失效。
+# 真正寫出過雙斜線的那一版（2efbeee）寫的是 v2 六欄格式，所以主要要釘的是 v2；
+# 舊版五欄一併保留，因為升級前的紀錄也可能帶著同樣的路徑。
 # The previous revision recorded a source under / as //name. Those records must
-# keep restoring after the composition goes back to a single slash.
-setup
-cd "$TEST_WORK_DIR"
-printf '%s\n' "DOUBLE SLASH LEDGER" > double_slash.txt
-"$BETTER_RM" double_slash.txt
-double_slash_trash=$(find "$TEST_TRASH_DIR" -type f -name 'double_slash.txt__*' | head -1)
-{
-    printf '%s\n' "# Better-RM Deletion Log"
-    printf '%s | %s | %s | %s | %s\n' \
-        "20260101_000000_000000000" \
-        "/${TEST_WORK_DIR}/double_slash.txt" \
-        "$double_slash_trash" \
-        "0123456789abcdef" \
-        "file"
-} > "$TEST_STATE_DIR/deletion.log"
-double_slash_status=0
-"$BETTER_RM" --restore double_slash.txt >/dev/null 2>&1 || double_slash_status=$?
-if [ "$double_slash_status" -eq 0 ] && [ -f double_slash.txt ] && \
-   [ "$(cat double_slash.txt)" = "DOUBLE SLASH LEDGER" ]; then
-    test_pass "雙斜線紀錄仍可還原"
+# keep restoring after the composition goes back to a single slash. The revision
+# that actually emitted doubled slashes wrote v2 six-field records, so v2 is the
+# shape that matters here; the legacy five-field layout is kept alongside it
+# because pre-upgrade records can carry the same paths.
+double_slash_ok=1
+for ledger_format in v2 legacy; do
+    setup
+    cd "$TEST_WORK_DIR"
+    printf '%s\n' "DOUBLE SLASH LEDGER" > double_slash.txt
+    "$BETTER_RM" double_slash.txt
+    double_slash_trash=$(find "$TEST_TRASH_DIR" -type f -name 'double_slash.txt__*' | head -1)
+    {
+        printf '%s\n' "# Better-RM Deletion Log"
+        if [ "$ledger_format" = "v2" ]; then
+            printf '%s | v2 | %s | %s | %s | %s\n' \
+                "20260101_000000_000000000" \
+                "/${TEST_WORK_DIR}/double_slash.txt" \
+                "$double_slash_trash" \
+                "0123456789abcdef" \
+                "file"
+        else
+            printf '%s | %s | %s | %s | %s\n' \
+                "20260101_000000_000000000" \
+                "/${TEST_WORK_DIR}/double_slash.txt" \
+                "$double_slash_trash" \
+                "0123456789abcdef" \
+                "file"
+        fi
+    } > "$TEST_STATE_DIR/deletion.log"
+    double_slash_status=0
+    "$BETTER_RM" --restore double_slash.txt >/dev/null 2>&1 || double_slash_status=$?
+    if [ "$double_slash_status" -ne 0 ] || [ ! -f double_slash.txt ] || \
+       [ "$(cat double_slash.txt)" != "DOUBLE SLASH LEDGER" ]; then
+        double_slash_ok=0
+        printf '  %s 格式的雙斜線紀錄無法還原 / a %s doubled-slash record did not restore (status=%s)\n' \
+            "$ledger_format" "$ledger_format" "$double_slash_status" >&2
+    fi
+done
+if [ "$double_slash_ok" -eq 1 ]; then
+    test_pass "v2 與舊版格式的雙斜線紀錄都還原成功"
 else
-    test_fail "雙斜線紀錄無法還原 (status=$double_slash_status)"
+    test_fail "雙斜線紀錄無法還原"
 fi
 
 test_item "升級前寫下的舊格式日誌仍可還原"
