@@ -2509,6 +2509,51 @@ else
     test_fail "含換行的檔名無法還原 (status=$newline_restore_status)"
 fi
 
+test_item "以換行結尾的檔名可完整刪除並還原"
+# basename／dirname 走命令替換，而命令替換會吃掉所有結尾換行：釘住的 ./basename
+# 於是指向另一個名字，inode 對不上，刪除以「在固定 parent 前已變更；未移動」中止
+# ——fail-safe，但那個檔案變成刪不掉。中間有換行的可以（上面那則），結尾有的不行，
+# 而 README 承諾含換行的檔名會被正確記錄與還原。
+# basename/dirname run through command substitution, which strips every trailing
+# newline: the pinned ./basename then names a different file, the inode does not
+# match and the delete aborts with "changed before its parent was pinned; not
+# moved" -- fail-safe, but the file becomes undeletable. A newline in the middle
+# works (the case above), one at the end did not, and README promises
+# newline-containing names are recorded and restored.
+setup
+cd "$TEST_WORK_DIR"
+trailing_nl_name=$'trail.txt\n'
+printf '%s\n' "TRAILING NEWLINE CONTENT" > "$trailing_nl_name"
+trailing_nl_delete_status=0
+"$BETTER_RM" "$trailing_nl_name" >/dev/null 2>&1 || trailing_nl_delete_status=$?
+trailing_nl_restore_status=0
+"$BETTER_RM" --restore "$trailing_nl_name" >/dev/null 2>&1 || trailing_nl_restore_status=$?
+if [ "$trailing_nl_delete_status" -eq 0 ] && [ "$trailing_nl_restore_status" -eq 0 ] && \
+   [ -f "$trailing_nl_name" ] && \
+   [ "$(cat "$trailing_nl_name")" = "TRAILING NEWLINE CONTENT" ]; then
+    test_pass "以換行結尾的檔名往返還原成功"
+else
+    test_fail "以換行結尾的檔名無法往返 (delete=$trailing_nl_delete_status, restore=$trailing_nl_restore_status)"
+fi
+
+test_item "以斜線結尾的目錄寫法仍照舊處理"
+# 取代 basename 的參數展開必須自己剝掉結尾斜線：basename "dir/" 是 dir，而
+# "${path##*/}" 是空字串。`rm -r dir/` 是常見寫法，沒有這一步就會拿到空的名字。
+# The parameter expansion that replaced basename has to strip trailing slashes on
+# its own: basename "dir/" is dir while "${path##*/}" is the empty string, and
+# naming a directory with a trailing slash is an everyday spelling.
+setup
+cd "$TEST_WORK_DIR"
+mkdir -p slashdir/sub
+echo "SLASH CONTENT" > slashdir/sub/f.txt
+slash_status=0
+"$BETTER_RM" -r slashdir/ >/dev/null 2>&1 || slash_status=$?
+if [ "$slash_status" -eq 0 ] && [ ! -e slashdir ] && verify_in_trash "slashdir"; then
+    test_pass "以斜線結尾的目錄可正常刪除"
+else
+    test_fail "以斜線結尾的目錄刪除失敗 (status=$slash_status)"
+fi
+
 test_item "升級前寫下的舊格式日誌仍可還原"
 # 本機既有的垃圾桶紀錄都是舊格式；新格式必須照樣讀得懂，否則升級即斷。
 # Trash logs written before this change are in the old format; the reader must

@@ -382,6 +382,44 @@ show_version() {
     echo "A safer rm command - moves files to trash instead of permanent deletion"
 }
 
+# 以參數展開拆出路徑的最後一段與其 parent，結果放進 PATH_SPLIT_BASENAME 與
+# PATH_SPLIT_DIRNAME。
+# 為什麼不用 $(basename …)／$(dirname …)：命令替換會吃掉輸出結尾的所有換行，於是
+# 以換行結尾的檔名拆完就少了那個換行——釘住 parent 後的 ./basename 指向另一個物件、
+# inode 對不上，刪除以「在固定 parent 前已變更」中止，那個檔案於是刪不掉；還原端則
+# 會把檔案還原成另一個名字。名字中間的換行沒事，結尾的才會被吃掉。
+# 結果透過全域變數回傳也是同一個理由：$(path_split …) 會再吃一次。
+# Split a path into its final component and its parent with parameter expansion,
+# returning through PATH_SPLIT_BASENAME and PATH_SPLIT_DIRNAME.
+# $(basename …) and $(dirname …) are unusable here: command substitution strips
+# every trailing newline, so a name ending in one comes back short. The pinned
+# ./basename then denotes a different object, the inode comparison fails and the
+# delete aborts with "changed before its parent was pinned" -- leaving the file
+# undeletable -- while restore would put the file back under a different name. A
+# newline in the middle of a name is unaffected; only trailing ones are eaten.
+# The globals exist for the same reason: $(path_split …) would strip them again.
+path_split() {
+    local path="$1"
+
+    # basename "dir/" 是 dir，不是空字串：先剝掉結尾斜線再切。
+    # basename "dir/" is dir, not the empty string; strip trailing slashes first.
+    while [ "$path" != "/" ] && [ "${path%/}" != "$path" ]; do
+        path="${path%/}"
+    done
+
+    if [ "$path" = "/" ]; then
+        PATH_SPLIT_BASENAME="/"
+        PATH_SPLIT_DIRNAME="/"
+    elif [[ "$path" == */* ]]; then
+        PATH_SPLIT_BASENAME="${path##*/}"
+        PATH_SPLIT_DIRNAME="${path%/*}"
+        [ -n "$PATH_SPLIT_DIRNAME" ] || PATH_SPLIT_DIRNAME="/"
+    else
+        PATH_SPLIT_BASENAME="$path"
+        PATH_SPLIT_DIRNAME="."
+    fi
+}
+
 # 移動檔案至垃圾桶
 # Move file to trash
 move_to_trash() (
@@ -460,8 +498,9 @@ move_to_trash() (
         error_msg "'$source_label' is no longer the object the caller verified; not moved"
         return 1
     fi
-    source_basename=$(basename "$source")
-    source_parent=$(dirname "$source")
+    path_split "$source"
+    source_basename="$PATH_SPLIT_BASENAME"
+    source_parent="$PATH_SPLIT_DIRNAME"
     if ! cd "$source_parent" 2>/dev/null; then
         error_msg "無法固定來源 parent '$source_parent'；未移動"
         error_msg "Could not pin source parent '$source_parent'; not moved"
@@ -492,25 +531,22 @@ move_to_trash() (
     # 取得絕對路徑
     # Get absolute path
     local abs_path
-    if [ -L "$source" ]; then
+    if [ -e "$source" ] || [ -L "$source" ]; then
         # 垃圾桶記錄必須保存 link 本身的名稱，不能解析成 target；否則
         # `--restore <link-name>` 找不到紀錄，並可能以 target 名稱還原。
+        # 非 symlink 的來源同樣走這條：parent 已經固定成本函式的 cwd、最後一段就是
+        # source_basename，實體絕對路徑組出來與 readlink -f 相同，但不經過命令替換。
+        # $(readlink -f …) 會吃掉檔名結尾的所有換行，垃圾桶項目與日誌於是記成另一個
+        # 名字，--restore 再也還原不回原本那個。
         # Preserve the link entry's own name in the trash log. Resolving the
         # final symlink here makes `--restore <link-name>` lose that identity.
+        # A non-symlink source composes the same way: the parent is already pinned
+        # as this function's cwd and the final component is source_basename, so this
+        # equals what readlink -f would return without going through command
+        # substitution -- which eats a filename's trailing newlines, records the
+        # trash entry and the log under a different name, and leaves --restore
+        # unable to put the original name back.
         abs_path="$(pwd -P)/$source_basename"
-    elif [ -e "$source" ]; then
-        abs_path=$(readlink -f "$source" 2>/dev/null)
-        if [ -z "$abs_path" ]; then
-            abs_path=$(realpath "$source" 2>/dev/null)
-        fi
-        if [ -z "$abs_path" ]; then
-            # 手動計算絕對路徑
-            if [[ "$source" = /* ]]; then
-                abs_path="$source"
-            else
-                abs_path="$(cd "$(dirname "$source")" 2>/dev/null && pwd)/$(basename "$source")"
-            fi
-        fi
     else
         if [[ "$source" = /* ]]; then
             abs_path="$source"
@@ -1028,7 +1064,12 @@ restore_file() {
     
     # 決定還原目的地：目前資料夾下的相同檔名
     # Restore destination: same filename in the current folder
-    local dest_filename=$(basename "$original_path")
+    # $(basename …) 會吃掉結尾換行，檔案就會被還原成少一個換行的另一個名字。
+    # $(basename …) eats trailing newlines and would restore the file under a
+    # different name than the one that was deleted.
+    local dest_filename
+    path_split "$original_path"
+    dest_filename="$PATH_SPLIT_BASENAME"
     local dest_path="$(pwd)/$dest_filename"
     
     # 檢查目標路徑是否已存在同名檔案/目錄
