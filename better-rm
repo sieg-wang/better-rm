@@ -1205,10 +1205,13 @@ restore_file() {
     # 純 glob 輪詢（不 fork）的並行行程，10 次裡贏 9 次、其中 7 次 exit 0。
     # 所以這裡不再倚賴「刪除」來完成覆蓋：先把垃圾桶項目搬進本行程獨佔建立的暫存目錄
     # （跨裝置的複製發生在這一步，目的地全程沒被碰過），再用同一檔案系統內的一次
-    # rename 就位。rename(2) 取代既有的檔案或 symlink 是原子的，舊目的地由核心解除
-    # 連結 —— 覆蓋路徑上根本沒有「依路徑刪除」這個步驟，也就沒有可被搶佔的空窗。
-    # rename 無法取代目的地時（目的地是真目錄，或取出的項目是真目錄而目的地不是）
-    # 才需要讓位，而讓位一律是「把舊目的地移入垃圾桶」：可還原、有 log、絕不 rm -rf。
+    # rename 就位。rename(2) 是原子的，而且覆蓋路徑上根本沒有「依路徑刪除」這個
+    # 步驟，也就沒有可被搶佔的空窗。
+    # 讓位不再挑目的地的形狀：覆蓋等於刪除，所以佔著目的地的任何東西——檔案、目錄、
+    # 符號連結、硬連結——都在就位之前先讓位，而讓位一律是「把舊目的地移入垃圾桶」：
+    # 可還原、有 log、絕不 rm -rf。因此 rename 通常落在一個空路徑上。
+    # （這裡以前只在 rename 換不掉目的地時才讓位——目的地是真目錄，或取出的項目是真
+    # 目錄而目的地不是——其餘一律靠 rename 解除舊 inode 的連結，那個檔案就此消失。）
     # The invariant: better-rm never recursively deletes a displaced object. The old shape moved the
     # trashed item onto the destination and then /bin/rm -rf'd the move-aside
     # path. Even with mktemp -d (unpredictable name, atomic exclusive creation) a
@@ -1221,12 +1224,17 @@ restore_file() {
     # moved into a staging directory this process created exclusively (the
     # cross-device copy, if any, happens there while the destination is still
     # untouched) and is then put in place by a single same-filesystem rename.
-    # rename(2) replaces an existing file or symlink atomically and the kernel
-    # unlinks the old destination as part of it — there is no delete-by-path step
-    # on the overwrite path, hence no window to hijack. When rename cannot replace
-    # the destination at all — it is a real directory, or the staged item is a
-    # real directory and it is not — the destination is set aside by moving it
-    # INTO THE TRASH: recoverable, logged, never rm -rf'd.
+    # rename(2) is atomic and there is no delete-by-path step anywhere on the
+    # overwrite path, hence no window to hijack. The set-aside no longer depends on
+    # the destination's shape either: an overwrite is a deletion, so whatever
+    # occupies the destination — file, directory, symlink, hardlink — is set aside
+    # before the publish, and the set-aside is always a move INTO THE TRASH:
+    # recoverable, logged, never rm -rf'd. The publish rename therefore normally
+    # lands on an empty path.
+    # (It used to set aside only when rename could not replace the destination at
+    # all — a real directory, or a staged real directory over a non-directory —
+    # and let the kernel unlink the old inode in every other case, which is the
+    # overwrite that destroyed the occupant.)
     local trash_identity=""
     local staging_dir=""
     local staging_identity=""
