@@ -390,6 +390,21 @@ the trash volume (same on `main`, unchanged here).
   records what was deleted — and re-hashing after the move would require renaming
   the trash entry afterwards, i.e. adding a race to remove a label error. Do not
   use this column as an integrity proof of the trash contents.
+- **Repeated `rm --restore <name>` no longer walks back through older versions;
+  it alternates between the two newest.** `--restore` takes the newest record for
+  that name, and the set-aside writes a record of its own, so the object it just
+  displaced becomes the newest record and the next call brings it straight back.
+  Measured: delete the same filename three times (`V1`, `V2`, `V3`), then run
+  `rm -f --restore` five times, and the destination holds `V3`, `V2`, `V3`, `V2`,
+  `V3`. `V1` is never reached again after the first restore. It is not lost — it
+  is still whole in the trash under its own timestamped path — but no `--restore`
+  spelling reaches it; recovering an older version means moving it back by hand,
+  or renaming the current occupant out of the way first. This is the price of
+  trashing the displaced object instead of destroying it: the old shape really did
+  walk backwards, at the cost of permanently destroying one version per step.
+  Documented rather than changed, because the fix is a selector (`--restore
+  --version N`, or "skip records this call created") and that is an interface
+  decision, not a bug fix.
 - **`--restore` hard-depends on `mktemp`.** The whole overwrite path is built on
   a staging directory only this process can have created, under a name it cannot
   predict; there is no safe fallback for a missing `mktemp`, so `--restore` fails
