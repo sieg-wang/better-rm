@@ -128,21 +128,34 @@ else
     test_fail "--help 未顯示說明訊息"
 fi
 
-test_item "-- 的說明不得從 --help 與 README 消失"
-# 文件漂移護欄。-- 是使用者唯一能指名破折號開頭檔案的寫法，說明從 --help 或 README
-# 掉了，這個功能對使用者就等於不存在，而測試套件不會有任何一項變紅。
-# 兩邊都只釘「選項那一欄」——--help 的選項欄位與 README 選項表格的那一列：描述文字
-# 怎麼改寫都不會紅，整條被刪掉才會紅。刻意不比對描述本身，也不掃整份 README（-- 在
-# README 出現三處，只掃全檔的話刪掉選項表格那一列仍然會綠，護欄就只剩一半）。
+test_item "-- 的說明不得從 --help、README 與 CHANGELOG 消失"
+# 文件漂移護欄。-- 是使用者唯一能指名破折號開頭檔案的寫法，說明從任何一份使用者會
+# 看的文件掉了，這個功能對他就等於不存在，而測試套件不會有任何一項變紅。
+# 三份都只釘「那一條的主詞」——--help 的選項欄位、README 選項表格的那一列、
+# CHANGELOG 那一條的開頭：描述文字怎麼改寫都不會紅，整條被刪掉才會紅。
+# 刻意不掃整份 README（-- 在 README 出現三處，只掃全檔的話刪掉選項表格那一列仍然
+# 會綠，護欄就只剩一半）。
+# CHANGELOG 是後來補進來的，理由值得寫下來：曾經發生過「三份文件裡只有 CHANGELOG
+# 說錯，而這條護欄全綠」——它當時根本沒被涵蓋。
+# 也刻意「不」去比對描述句本身。那次出錯的形狀是「句子在，但內容是錯的」，而 grep
+# 只驗得了「句子在不在」，驗不了「說得對不對」；補一條句子比對只會製造覆蓋的假象，
+# 正是這輪一直在清的空洞守衛。真正釘住行為的是 f514c2c 那條拒絕測試。
 # Documentation-drift guard. -- is the only way a user can name a file whose name
-# starts with a dash, so an entry quietly dropped from --help or the README makes
-# the feature nonexistent for users without turning anything in this suite red.
-# Both checks pin only the option column -- the option field in --help and the
-# option-table row in the README: rewording the description stays green, deleting
-# the entry goes red. The description text is deliberately not compared, and the
-# README is deliberately not searched as a whole (-- is mentioned in three places,
-# so a whole-file grep would stay green after the table row was deleted, which is
-# half a guard).
+# starts with a dash, so an entry quietly dropped from any document a user reads
+# makes the feature nonexistent for them without turning anything in this suite red.
+# All three pin only the subject of the entry -- the option field in --help, the
+# option-table row in the README, the start of the CHANGELOG entry: rewording the
+# description stays green, deleting the entry goes red. The README is deliberately
+# not searched as a whole (-- is mentioned in three places there, so a whole-file
+# grep would stay green after the table row was deleted, which is half a guard).
+# CHANGELOG was added later and the reason is worth recording: the changelog was
+# once the one document of the three that was wrong while this guard was green --
+# it simply was not covered.
+# Comparing the description sentence itself is deliberately NOT done. The shape of
+# that failure was "the sentence is present and false", and a grep can only test
+# presence, never truth; adding a sentence match would manufacture the appearance
+# of coverage, which is the hollow guard this whole round has been removing. What
+# actually pins the behaviour is the refusal test from f514c2c.
 terminator_doc_gaps=""
 if ! "$BETTER_RM" --help | grep -q '^  -- '; then
     terminator_doc_gaps="$terminator_doc_gaps --help"
@@ -150,8 +163,11 @@ fi
 if ! grep -q "^| \`--\` |" "$SCRIPT_DIR/README.md"; then
     terminator_doc_gaps="$terminator_doc_gaps README.md"
 fi
+if ! grep -q "^- \`--\` " "$SCRIPT_DIR/CHANGELOG.md"; then
+    terminator_doc_gaps="$terminator_doc_gaps CHANGELOG.md"
+fi
 if [ -z "$terminator_doc_gaps" ]; then
-    test_pass "--help 與 README 都還列著 -- 選項"
+    test_pass "--help、README 與 CHANGELOG 都還列著 -- 選項"
 else
     test_fail "以下文件不再列出 -- 選項：$terminator_doc_gaps"
 fi
