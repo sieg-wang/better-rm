@@ -2105,6 +2105,39 @@ assert_success "opencode accepts an ancestor symlink that stays inside the root"
 assert_file "opencode installs through an inside-the-root ancestor symlink" \
     "$OPENCODE_INSIDE_LINK_REPO/real-plugins/protect-important-paths.ts"
 
+# The JSON-style agents had the same hole, and only OpenCode was guarded. Their
+# SETTINGS_PATH is the lexical Git toplevel concatenated with a fixed subpath, and
+# the Node merge lstats only the final leaf -- which does not exist yet when the
+# ancestor is the link -- so mkdir/cp/rename traversed it and a project-scoped
+# install physically landed outside the repository while exiting 0.
+for json_containment_agent in claude codex; do
+    case "$json_containment_agent" in
+        claude) json_containment_dir=".claude" ;;
+        codex) json_containment_dir=".codex" ;;
+    esac
+    JSON_ANCESTOR_REPO="$TMP_ROOT/json-ancestor-$json_containment_agent-project"
+    make_repo "$JSON_ANCESTOR_REPO"
+    JSON_ANCESTOR_OUTSIDE="$TMP_ROOT/outside-json-$json_containment_agent"
+    mkdir -p "$JSON_ANCESTOR_OUTSIDE"
+    ln -s "$JSON_ANCESTOR_OUTSIDE" "$JSON_ANCESTOR_REPO/$json_containment_dir"
+    assert_failure "$json_containment_agent rejects a symlinked settings ancestor" \
+        bash -c "cd '$JSON_ANCESTOR_REPO' && '$INSTALLER' -a $json_containment_agent"
+    assert_equal "$json_containment_agent symlinked settings ancestor writes nothing outside the root" \
+        "0" "$(find "$JSON_ANCESTOR_OUTSIDE" -mindepth 1 | wc -l | tr -d ' ')"
+done
+
+# Anti-tautology for the JSON agents too, and the guard must stay scope-aware:
+# a --global install legitimately writes outside every repository, which the
+# global-scope cases earlier in this file keep exercising from inside this one.
+JSON_INSIDE_LINK_REPO="$TMP_ROOT/json-inside-link-project"
+make_repo "$JSON_INSIDE_LINK_REPO"
+mkdir -p "$JSON_INSIDE_LINK_REPO/real-claude"
+ln -s "$JSON_INSIDE_LINK_REPO/real-claude" "$JSON_INSIDE_LINK_REPO/.claude"
+assert_success "claude accepts an ancestor symlink that stays inside the root" \
+    bash -c "cd '$JSON_INSIDE_LINK_REPO' && '$INSTALLER' -a claude"
+assert_file "claude installs through an inside-the-root ancestor symlink" \
+    "$JSON_INSIDE_LINK_REPO/real-claude/settings.json"
+
 # The physical project root can itself be renamed after resolve_opencode_plugin
 # records it. Inject on the second dirname of the plugin destination: the first
 # occurs during the read-only containment check, while the second is the call

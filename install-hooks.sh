@@ -250,6 +250,8 @@ resolve_shared_hook_for_settings() {
     settings_dir="$(dirname -- "$SETTINGS_PATH")"
     HOOK_PATH="$settings_dir/protect-important-paths.js"
 
+    require_json_settings_within_root
+
     PENDING_HOOK_REFRESH=false
 
     if [ ! -f "$HOOK_PATH" ] || [ ! -r "$HOOK_PATH" ]; then
@@ -855,7 +857,7 @@ resolve_opencode_plugin() {
 
     local project_root
     project_root="$(resolve_project_root)"
-    # 容器的實體根目錄，供 require_opencode_destination_within_root 當錨點。
+    # 容器的實體根目錄，供 require_destination_within_root 當錨點。
     # The physical root, used as the containment anchor for the destinations.
     if ! OPENCODE_PROJECT_ROOT="$(cd -- "$project_root" 2>/dev/null && pwd -P)"; then
         error "無法解析專案根目錄的實體路徑：$project_root"
@@ -968,18 +970,20 @@ physical_path() {
     fi
 }
 
-# 確認 OpenCode 安裝目標的實體路徑仍在實體專案根目錄內。
-# 為什麼 validate_opencode_destination 不夠：它只看最後一層是不是符號連結，而
-# `.opencode/plugins` 或 `hooks` 這種祖先目錄若本身是連結，最後一層根本還不存在，
-# 檢查就過了，接著 `mkdir -p` 穿過連結、`cp` 把宣稱 project-scoped 的檔案寫到專案外
-# 並以 exit 0 收場（實測會在 root 外產出 plugin 與 runtime 兩個檔案）。
-# Require an OpenCode destination to resolve inside the physical project root.
-# validate_opencode_destination is not enough on its own: it only inspects the
-# final component, and when an ancestor such as `.opencode/plugins` or `hooks`
-# is itself a symlink the final component does not exist yet, so the check
-# passes, `mkdir -p` then traverses the link and `cp` writes a supposedly
-# project-scoped file outside the project -- exiting 0 while doing it.
-require_opencode_destination_within_root() {
+# 確認 project-scoped 的安裝目標實體路徑仍在實體專案根目錄內。
+# 為什麼只檢查最後一層不夠：`.opencode/plugins`、`hooks`、`.claude`、`.codex` 這種
+# 祖先目錄若本身是連結，最後一層根本還不存在，符號連結檢查就過了，接著 `mkdir -p`
+# 穿過連結、`cp` 或 rename 把宣稱 project-scoped 的檔案寫到專案外並以 exit 0 收場
+# （實測 opencode 會在 root 外產出 plugin 與 runtime、claude 會產出共用 hook 與
+# settings.json）。
+# Require a project-scoped destination to resolve inside the physical project root.
+# Inspecting only the final component is not enough: when an ancestor such as
+# `.opencode/plugins`, `hooks`, `.claude` or `.codex` is itself a symlink the final
+# component does not exist yet, so the symlink check passes, `mkdir -p` then
+# traverses the link and `cp` or a rename writes a supposedly project-scoped file
+# outside the project -- exiting 0 while doing it.
+# name_zh/name_en carry the agent name so every caller's message stays specific.
+require_destination_within_root() {
     local path="$1"
     local root="$2"
     local name_zh="$3"
@@ -987,21 +991,54 @@ require_opencode_destination_within_root() {
 
     local resolved
     if ! resolved="$(physical_path "$path")"; then
-        error "無法解析 OpenCode ${name_zh}的實體路徑：$path"
-        error "Cannot resolve the physical path of the OpenCode ${name_en}: $path"
+        error "無法解析 ${name_zh}的實體路徑：$path"
+        error "Cannot resolve the physical path of the ${name_en}: $path"
         exit 1
     fi
 
     case "$resolved" in
         "$root"/*) ;;
         *)
-            error "拒絕在專案根目錄外寫入 OpenCode ${name_zh}：$path"
-            error "Refusing to write the OpenCode ${name_en} outside the project root: $path"
+            error "拒絕在專案根目錄外寫入 ${name_zh}：$path"
+            error "Refusing to write the ${name_en} outside the project root: $path"
             error "實體路徑 / physical path: $resolved"
             error "專案根目錄 / project root: $root"
             exit 1
             ;;
     esac
+}
+
+# 八個 JSON agent 的共同入口守衛：SETTINGS_PATH 與同目錄的共用 hook 都必須落在
+# 實體專案根目錄內。resolve_project_root 只給詞法上的 toplevel，SETTINGS_PATH 則是
+# 「toplevel + 固定子路徑」的字串接合，因此 `.claude`、`.codex` 這類祖先目錄若是
+# 符號連結，整條寫入路徑都會穿出去。放在 resolve_shared_hook_for_settings 開頭是
+# 因為那是八個 agent 共用、且早於任何 mkdir／cp／備份／rename 的唯一一點。
+# 只管 project scope：--global 的目的地本來就在任何 repo 之外。
+# Containment entry point shared by the eight JSON-style agents: SETTINGS_PATH and
+# the shared hook beside it must both land inside the physical project root.
+# resolve_project_root yields only the lexical toplevel and SETTINGS_PATH is that
+# toplevel concatenated with a fixed subpath, so a symlinked ancestor such as
+# `.claude` or `.codex` takes the whole write path outside. It runs at the top of
+# resolve_shared_hook_for_settings because that is the single point all eight share
+# and it precedes every mkdir, cp, backup and rename.
+# Project scope only: a --global destination legitimately lives outside any repo.
+require_json_settings_within_root() {
+    if [ "$SCOPE" != "project" ]; then
+        return 0
+    fi
+
+    local project_root physical_root
+    project_root="$(resolve_project_root)"
+    if ! physical_root="$(cd -- "$project_root" 2>/dev/null && pwd -P)"; then
+        error "無法解析專案根目錄的實體路徑：$project_root"
+        error "Cannot resolve the physical path of the project root: $project_root"
+        exit 1
+    fi
+
+    require_destination_within_root \
+        "$SETTINGS_PATH" "$physical_root" "JSON 設定檔" "JSON settings file"
+    require_destination_within_root \
+        "$HOOK_PATH" "$physical_root" "JSON 共用 hook" "JSON shared hook"
 }
 
 # 驗證剛寫到 OpenCode 錨定 staging inode 的共用 runtime hook 候選檔。
@@ -2291,10 +2328,10 @@ install_opencode_hooks() {
     # finish, closing the check/re-resolution window in mkdir/cp.
     validate_opencode_destination "$PLUGIN_PATH" "插件" "plugin"
     validate_opencode_destination "$OPENCODE_RUNTIME_PATH" "runtime" "runtime file"
-    require_opencode_destination_within_root \
-        "$PLUGIN_PATH" "$OPENCODE_PROJECT_ROOT" "插件" "plugin"
-    require_opencode_destination_within_root \
-        "$OPENCODE_RUNTIME_PATH" "$OPENCODE_PROJECT_ROOT" "runtime" "runtime file"
+    require_destination_within_root \
+        "$PLUGIN_PATH" "$OPENCODE_PROJECT_ROOT" "OpenCode 插件" "OpenCode plugin"
+    require_destination_within_root \
+        "$OPENCODE_RUNTIME_PATH" "$OPENCODE_PROJECT_ROOT" "OpenCode runtime" "OpenCode runtime file"
 
     with_anchored_opencode_directory \
         "$(dirname -- "$PLUGIN_PATH")" ".opencode/plugins" \
