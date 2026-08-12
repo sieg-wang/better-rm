@@ -3489,6 +3489,138 @@ else
     test_fail "掛載根未受保護:${mount_root_unguarded:- 無}；掛載磁碟內誤擋:${mount_inside_blocked:- 無}；抽取失敗:${mount_root_probe_broken:- 無}"
 fi
 
+test_item "掛載根規則的兩種拼寫各自要能單獨擋下（解析後的、未解析的）"
+# 掛載根那段迴圈對 real_path（解析過 symlink）與 norm_path（純字面正規化）各比對一次。
+# 上一項的每一列都是「兩者剛好相同」的字面字串——不存在的路徑根本不會被解析，存在的
+# 又解析回自己——所以把迴圈裡任何一個候選刪掉，整套仍然是綠的：實測兩種刪法各跑一次，
+# 都沒有任何一列轉紅。這一項補上兩者會分岔的兩種形狀，讓每個候選各自成為必要條件。
+#   解析後的那個：中途某一段是連結、指進真的掛載點。拿掉 real_path，
+#   ~/disk -> /Volumes 這種捷徑底下的 disk/Backup 就變成可刪，而那就是整顆磁碟的掛載點。
+#   用 PATH stub 造出「解析結果落在掛載根」，不靠一顆真的外接碟：/Volumes 在 Linux
+#   runner 上不存在，拿真磁碟當條件只會讓這一列在 CI 永遠是綠的。stub 手法沿用下面
+#   readlink 那一項既有的做法。
+#   未解析的那個：字面正規化是純字串運算（normalize_path 不認 symlink），核心解析
+#   `..` 卻是從連結指到的實體位置往上走。兩邊對同一個字串會得出不同答案，而使用者
+#   打出來的那個拼寫讀起來就是一個掛載根——沒有連結介入時它就是真的掛載根，所以擋下
+#   是 fail-closed 的那一邊。這一列不需要任何 stub，也不需要 /Volumes 真的存在。
+# The mount-root loop compares real_path (symlink-resolved) and norm_path (purely
+# lexical) separately. Every row in the item above is a literal string for which
+# the two are identical -- a non-existent path is never resolved, an existing one
+# resolves to itself -- so deleting either candidate from the loop left the suite
+# green: measured, both deletions, not one row red. This item adds the two shapes
+# where they diverge, so each candidate becomes load-bearing on its own.
+#   The resolved one: an intermediate component is a link into a live mount. Drop
+#   real_path and disk/Backup under a shortcut such as ~/disk -> /Volumes becomes
+#   deletable, and that is a whole disk's mount point. A PATH stub produces the
+#   "resolution lands on a mount root" property rather than a real external disk:
+#   /Volumes does not exist on the Linux runner, so a real disk would leave this
+#   row permanently green in CI. The stub idiom is the one the readlink item below
+#   already uses.
+#   The unresolved one: lexical normalisation is pure string work (normalize_path
+#   knows nothing about symlinks) while the kernel walks `..` up from wherever the
+#   link physically points. The two disagree about one string, and the spelling the
+#   user typed reads as a mount root -- with no link in the way it IS the mount
+#   root -- so refusing it is the fail-closed side. This row needs no stub and does
+#   not need /Volumes to exist.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+dual_home="$TEST_WORK_DIR/dual-home"
+mkdir -p "$dual_home"
+dual_faults=""
+
+# 解析後落在掛載根：stub 讓 readlink -f 成功回報 /Volumes/ProbeDisk。
+# Resolved onto a mount root: the stub makes readlink -f succeed with /Volumes/ProbeDisk.
+dual_root_bin="$TEST_WORK_DIR/dual-root-bin"
+dual_inside_bin="$TEST_WORK_DIR/dual-inside-bin"
+mkdir -p "$dual_root_bin" "$dual_inside_bin"
+cat > "$dual_root_bin/readlink" <<'EOF'
+#!/bin/sh
+# 中途某一段是連結、指進掛載點時，解析結果就長這樣。
+# What the resolution looks like when an intermediate component links into a mount.
+printf '%s\n' "/Volumes/ProbeDisk"
+exit 0
+EOF
+cat > "$dual_inside_bin/readlink" <<'EOF'
+#!/bin/sh
+# 同一支 stub，但解析到掛載磁碟「裡面」：這一列必須放行。
+# The same stub resolving INSIDE the mounted disk: this row must be allowed.
+printf '%s\n' "/Volumes/ProbeDisk/inside-item"
+exit 0
+EOF
+chmod +x "$dual_root_bin/readlink" "$dual_inside_bin/readlink"
+printf 'PROBE\n' > "$TEST_WORK_DIR/dual-probe.txt"
+( PATH="$dual_root_bin:$PATH"; is_protected_says_yes "$TEST_WORK_DIR/dual-probe.txt" "$dual_home" )
+case $? in
+    0) ;;
+    99) dual_faults="$dual_faults 探針壞掉（解析到掛載根）" ;;
+    *) dual_faults="$dual_faults 解析後落在掛載根卻被放行" ;;
+esac
+( PATH="$dual_inside_bin:$PATH"; is_protected_says_yes "$TEST_WORK_DIR/dual-probe.txt" "$dual_home" )
+case $? in
+    0) dual_faults="$dual_faults 解析到掛載磁碟內卻被誤擋" ;;
+    99) dual_faults="$dual_faults 探針壞掉（解析到磁碟內）" ;;
+esac
+
+# 字面正規化落在掛載根：`..` 的個數剛好把 $TEST_WORK_DIR 的每一層都消掉，字面上就是
+# /Volumes/ProbeDisk；核心卻是從連結指到的深層目錄往上走，實際落在 sandbox 裡。
+# 深度由 $TEST_WORK_DIR 算出來，不是寫死的，換一個工作目錄這一列仍然成立。
+# Lexically onto a mount root: the `..` count cancels every component of
+# $TEST_WORK_DIR, so the string reads as /Volumes/ProbeDisk, while the kernel walks
+# up from where the link physically points and lands back inside the sandbox. The
+# depth is derived from $TEST_WORK_DIR rather than hard-coded, so the row survives
+# a different working directory.
+dual_rest="${TEST_WORK_DIR#/}"
+dual_depth=0
+while [ -n "$dual_rest" ]; do
+    dual_depth=$((dual_depth + 1))
+    dual_next="${dual_rest#*/}"
+    if [ "$dual_next" = "$dual_rest" ]; then
+        dual_rest=""
+    else
+        dual_rest="$dual_next"
+    fi
+done
+dual_deep="$TEST_WORK_DIR"
+dual_dots=""
+dual_i=0
+# 連結自身那一層 + $TEST_WORK_DIR 的層數：實體深度與 .. 個數必須相等，往上走才會剛好
+# 回到 $TEST_WORK_DIR。
+# The link's own component plus $TEST_WORK_DIR's depth: the physical depth and the
+# number of `..` have to match for the walk to land back on $TEST_WORK_DIR.
+while [ "$dual_i" -le "$dual_depth" ]; do
+    dual_deep="$dual_deep/d"
+    dual_dots="$dual_dots/.."
+    dual_i=$((dual_i + 1))
+done
+mkdir -p "$dual_deep" "$TEST_WORK_DIR/Volumes/ProbeDisk/inside-item"
+ln -s "$dual_deep" "$TEST_WORK_DIR/dual-deeplink"
+dual_lexical="$TEST_WORK_DIR/dual-deeplink$dual_dots/Volumes/ProbeDisk"
+# 前提條件：這條路徑真的存在、自己不是連結（否則 is_protected 根本不會去解析它），
+# 而且解析後確實落在 sandbox 裡而不是 /Volumes。前提不成立就直接記成錯誤，不能讓
+# 這一列變成一個什麼都沒驗到的綠燈。
+# Preconditions: the path really exists, is not itself a link (or is_protected would
+# never resolve it), and really does resolve inside the sandbox rather than to
+# /Volumes. A broken precondition is recorded as a fault rather than left to turn
+# this row into a green that checked nothing.
+if [ -L "$dual_lexical" ] || [ ! -e "$dual_lexical" ] ||
+   [ "$(readlink -f "$dual_lexical")" != "$(cd "$TEST_WORK_DIR" && pwd -P)/Volumes/ProbeDisk" ]; then
+    dual_faults="$dual_faults 字面拼寫那一列的前提不成立"
+fi
+is_protected_says_yes "$dual_lexical" "$dual_home"
+case $? in
+    0) ;;
+    99) dual_faults="$dual_faults 探針壞掉（字面掛載根）" ;;
+    *) dual_faults="$dual_faults 字面拼寫是掛載根卻被放行" ;;
+esac
+if is_protected_says_yes "$dual_lexical/inside-item" "$dual_home"; then
+    dual_faults="$dual_faults 字面拼寫在掛載磁碟內卻被誤擋"
+fi
+if [ -z "$dual_faults" ]; then
+    test_pass "掛載根規則的兩種拼寫各自都擋得下，且掛載磁碟內的項目仍被放行"
+else
+    test_fail "掛載根規則的雙拼寫比對有缺口:$dual_faults"
+fi
+
 test_item "macOS firmlink 拼寫（/System/Volumes/Data/…）與根拼寫是同一個物件"
 # 實測 stat -f '%d:%i'：/Users/sieg 與 /System/Volumes/Data/Users/sieg 是同一個
 # device、同一個 inode；/Applications 與 /System/Volumes/Data/Applications 也是。
