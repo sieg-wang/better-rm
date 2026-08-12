@@ -1456,15 +1456,15 @@ restore_file() {
                 local trash_free_kb=""
                 local dest_size_kb=""
                 # 落點目錄要用「解析過 symlink 的 parent」算，move_to_trash 自己就是
-                # 這樣決定垃圾桶路徑的（abs_path 走 readlink -f / pwd -P）。用未解析
-                # 的 pwd 會算出一個不存在的落點，於是退回去量垃圾桶根目錄——在根目錄
-                # 底下掛了別的卷宗時，那量到的是另一顆磁碟。
+                # 這樣決定垃圾桶路徑的（abs_path 是「cd 進來源 parent 後的 pwd -P」
+                # 接上最後一段）。用未解析的 pwd 會算出一個不存在的落點，於是退回去
+                # 量垃圾桶根目錄——在根目錄底下掛了別的卷宗時，那量到的是另一顆磁碟。
                 # The landing directory has to be derived from the symlink-resolved
                 # parent, because that is how move_to_trash itself builds the trash
-                # path (abs_path goes through readlink -f / pwd -P). An unresolved
-                # pwd yields a landing that does not exist, falling back to the
-                # trash root — which is the wrong disk whenever another volume is
-                # mounted below it.
+                # path (abs_path is the pwd -P of the pinned source parent joined
+                # with the final component). An unresolved pwd yields a landing that
+                # does not exist, falling back to the trash root — which is the wrong
+                # disk whenever another volume is mounted below it.
                 local dest_parent_real
                 dest_parent_real=$(cd "$(dirname "$dest_path")" 2>/dev/null && pwd -P)
                 if [ -z "$dest_parent_real" ]; then
