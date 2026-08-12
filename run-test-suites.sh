@@ -28,6 +28,12 @@ run_suite() {
 run_suite "CI suite aggregation contract" "$SCRIPT_DIR/test-run-test-suites.sh"
 run_suite "better-rm core" "$SCRIPT_DIR/test-better-rm.sh"
 run_suite "runtime hooks" node "$SCRIPT_DIR/test-hooks.js"
+# The two guards' verdicts, diffed over one shared corpus. The suites above test
+# each guard against its own expectations; only this one can see a rule that
+# exists in one guard and not the other.
+# 兩道守衛對同一份語料的判定差分。上面各套只驗各自的期望，唯有這套看得見「規則只
+# 存在於其中一邊」。
+run_suite "guard parity" node "$SCRIPT_DIR/test-guard-parity.js"
 run_suite "hook installer" "$SCRIPT_DIR/test-install-hooks.sh"
 
 if [ "$FAILED" -ne 0 ]; then
