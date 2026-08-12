@@ -330,7 +330,16 @@ export BETTER_RM_STATE_DIR="$HOME/.local/state/better-rm"
 
 ### 專案目錄
 
-- `.git` - Git 版本控制目錄（任何位置的 .git 目錄）
+- `.git` - Git 版本控制目錄（任何位置的 .git 目錄），**以及它底下的一切**
+
+`.git` 內部的路徑與 `.git` 本身一樣不可還原：`rm -rf .git/objects` 毀掉的是整個倉庫。
+因此 `.git` 是以「路徑元件」認定的——`.git/objects`、`.git/refs`、`.git/index.lock`
+都會被拒絕，`/bin/rm` 這道 hook 守著的 agent 路徑也是同一套判定。`.gitignore`、
+`.github/workflows`、`vendor.git/objects` 這類名字裡有 `.git` 但元件不同的路徑不受影響。
+
+這條規則會擋掉一件正當的事：git 操作中斷後手動清 `.git/index.lock`。方向是刻意選的
+——擋過頭只是不方便，擋不夠丟的是資料。真的要清的時候用 `/bin/rm -f .git/index.lock`
+（不經過本工具，因此也沒有垃圾桶副本）。
 
 `/mnt` 的保護只涵蓋掛載根本身；仍可正常移除 `/mnt/c/project/tmp` 等掛載磁碟內的項目。
 WSL 可透過 `/etc/wsl.conf` 更改 Windows 磁碟的 automount root；非預設位置不在本規則的保護範圍內。

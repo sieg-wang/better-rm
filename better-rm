@@ -62,11 +62,29 @@ PROTECTED_DIRS=(
 
 # 受保護的目錄模式清單 (使用萬用字元)
 # Protected directory patterns (using wildcards)
+# .git 內部的路徑與 .git 本身一樣不可還原：`rm -rf .git/objects` 毀掉的是整個倉庫。
+# 前四項只認「路徑結束在 .git」，所以 .git 底下的一切原本都是普通的刪除目標；
+# `*/.git/*` 把 .git 當成路徑元件來認，與 agent 路徑上那道 hook 一致（它從一開始就
+# 拒絕任何含有 .git 元件的路徑），兩道守衛不再對同一條路徑給出相反的答案。
+# 這條規則會擋掉一件正當的事：git 中斷後手動清 .git/index.lock。這是刻意選的方向
+# ——擋過頭只是不方便，擋不夠丟的是資料——真的要清的人用 /bin/rm（不經過本工具，
+# 也就沒有垃圾桶）。是否要為 lockfile 開豁免是維護者的政策裁決，這裡不自行決定。
+# A path inside .git is as unrecoverable as .git itself: `rm -rf .git/objects` loses
+# the repository. The four entries above match only a path that ENDS at .git, so
+# everything below it was an ordinary deletion target. `*/.git/*` matches .git as a
+# path COMPONENT, the way the agent-path hook has always done, so the two guards no
+# longer answer the same path differently.
+# This refuses one legitimate thing: clearing a stale .git/index.lock by hand after
+# an interrupted git operation. The direction is deliberate -- too strict costs an
+# inconvenience, too loose costs data -- and /bin/rm still does it (outside this
+# tool, so with no trash copy). Whether to carve out an exemption for lockfiles is a
+# policy call for the maintainer, not one made here.
 PROTECTED_PATTERNS=(
     ".git"
     ".git/"
     "*/.git"
     "*/.git/"
+    "*/.git/*"
 )
 
 # 顏色定義 (Color definitions)

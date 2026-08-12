@@ -3781,6 +3781,84 @@ else
     test_fail "firmlink 拼寫未受保護:${firmlink_unguarded:- 無}；誤擋:${firmlink_false_positive:- 無}；抽取失敗:${firmlink_probe_broken:- 無}"
 fi
 
+test_item ".git 內部的路徑與 .git 本身一樣受保護"
+# PROTECTED_PATTERNS 只認「路徑結束在 .git」，所以 .git/objects、.git/refs、
+# .git/index.lock 全部是普通的刪除目標——`rm -rf .git/objects` 會把整個物件庫搬進
+# 垃圾桶並回傳成功，倉庫當場毀掉。agent 路徑上的那道 hook 從一開始就拒絕任何含有
+# .git 元件的路徑，兩道守衛因此對同一條路徑給出相反的答案；這裡把 better-rm 對齊到
+# 嚴格的那一邊：擋過頭只是不方便，擋不夠丟的是資料。
+# 這是刻意的收緊，也確實會擋掉一件正當的事：git 中斷後手動清 .git/index.lock。
+# 使用者要嘛用 /bin/rm 繞過（見 README 那一節），要嘛由維護者另外裁決是否開豁免。
+# PROTECTED_PATTERNS matched only a path that ENDS at .git, so .git/objects,
+# .git/refs and .git/index.lock were ordinary deletion targets: `rm -rf .git/objects`
+# moved the whole object store to the trash and exited 0, which destroys the
+# repository. The agent-path hook has always refused any path with a .git COMPONENT,
+# so the two guards answered the same path differently. better-rm is aligned onto
+# the stricter side: too strict costs an inconvenience, too loose costs data.
+# The friction is real and intended: clearing a stale .git/index.lock by hand after
+# an interrupted git operation is now refused too. Documented in the README next to
+# the .git entry; whether to carve out an exemption is the maintainer's call.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+gitinside_home="$TEST_WORK_DIR/gitinside-home"
+mkdir -p "$gitinside_home"
+gitinside_unguarded=""
+gitinside_probe_broken=""
+# 相對拼寫那一列走的是 is_protected 自己的 $(pwd) 前置，與絕對拼寫不同的碼路徑。
+# The relative row exercises is_protected's own $(pwd) prefixing, a different code
+# path from the absolute ones.
+for gitinside_path in "$TEST_WORK_DIR/repo/.git/index.lock" \
+                      "$TEST_WORK_DIR/repo/.git/objects" \
+                      "$TEST_WORK_DIR/repo/.git/objects/pack" \
+                      "$TEST_WORK_DIR/repo/sub/.git/refs/heads" \
+                      ".git/objects/pack"; do
+    is_protected_says_yes "$gitinside_path" "$gitinside_home"
+    case $? in
+        0) ;;
+        99) gitinside_probe_broken="$gitinside_probe_broken $gitinside_path" ;;
+        *) gitinside_unguarded="$gitinside_unguarded $gitinside_path" ;;
+    esac
+done
+# 負對照：.git 必須是完整的路徑元件，不是子字串。規則一旦寫成「路徑裡有 .git」，
+# .gitignore、.github/workflows、vendor.git/objects 這些日常操作都會被擋掉——那會
+# 比原本的缺漏更糟。
+# Negative control: .git has to be a whole path COMPONENT, not a substring. A rule
+# written as "the path contains .git" would refuse .gitignore, .github/workflows and
+# vendor.git/objects -- ordinary work, and a worse regression than the gap was.
+gitinside_false_positive=""
+for gitinside_ok in "$TEST_WORK_DIR/repo/.gitignore" \
+                    "$TEST_WORK_DIR/repo/.github/workflows" \
+                    "$TEST_WORK_DIR/repo/vendor.git/objects" \
+                    "$TEST_WORK_DIR/repo/.git.bak/objects" \
+                    "$TEST_WORK_DIR/repo/docs/git/objects"; do
+    if is_protected_says_yes "$gitinside_ok" "$gitinside_home"; then
+        gitinside_false_positive="$gitinside_false_positive $gitinside_ok"
+    fi
+done
+if [ -z "$gitinside_unguarded" ] && [ -z "$gitinside_false_positive" ] &&
+   [ -z "$gitinside_probe_broken" ]; then
+    test_pass ".git 內部的路徑受保護，.gitignore／.github／vendor.git 未被誤擋"
+else
+    test_fail ".git 內部未受保護:${gitinside_unguarded:- 無}；誤擋:${gitinside_false_positive:- 無}；抽取失敗:${gitinside_probe_broken:- 無}"
+fi
+
+test_item ".git 內部的路徑真的攔在 move_to_trash 前面（端到端）"
+# 上一項證明判斷改了，這一項證明那個判斷擋在真正的搬移之前：檔案必須還在原地。
+# The previous item proves the judgement changed; this one proves it gates the real
+# move: the file has to still be there afterwards.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+mkdir -p repo/.git/objects
+printf 'OBJECTS\n' > repo/.git/objects/keep.pack
+printf 'LOCK\n' > repo/.git/index.lock
+gitinside_e2e=$("$BETTER_RM" -rf repo/.git/objects repo/.git/index.lock 2>&1)
+if printf '%s' "$gitinside_e2e" | grep -q "拒絕刪除受保護的目錄" &&
+   [ -f repo/.git/objects/keep.pack ] && [ -f repo/.git/index.lock ]; then
+    test_pass ".git 內部的刪除被拒絕，物件庫與 index.lock 都還在"
+else
+    test_fail ".git 內部的刪除未被拒絕（objects=$([ -f repo/.git/objects/keep.pack ] && echo yes || echo no)；lock=$([ -f repo/.git/index.lock ] && echo yes || echo no)；訊息=${gitinside_e2e}）"
+fi
+
 test_item "\$HOME 被拒絕且內容完好（端到端）"
 # 上一項證明清單被認定為受保護，這一項證明那個判斷真的攔在 move_to_trash 前面。
 # HOME 指向 sandbox，所以就算保護整個壞掉，被搬走的也只是 sandbox。
