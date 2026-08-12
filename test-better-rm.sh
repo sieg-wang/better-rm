@@ -3781,6 +3781,147 @@ else
     test_fail "firmlink 拼寫未受保護:${firmlink_unguarded:- 無}；誤擋:${firmlink_false_positive:- 無}；抽取失敗:${firmlink_probe_broken:- 無}"
 fi
 
+test_item "firmlink 改寫的兩條路徑（已解析與字面）各自都必須生效"
+# is_protected 把 firmlink 前綴改寫兩次：一次在 real_path（symlink 解析後）、一次在
+# norm_path（純字面）。上面那一項的每一列都是字面字串，兩者恆等——不存在的路徑不會被
+# 解析，存在的路徑解析回自己——所以刪掉任一半，整套仍然全綠。實測：兩個單邊突變各自
+# 都是 120/120 通過，只有兩邊一起刪才紅。這一項補上兩者會分歧的形狀，讓每一半各自
+# 都是承重的。
+#   已解析那一列：中途某一段連結指進 Data 卷宗時，解析結果就帶著 firmlink 前綴，而
+#   使用者打出來的字面拼寫完全看不出來。用 PATH stub 造出這個性質，不靠真的
+#   /System/Volumes/Data：Linux runner 上它不存在，拿真路徑當條件只會讓這一列在 CI
+#   永遠是綠的。stub 手法沿用上面掛載根與 readlink 那兩項既有的做法。
+#   字面那一列：`..` 的個數剛好把 $TEST_WORK_DIR 每一層都消掉，字面正規化的結果就是
+#   /System/Volumes/Data/Users；核心卻是從連結指到的深層目錄往上走，實際落在 sandbox
+#   裡，所以 real_path 完全不帶前綴。使用者打出來的拼寫讀起來就是家目錄那一卷，沒有
+#   連結介入時它就是真的家目錄——擋下是 fail-closed 的那一邊。這一列不需要 stub，也
+#   不需要 /System/Volumes/Data 真的存在，兩個平台上跑的是同一件事。
+# is_protected rewrites the firmlink prefix twice: once on real_path (after symlink
+# resolution) and once on norm_path (purely lexical). Every row in the item above is
+# a literal string for which the two are identical -- a non-existent path is never
+# resolved, an existing one resolves to itself -- so deleting either half left the
+# suite green: measured, each single-sided mutation passed 120/120, and only
+# deleting both went red. This item adds the two shapes where they diverge, so each
+# half becomes load-bearing on its own.
+#   The resolved one: when an intermediate component links into the data volume the
+#   resolution carries the firmlink prefix while the spelling the user typed shows
+#   no sign of it. A PATH stub produces that property rather than a real
+#   /System/Volumes/Data: it does not exist on the Linux runner, so a real path
+#   would leave this row permanently green in CI. The stub idiom is the one the
+#   mount-root and readlink items above already use.
+#   The lexical one: the `..` count cancels every component of $TEST_WORK_DIR, so
+#   lexical normalisation lands on /System/Volumes/Data/Users, while the kernel
+#   walks up from where the link physically points and stays inside the sandbox --
+#   real_path never carries the prefix at all. The spelling the user typed reads as
+#   the home volume, and with no link in the way it IS the home volume, so refusing
+#   it is the fail-closed side. This row needs no stub and does not need
+#   /System/Volumes/Data to exist; both platforms run the same thing.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+fldual_home="$TEST_WORK_DIR/firmlink-dual-home"
+mkdir -p "$fldual_home"
+fldual_faults=""
+
+# 解析後帶著 firmlink 前綴：stub 讓 readlink -f 成功回報 /System/Volumes/Data/Users。
+# Resolved onto the firmlink spelling: the stub makes readlink -f succeed with
+# /System/Volumes/Data/Users.
+fldual_root_bin="$TEST_WORK_DIR/firmlink-root-bin"
+fldual_inside_bin="$TEST_WORK_DIR/firmlink-inside-bin"
+mkdir -p "$fldual_root_bin" "$fldual_inside_bin"
+cat > "$fldual_root_bin/readlink" <<'EOF'
+#!/bin/sh
+# 中途某一段是連結、指進 Data 卷宗時，解析結果就長這樣。
+# What the resolution looks like when an intermediate component links into the data volume.
+printf '%s\n' "/System/Volumes/Data/Users"
+exit 0
+EOF
+cat > "$fldual_inside_bin/readlink" <<'EOF'
+#!/bin/sh
+# 同一支 stub，但解析到對應目錄「裡面」：這一列必須放行。
+# The same stub resolving INSIDE the mapped directory: this row must be allowed.
+printf '%s\n' "/System/Volumes/Data/Users/someone/project"
+exit 0
+EOF
+chmod +x "$fldual_root_bin/readlink" "$fldual_inside_bin/readlink"
+printf 'PROBE\n' > "$TEST_WORK_DIR/firmlink-dual-probe.txt"
+# 前提條件：探針自己的字面拼寫不能帶著前綴，否則這一列會被 norm_path 那一半蓋過去，
+# 變成一個什麼都沒驗到的綠燈。探針刻意是一般檔案而不是連結：引數自己是連結時
+# is_protected 依自身路徑判定，根本不會去解析。
+# Precondition: the probe's own lexical spelling must not carry the prefix, or the
+# norm_path half would cover this row and it would prove nothing. The probe is
+# deliberately a regular file, not a link: an argument that is itself a link is
+# judged by its own path and never resolved.
+case "$TEST_WORK_DIR/firmlink-dual-probe.txt" in
+    /System/Volumes/Data/*) fldual_faults="$fldual_faults 已解析那一列的前提不成立" ;;
+esac
+( PATH="$fldual_root_bin:$PATH"; is_protected_says_yes "$TEST_WORK_DIR/firmlink-dual-probe.txt" "$fldual_home" )
+case $? in
+    0) ;;
+    99) fldual_faults="$fldual_faults 探針壞掉（解析後帶前綴）" ;;
+    *) fldual_faults="$fldual_faults 解析後落在 firmlink 拼寫卻被放行" ;;
+esac
+( PATH="$fldual_inside_bin:$PATH"; is_protected_says_yes "$TEST_WORK_DIR/firmlink-dual-probe.txt" "$fldual_home" )
+case $? in
+    0) fldual_faults="$fldual_faults 解析到對應目錄內卻被誤擋" ;;
+    99) fldual_faults="$fldual_faults 探針壞掉（解析到目錄內）" ;;
+esac
+
+# 字面正規化落在 firmlink 拼寫：深度由 $TEST_WORK_DIR 算出來，不是寫死的。
+# Lexically onto the firmlink spelling: the depth is derived from $TEST_WORK_DIR
+# rather than hard-coded.
+fldual_rest="${TEST_WORK_DIR#/}"
+fldual_depth=0
+while [ -n "$fldual_rest" ]; do
+    fldual_depth=$((fldual_depth + 1))
+    fldual_next="${fldual_rest#*/}"
+    if [ "$fldual_next" = "$fldual_rest" ]; then
+        fldual_rest=""
+    else
+        fldual_rest="$fldual_next"
+    fi
+done
+fldual_deep="$TEST_WORK_DIR"
+fldual_dots=""
+fldual_i=0
+# 連結自身那一層 + $TEST_WORK_DIR 的層數：實體深度與 .. 個數必須相等，往上走才會剛好
+# 回到 $TEST_WORK_DIR。
+# The link's own component plus $TEST_WORK_DIR's depth: the physical depth and the
+# number of `..` have to match for the walk to land back on $TEST_WORK_DIR.
+while [ "$fldual_i" -le "$fldual_depth" ]; do
+    fldual_deep="$fldual_deep/d"
+    fldual_dots="$fldual_dots/.."
+    fldual_i=$((fldual_i + 1))
+done
+mkdir -p "$fldual_deep" "$TEST_WORK_DIR/System/Volumes/Data/Users/inside-item"
+ln -s "$fldual_deep" "$TEST_WORK_DIR/firmlink-deeplink"
+fldual_lexical="$TEST_WORK_DIR/firmlink-deeplink$fldual_dots/System/Volumes/Data/Users"
+# 前提條件：這條路徑真的存在、自己不是連結（否則 is_protected 不會去解析它），而且
+# 解析後確實落在 sandbox 裡而不是真的 /System/Volumes/Data——解析結果一旦帶著前綴，
+# 這一列就會被 real_path 那一半蓋過去。前提不成立就記成錯誤。
+# Preconditions: the path really exists, is not itself a link (or is_protected would
+# never resolve it), and really does resolve inside the sandbox rather than to the
+# real /System/Volumes/Data -- a resolution carrying the prefix would let the
+# real_path half cover this row. A broken precondition is recorded as a fault.
+fldual_physical="$(cd "$TEST_WORK_DIR" && pwd -P)/System/Volumes/Data/Users"
+if [ -L "$fldual_lexical" ] || [ ! -e "$fldual_lexical" ] ||
+   [ "$(readlink -f "$fldual_lexical")" != "$fldual_physical" ]; then
+    fldual_faults="$fldual_faults 字面拼寫那一列的前提不成立"
+fi
+is_protected_says_yes "$fldual_lexical" "$fldual_home"
+case $? in
+    0) ;;
+    99) fldual_faults="$fldual_faults 探針壞掉（字面 firmlink 拼寫）" ;;
+    *) fldual_faults="$fldual_faults 字面拼寫是 firmlink 拼寫卻被放行" ;;
+esac
+if is_protected_says_yes "$fldual_lexical/inside-item" "$fldual_home"; then
+    fldual_faults="$fldual_faults 字面拼寫在對應目錄內卻被誤擋"
+fi
+if [ -z "$fldual_faults" ]; then
+    test_pass "firmlink 改寫在已解析與字面兩條路徑上各自生效，對應目錄內的項目仍被放行"
+else
+    test_fail "firmlink 改寫的雙路徑比對有缺口:$fldual_faults"
+fi
+
 test_item ".git 內部的路徑與 .git 本身一樣受保護"
 # PROTECTED_PATTERNS 只認「路徑結束在 .git」，所以 .git/objects、.git/refs、
 # .git/index.lock 全部是普通的刪除目標——`rm -rf .git/objects` 會把整個物件庫搬進
