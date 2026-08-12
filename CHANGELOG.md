@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - 1.5.0: Prepare release 1.5.0
+- `--` is honoured as the option terminator, by both `rm` and `rm --restore`. Every argument after it is a pathname, which is what makes a file whose name starts with a dash nameable at all: `rm -- -dash.txt` deletes it and `rm --restore -- -dash.txt` puts it back. Previously a bare `--` fell through to the combined-option parser and died with `invalid option -- '-'`, so such a file could not be deleted by any spelling. Without the terminator nothing changes: `rm -dash.txt` is still refused as an invalid option, exactly as `rm(1)` refuses it, and a dash-leading argument directly after `--restore` is still reported as a missing argument so a mistyped `rm --restore -f` cannot silently name a file to restore.
 
 
 ### Fixed
