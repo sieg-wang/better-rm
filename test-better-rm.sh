@@ -509,28 +509,68 @@ fi
 check_restore_refusal() {
     local label="$1"
     shift
-    local status=0
-    "$BETTER_RM" "$@" >/dev/null 2>&1 || status=$?
+    local out status=0
+    out=$("$BETTER_RM" "$@" 2>&1) || status=$?
     if [ "$status" -eq 0 ]; then
         restore_contract_ok=0
         printf '  %s：未報錯 / did not fail\n' "$label" >&2
+        return
+    fi
+    # 只看結束碼分不出「拒絕」與「找不到刪除記錄」——放寬後的解析會落到後者，而那
+    # 也是 exit 1。實測：把守衛換成 `if [ $# -gt 0 ]`，只驗結束碼的版本 94/94 全綠。
+    # 所以理由本身必須比對。
+    # Exit status alone cannot tell a refusal from "no matching deletion record":
+    # a widened parse lands on the latter, which is also exit 1. Measured -- with
+    # the guard replaced by `if [ $# -gt 0 ]`, the status-only version of this test
+    # stayed 94/94 green. So the reason itself has to be compared.
+    if ! printf '%s\n' "$out" | grep -q "requires an argument"; then
+        restore_contract_ok=0
+        printf '  %s：報錯理由不是「缺少引數」/ wrong reason: %s\n' \
+            "$label" "$(printf '%s' "$out" | tr -d '\033' | tr '\n' ' ')" >&2
     fi
 }
 
 test_item "--restore 的引數契約沒有被 -- 放寬"
 # 反套套邏輯：加的是終止符，不是「什麼都當成引數」。缺引數、-- 後面沒有東西、
-# 誤打成另一個選項，以及含空白的破折號開頭引數，都必須照舊報錯。
+# 誤打成另一個選項，以及含空白的破折號開頭引數，都必須照舊以「缺少引數」報錯。
+# 除了理由，這裡還看得到放寬的直接後果：垃圾桶裡先種一筆「名字就叫 -f」的紀錄，
+# 放寬後的解析會把 -f 當成要還原的檔名（實測 exit 0、檔案回到工作目錄、沒有任何
+# 訊息）。因此「-f 沒有被還原」是這條契約的實質後果，不只是結束碼。
+# 最後再證明那筆紀錄真的可用，否則「沒有被還原」可能只是因為根本沒東西可還原。
 # Anti-tautology: what was added is the terminator, not "accept anything as the
 # argument". A missing argument, a bare terminator with nothing after it, a
 # mistyped option, and a dash-leading argument containing a space must all still
-# be errors.
+# fail with the missing-argument refusal.
+# Beyond the reason, the consequence is observable: a record whose name is
+# literally -f is seeded in the trash first, and a widened parse takes -f as the
+# name to restore (measured: exit 0, the file back in the working directory, no
+# message at all). "-f was not restored" is therefore a real consequence of this
+# contract, not just an exit code.
+# The seeded record is then proved live, or "was not restored" could simply mean
+# there was nothing there to restore.
+setup
+cd "$TEST_WORK_DIR"
+printf '%s\n' "SEEDED DASH F" > ./-f
+"$BETTER_RM" -- -f >/dev/null 2>&1
 restore_contract_ok=1
 check_restore_refusal "--restore（沒有引數）" --restore
 check_restore_refusal "--restore --（後面沒有東西）" --restore --
-check_restore_refusal "--restore -v（沒有 --）" --restore -v
-check_restore_refusal "--restore '-v oops.txt'（含空白）" --restore "-v oops.txt"
+check_restore_refusal "--restore -f（沒有 --）" --restore -f
+check_restore_refusal "--restore '-f oops.txt'（含空白）" --restore "-f oops.txt"
+if [ -e ./-f ]; then
+    restore_contract_ok=0
+    printf '  被拒絕的呼叫卻把 -f 還原了 / a refused invocation restored -f\n' >&2
+fi
+seeded_restore_status=0
+"$BETTER_RM" --restore -- -f >/dev/null 2>&1 || seeded_restore_status=$?
+if [ "$seeded_restore_status" -ne 0 ] || [ ! -f ./-f ] || \
+   [ "$(cat ./-f)" != "SEEDED DASH F" ]; then
+    restore_contract_ok=0
+    printf '  種下的 -f 紀錄不可用，上面的「沒有被還原」等於沒驗到 / the seeded -f record was not live (status=%s)\n' \
+        "$seeded_restore_status" >&2
+fi
 if [ "$restore_contract_ok" -eq 1 ]; then
-    test_pass "--restore 缺引數／裸 --／誤打選項／含空白選項仍然報錯"
+    test_pass "--restore 缺引數／裸 --／誤打選項／含空白選項仍以「缺少引數」拒絕"
 else
     test_fail "--restore 的引數契約被放寬了"
 fi
