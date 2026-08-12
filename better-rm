@@ -1637,7 +1637,24 @@ main() {
             --restore)
                 restore_mode=1
                 shift
-                if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+                # -- 之後的那一個引數就是還原目標，即使以破折號開頭。刪除端認得 --
+                # 而還原端不認得的話，-- 想解決的那一類檔名就變成單向：刪得掉、還原
+                # 不回來。
+                # 沒有 -- 時契約不變：緊接著的破折號開頭引數仍算「缺少引數」，否則
+                # 誤打的 `--restore -f` 會被默默當成要還原的檔名。
+                # After --, the next argument is the restore target even when it
+                # starts with a dash. Honouring -- on the delete side only would make
+                # exactly the class of names -- exists for one-way: deletable, but not
+                # restorable.
+                # Without --, the contract is unchanged: a dash-leading argument is
+                # still a missing argument, or a mistyped `--restore -f` would be
+                # taken silently as the name to restore.
+                local restore_terminated=0
+                if [ $# -gt 0 ] && [ "$1" = "--" ]; then
+                    restore_terminated=1
+                    shift
+                fi
+                if [ $# -gt 0 ] && { [ "$restore_terminated" -eq 1 ] || [[ "$1" != -* ]]; }; then
                     restore_target="$1"
                     shift
                 else

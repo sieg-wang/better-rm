@@ -454,6 +454,45 @@ else
     test_fail "沒有 -- 時破折號開頭被誤當成檔名 (status=$zz_status)"
 fi
 
+test_item "--restore 同樣接受 -- 終止符"
+# 刪除端認得 -- 而還原端不認得，等於讓 -- 想解決的那一類檔名變成單向：刪得掉、還原
+# 不回來。實測 `--restore -- -dash.txt` 以「選項 '--restore' 需要一個引數」失敗，
+# 唯一能還原的寫法是 `--restore ./-dash.txt`。
+# Honouring -- on the delete side only makes exactly the class of names -- exists
+# for one-way: deletable but not restorable. Measured: `--restore -- -dash.txt`
+# failed with "option '--restore' requires an argument" and the only spelling that
+# restored the file was `--restore ./-dash.txt`.
+dash_restore_status=0
+"$BETTER_RM" --restore -- -dash.txt >/dev/null 2>&1 || dash_restore_status=$?
+if [ "$dash_restore_status" -eq 0 ] && [ -f ./-dash.txt ] && \
+   [ "$(cat ./-dash.txt)" = "DASH CONTENT" ]; then
+    test_pass "--restore -- -dash.txt 還原成功"
+else
+    test_fail "--restore 未接受 -- 終止符 (status=$dash_restore_status)"
+fi
+
+test_item "--restore 的引數契約沒有被 -- 放寬"
+# 反套套邏輯：加的是終止符，不是「什麼都當成引數」。缺引數、-- 後面沒有東西、
+# 以及誤打成另一個選項，三種都必須照舊報錯。
+# Anti-tautology: what was added is the terminator, not "accept anything as the
+# argument". A missing argument, a bare terminator with nothing after it, and a
+# mistyped option must all still be errors.
+restore_contract_ok=1
+for restore_bad_args in "--restore" "--restore --" "--restore -v"; do
+    restore_bad_status=0
+    # shellcheck disable=SC2086
+    "$BETTER_RM" $restore_bad_args >/dev/null 2>&1 || restore_bad_status=$?
+    if [ "$restore_bad_status" -eq 0 ]; then
+        restore_contract_ok=0
+        echo "  '$restore_bad_args' 未報錯 / did not fail" >&2
+    fi
+done
+if [ "$restore_contract_ok" -eq 1 ]; then
+    test_pass "--restore 缺引數／裸 --／誤打選項仍然報錯"
+else
+    test_fail "--restore 的引數契約被放寬了"
+fi
+
 # ============================================================================
 # 測試 9: 受保護目錄 (Test 9: Protected Directories)
 # ============================================================================
