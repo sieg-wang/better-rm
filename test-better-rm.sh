@@ -3383,7 +3383,7 @@ test_item "PROTECTED_DIRS 每一項都被 is_protected 認定為受保護"
 # whole-home move that exits 0. is_protected and its dependencies are evaluated in
 # isolation rather than through main: driving the real /usr or /etc through the
 # binary would, the moment the guard failed, make the test itself move the whole
-# filesystem. The 24+2 names are spelled out on purpose -- reading them back from
+# filesystem. The 25+2 names are spelled out on purpose -- reading them back from
 # PROTECTED_DIRS would shrink with the array and keep passing. The extraction idiom
 # is the one test-hooks.js already uses on install-hooks.sh.
 setup
@@ -3408,7 +3408,8 @@ is_protected_says_yes() {
 }
 protected_unguarded=""
 protected_probe_broken=""
-for protected_path in / /Applications /Library /Network /System /Users /Volumes \
+for protected_path in / /Applications /Library /Network /System /System/Volumes \
+                      /Users /Volumes \
                       /bin /boot /cores /dev /etc /home /lib /lib64 /mnt /opt \
                       /private /proc /root /sbin /sys /usr /var \
                       "$protected_home" "$protected_home/"; do
@@ -3486,6 +3487,65 @@ if [ -z "$mount_root_unguarded" ] && [ -z "$mount_inside_blocked" ] &&
     test_pass "/Volumes 與 /mnt 的掛載根受保護，掛載磁碟內的項目未被誤擋"
 else
     test_fail "掛載根未受保護:${mount_root_unguarded:- 無}；掛載磁碟內誤擋:${mount_inside_blocked:- 無}；抽取失敗:${mount_root_probe_broken:- 無}"
+fi
+
+test_item "macOS firmlink 拼寫（/System/Volumes/Data/…）與根拼寫是同一個物件"
+# 實測 stat -f '%d:%i'：/Users/sieg 與 /System/Volumes/Data/Users/sieg 是同一個
+# device、同一個 inode；/Applications 與 /System/Volumes/Data/Applications 也是。
+# firmlink 不是 symlink，readlink -f 兩個方向都把路徑原樣送回來，所以沒有任何
+# 正規化會讓這兩種拼寫碰面——$HOME 的保護從第一天起就有這個洞：整個家目錄可以
+# 用 Data 卷宗的拼寫搬走，而清單一列都沒攔到。/System/Volumes 本身則是現代 Mac
+# 掛載自己每一顆 APFS 卷宗的地方，卻不在 /mnt、/Volumes 那個掛載根迴圈裡。
+# 判準刻意不是「路徑存在」：不存在的 /System/Volumes/Data/Users/<名字> 一樣要擋，
+# 否則家目錄還沒建立、或在另一台機器上，同一條命令就穿過去了。
+# 這裡走 is_protected 探針而不跑 better-rm——這些路徑在 macOS 上是真的。
+# Measured with stat -f '%d:%i': /Users/sieg and /System/Volumes/Data/Users/sieg are
+# the same device and the same inode, and so are /Applications and
+# /System/Volumes/Data/Applications. A firmlink is not a symlink -- readlink -f
+# hands either spelling straight back -- so no canonicalisation ever brings the two
+# together, and the $HOME protection has had this hole from the start: the whole
+# home directory is removable under the Data-volume spelling with no list entry
+# stopping it. /System/Volumes is also where every modern Mac mounts its own APFS
+# volumes, and it was not in the /mnt, /Volumes mount-parent loop. The criterion is
+# deliberately not "the path exists": a non-existent /System/Volumes/Data/Users/<name>
+# has to be refused too, or the same command walks through on a machine where the
+# home directory has not been created yet. Driven through the is_protected probe
+# rather than better-rm because these paths are real on macOS.
+firmlink_home="/Users/better-rm-probe-home"
+firmlink_unguarded=""
+firmlink_probe_broken=""
+for firmlink_path in /System/Volumes /System/Volumes/Data /System/Volumes/Preboot \
+                     /System/Volumes/Data/Users /System/Volumes/Data/Applications \
+                     /System/Volumes/Data/private /System/Volumes/Data/etc \
+                     "/System/Volumes/Data$firmlink_home"; do
+    is_protected_says_yes "$firmlink_path" "$firmlink_home"
+    case $? in
+        0) ;;
+        99) firmlink_probe_broken="$firmlink_probe_broken $firmlink_path" ;;
+        *) firmlink_unguarded="$firmlink_unguarded $firmlink_path" ;;
+    esac
+done
+# 負對照：認得這個拼寫不等於把 Data 卷宗底下的一切都變成刪不掉的。對應關係是逐條
+# 比對清單，不是前綴——家目錄底下的檔案、別人的家目錄、掛載根再下一層都照舊可刪。
+# Negative control: recognising the spelling must not turn everything under the
+# Data volume into an undeletable path. The mapping feeds the same exact-match
+# list, not a prefix: files inside the home directory, somebody else's home
+# directory, and anything below a mount root all stay deletable.
+firmlink_false_positive=""
+for firmlink_inside in "/System/Volumes/Data$firmlink_home/keep" \
+                       /System/Volumes/Data/Users/better-rm-other \
+                       /System/Volumes/Data/Applications/BetterRmProbe.app \
+                       /System/Volumes/Data/private/tmp/better-rm-probe \
+                       /System/Volumes/DataDrive/file.txt; do
+    if is_protected_says_yes "$firmlink_inside" "$firmlink_home"; then
+        firmlink_false_positive="$firmlink_false_positive $firmlink_inside"
+    fi
+done
+if [ -z "$firmlink_unguarded" ] && [ -z "$firmlink_false_positive" ] &&
+   [ -z "$firmlink_probe_broken" ]; then
+    test_pass "firmlink 拼寫與 /System/Volumes 掛載根受保護，Data 卷宗內的項目未被誤擋"
+else
+    test_fail "firmlink 拼寫未受保護:${firmlink_unguarded:- 無}；誤擋:${firmlink_false_positive:- 無}；抽取失敗:${firmlink_probe_broken:- 無}"
 fi
 
 test_item "\$HOME 被拒絕且內容完好（端到端）"

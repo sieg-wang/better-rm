@@ -318,6 +318,7 @@ export BETTER_RM_STATE_DIR="$HOME/.local/state/better-rm"
 - `/Library` - 系統層級的資源庫
 - `/Network` - 網路掛載點根目錄
 - `/System` - 作業系統本體
+- `/System/Volumes` 與其第一層掛載根目錄 - 現代 Mac 掛載自己那幾顆 APFS 卷宗的地方（`Data`、`Preboot`、`VM`、`Update`…）
 - `/Users` - 使用者主目錄根目錄
 - `/Volumes` 與其第一層掛載根目錄 - 掛載磁碟（外接碟、Time Machine、網路共享，例如 `/Volumes/Backup`）
 - `/cores` - 核心傾印檔目錄
@@ -334,7 +335,24 @@ export BETTER_RM_STATE_DIR="$HOME/.local/state/better-rm"
 `/mnt` 的保護只涵蓋掛載根本身；仍可正常移除 `/mnt/c/project/tmp` 等掛載磁碟內的項目。
 WSL 可透過 `/etc/wsl.conf` 更改 Windows 磁碟的 automount root；非預設位置不在本規則的保護範圍內。
 `/Volumes` 是 macOS 的對應物，走同一段程式：`/Volumes` 與 `/Volumes/<磁碟>` 會被拒絕，
-`/Volumes/Backup/old.log` 這類掛載磁碟內的項目仍可正常移除。
+`/Volumes/Backup/old.log` 這類掛載磁碟內的項目仍可正常移除。`/System/Volumes` 是第三個掛載
+父目錄，同一段程式：`/System/Volumes/Data`、`/System/Volumes/Preboot` 這一層會被拒絕。
+
+### macOS firmlink：`/System/Volumes/Data/…` 與根目錄拼寫是同一個東西
+
+macOS 用 firmlink 把資料卷宗接進根目錄，所以 `/Users/you` 與 `/System/Volumes/Data/Users/you`
+是同一個 device、同一個 inode（`stat -f '%d:%i'` 兩邊一模一樣），`/Applications` 與
+`/System/Volumes/Data/Applications` 也是。firmlink **不是**符號連結：`readlink -f` 兩個方向
+都把路徑原樣送回來，沒有任何正規化會讓兩種拼寫碰面。因此保護清單會先把
+`/System/Volumes/Data/` 這個前綴換掉再比對——`rm -rf /System/Volumes/Data/Users/you`
+與 `rm -rf ~` 得到同一個拒絕。
+
+- 判準不是「路徑存在」：`/System/Volumes/Data/Users/<還沒建立的名字>` 一樣被拒絕。
+- 對應之後仍是逐條完全比對，不是前綴：`/System/Volumes/Data/Users/you/project` 照舊可刪。
+- 前綴必須整段對齊：`/System/Volumes/DataDrive/...` 不會被當成 Data 卷宗。
+- 侷限：這是拼寫上的對應，不是身分證明。資料卷宗上沒有的東西（例如
+  `/System/Volumes/Data/usr`）會被對應成 `/usr` 而一併拒絕，方向是安全的那一邊；反過來，
+  bind mount、hardlink 目錄之類「同一顆 inode、兩種拼寫」不在這條規則涵蓋範圍內。
 
 清單其餘各項以完全相同的路徑比對，保護的是那個目錄本身而非其內容：`/Applications/Xcode.app`、
 `/Library/Caches/foo` 這類目錄內的項目仍可正常移除。`/private` 同樣只涵蓋 `/private` 本身；

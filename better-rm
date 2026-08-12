@@ -36,6 +36,7 @@ PROTECTED_DIRS=(
     "/Library"
     "/Network"
     "/System"
+    "/System/Volumes"
     "/Users"
     "/Volumes"
     "/bin"
@@ -329,6 +330,52 @@ is_protected() {
     norm_path=$(normalize_path "$norm_path")
     norm_path="${norm_path%/}"
     
+    # macOS firmlink：/System/Volumes/Data/X 與 /X 是同一個物件。實測 stat -f '%d:%i'，
+    # /Users/sieg 與 /System/Volumes/Data/Users/sieg 同 device 同 inode，/Applications
+    # 亦然。firmlink 不是 symlink，readlink -f 兩個方向都原樣送回，所以沒有任何正規化
+    # 會讓兩種拼寫碰面——整個家目錄本來可以用 Data 卷宗的拼寫搬走。
+    # 這裡用「把 Data 卷宗的前綴換掉」而不是比對 inode：inode 要求路徑存在，而還沒
+    # 建立的家目錄同樣不能被穿過去；而且逐條 stat 整份清單會讓每一次刪除都變慢。
+    # 前綴必須整段對齊（/System/Volumes/DataDrive 不算），對應之後照舊送進同一份
+    # 逐條比對，所以只會多出拒絕、不會少掉任何一條既有的保護。
+    # 侷限：這是拼寫層面的對應，不是身分證明。Data 卷宗上沒有的東西（例如唯讀系統
+    # 卷宗上的 /System/Volumes/Data/usr）會被對應成 /usr 而一併拒絕——多擋一條不存在
+    # 的路徑，方向是安全的那一邊。反過來，別種掛載方式造出的同一顆 inode 兩種拼寫
+    # （bind mount、hardlink 目錄）不在這條規則的涵蓋範圍內。
+    # macOS firmlink: /System/Volumes/Data/X and /X are the same object. Measured with
+    # stat -f '%d:%i', /Users/sieg and /System/Volumes/Data/Users/sieg share a device
+    # and an inode, and so does /Applications. A firmlink is not a symlink and
+    # readlink -f hands either spelling straight back, so no canonicalisation ever
+    # brings the two together -- the whole home directory was removable under the
+    # Data-volume spelling. The prefix is rewritten rather than compared by inode:
+    # an inode needs the path to exist, and a home directory that has not been
+    # created yet must not be walked through either, while stat-ing the whole list
+    # on every deletion would slow down the common case. The prefix has to align on
+    # a whole component (/System/Volumes/DataDrive is not a match) and the result
+    # goes through the same exact-match comparisons as before, so this can only add
+    # refusals, never remove one.
+    # Limits: this is a spelling correspondence, not proof of identity. Something the
+    # Data volume does not hold -- /System/Volumes/Data/usr, say, when /usr lives on
+    # the read-only system volume -- maps to /usr and is refused with it: one extra
+    # non-existent path refused, which is the safe direction. Conversely, two
+    # spellings of one inode produced by any other mechanism (a bind mount, a
+    # hard-linked directory) are outside this rule.
+    # 對應後的結果沿用上面「去掉結尾斜線」的表示法：根目錄在這個函式裡一路是空字串
+    # （清單裡的 "/" 也被 ${protected%/} 削成空字串），所以 Data 卷宗根對應過去就是
+    # 空字串，不能寫成 "/"，否則它反而比對不到 "/" 那一列。
+    # The mapped result keeps the representation the trailing-slash strip above
+    # established: the root directory is the empty string throughout this function
+    # (the list's "/" is cut to the empty string by ${protected%/} as well), so the
+    # Data volume root maps to the empty string. Writing "/" here would make it miss
+    # the very row it has to match.
+    local firmlink_prefix="/System/Volumes/Data"
+    if [ "$real_path" = "$firmlink_prefix" ] || [[ "$real_path" = "$firmlink_prefix"/* ]]; then
+        real_path="${real_path#"$firmlink_prefix"}"
+    fi
+    if [ "$norm_path" = "$firmlink_prefix" ] || [[ "$norm_path" = "$firmlink_prefix"/* ]]; then
+        norm_path="${norm_path#"$firmlink_prefix"}"
+    fi
+    
     # 檢查是否與受保護目錄完全符合
     # Check if exactly matches protected directories
     for protected in "${PROTECTED_DIRS[@]}"; do
@@ -339,9 +386,11 @@ is_protected() {
     done
 
     # 保護掛載根本身及其第一層掛載根（例如 WSL 的 /mnt/c、macOS 的 /Volumes/Backup），但允許操作掛載點內的項目
+    # /System/Volumes 是現代 Mac 掛載自己那幾顆 APFS 卷宗（Data、Preboot、VM、Update…）的地方
     # Protect the mount parents and their immediate mount roots (for example /mnt/c on WSL, /Volumes/Backup on macOS), while allowing items inside them
+    # /System/Volumes is where a modern Mac mounts its own APFS volumes (Data, Preboot, VM, Update, ...)
     local mount_parent candidate remainder
-    for mount_parent in /mnt /Volumes; do
+    for mount_parent in /mnt /Volumes /System/Volumes; do
         for candidate in "$real_path" "$norm_path"; do
             if [[ "$candidate" = "$mount_parent"/* ]]; then
                 remainder="${candidate#"$mount_parent"/}"

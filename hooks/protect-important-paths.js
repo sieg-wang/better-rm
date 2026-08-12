@@ -11,7 +11,8 @@ const path = require('path');
 // two lists directly, because on the agent path this hook is the only guard.
 // 與 better-rm 的 PROTECTED_DIRS 保持一致；agent 路徑上只有這支 hook 在守。
 const SYSTEM_DIRS = [
-  '/', '/Applications', '/Library', '/Network', '/System', '/Users', '/Volumes',
+  '/', '/Applications', '/Library', '/Network', '/System', '/System/Volumes',
+  '/Users', '/Volumes',
   '/bin', '/boot', '/cores', '/dev', '/etc', '/home', '/lib', '/lib64', '/mnt',
   '/opt', '/private', '/proc', '/root', '/sbin', '/sys', '/usr', '/var',
 ];
@@ -19,7 +20,12 @@ const SYSTEM_DIRS = [
 // The directories whose first level is a mount root rather than an ordinary
 // directory, as better-rm's own is_protected loops over them.
 // 第一層是掛載根而非普通目錄的父目錄，與 better-rm 的 is_protected 迴圈一致。
-const MOUNT_PARENTS = ['/mnt', '/Volumes'];
+// /System/Volumes is where a modern Mac mounts its own APFS volumes (Data,
+// Preboot, VM, Update, ...), so its first level is a mount root exactly as
+// /Volumes' and /mnt's are. Kept identical to better-rm's mount-parent loop --
+// the drift guard in the suite compares the two.
+// /System/Volumes 是現代 Mac 掛載自己那幾顆 APFS 卷宗的地方，第一層同樣是掛載根。
+const MOUNT_PARENTS = ['/mnt', '/Volumes', '/System/Volumes'];
 
 function decodeAnsiCEscape(input, slashIndex) {
   const escape = input[slashIndex + 1];
