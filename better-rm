@@ -403,6 +403,48 @@ is_protected() {
         fi
     done
 
+    # 使用者自行宣告的受保護目錄：BETTER_RM_PROTECTED_DIRS
+    # 這是使用者唯一能自己加保護的介面。agent 路徑上的 hook 一直有讀它
+    # （hooks/protect-important-paths.js 的 evaluate），而這裡一處都沒提到它——同一個
+    # 變數在 agent 路徑上生效，在它本來要設定的 rm 替身上完全沒作用；使用者設了它、
+    # 看見 agent 被擋，就會以為兩邊都受保護了。
+    # 解析與 hook 逐項對齊：以 ':' 分隔（Node 的 path.delimiter 在這兩個平台就是它）、
+    # 空項略過、相對項以工作目錄為基準解析，然後照 PROTECTED_DIRS 那一份做完全比對，
+    # 所以保護的是宣告的那個目錄本身而非其內容。
+    # 空項不是小事：""會解析成當前目錄，一個結尾冒號就讓使用者的工作目錄變成刪不掉的。
+    # 用 read -ra 而不是讓變數自己斷詞：後者會對含有萬用字元的項目做路徑展開，而 hook
+    # 那邊只是 split，不展開。
+    # BETTER_RM_PROTECTED_DIRS: the only interface a user has for adding protection of
+    # their own. The agent-path hook has always read it (evaluate() in
+    # hooks/protect-important-paths.js) while this file never mentioned it, so the
+    # same variable hardened the agent path and did nothing for the rm replacement it
+    # exists to configure -- a user who sets it and watches the agent get refused
+    # believes both paths are covered.
+    # The parsing matches the hook's entry for entry: ':' separated (Node's
+    # path.delimiter on both platforms), empty entries skipped, relative entries
+    # resolved against the working directory, then compared exactly like the list
+    # above, so what is protected is the declared directory and not its contents.
+    # The empty entry is not a detail: "" resolves to the current directory, so a
+    # single trailing colon would make the user's own working directory undeletable.
+    # read -ra rather than letting the variable word-split: the latter would also
+    # glob an entry containing a wildcard, while the hook only splits.
+    if [ -n "${BETTER_RM_PROTECTED_DIRS:-}" ]; then
+        local extra_entry
+        local -a extra_entries=()
+        IFS=: read -ra extra_entries <<< "$BETTER_RM_PROTECTED_DIRS"
+        for extra_entry in "${extra_entries[@]}"; do
+            [ -n "$extra_entry" ] || continue
+            if [[ "$extra_entry" != /* ]]; then
+                extra_entry="$(pwd)/$extra_entry"
+            fi
+            extra_entry=$(normalize_path "$extra_entry")
+            extra_entry="${extra_entry%/}"
+            if [ "$real_path" = "$extra_entry" ] || [ "$norm_path" = "$extra_entry" ]; then
+                return 0  # 使用者宣告的受保護目錄
+            fi
+        done
+    fi
+
     # 保護掛載根本身及其第一層掛載根（例如 WSL 的 /mnt/c、macOS 的 /Volumes/Backup），但允許操作掛載點內的項目
     # /System/Volumes 是現代 Mac 掛載自己那幾顆 APFS 卷宗（Data、Preboot、VM、Update…）的地方
     # Protect the mount parents and their immediate mount roots (for example /mnt/c on WSL, /Volumes/Backup on macOS), while allowing items inside them
@@ -466,6 +508,14 @@ A safer alternative to the rm command
   TRASH_DIR              垃圾桶目錄位置 (預設: ~/.Trash)
   BETTER_RM_STATE_DIR    狀態與日誌目錄 (預設: ~/.local/state/better-rm)
   XDG_STATE_HOME         未設定 BETTER_RM_STATE_DIR 時使用的絕對狀態根目錄
+  BETTER_RM_PROTECTED_DIRS
+                         自行宣告的受保護目錄，以 : 分隔；相對路徑以工作目錄
+                         為基準。與內建清單一樣是完全比對（目錄本身受保護，
+                         其內容不受影響）。coding agent 的 hook 讀同一個變數
+                         Extra protected directories, ':' separated; relative
+                         entries resolve against the working directory. Exact
+                         match, like the built-in list. The agent hook reads
+                         the same variable
 
 說明 (Description):
   此命令會將檔案移至垃圾桶而非永久刪除。

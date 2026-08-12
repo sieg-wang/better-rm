@@ -3859,6 +3859,100 @@ else
     test_fail ".git 內部的刪除未被拒絕（objects=$([ -f repo/.git/objects/keep.pack ] && echo yes || echo no)；lock=$([ -f repo/.git/index.lock ] && echo yes || echo no)；訊息=${gitinside_e2e}）"
 fi
 
+test_item "BETTER_RM_PROTECTED_DIRS 宣告的目錄受保護"
+# 這個環境變數是使用者自己加保護的唯一介面，agent 路徑上的 hook 讀它（
+# hooks/protect-important-paths.js 的 evaluate），better-rm 全檔一處都沒提到它。
+# 於是同一個變數在 agent 路徑上生效、在它本來要保護的 rm 替身上完全沒作用——使用者
+# 設了它、看見 agent 被擋，就會以為自己受保護了。
+# 解析必須與 hook 完全一致，否則兩邊各保護各的：以 ':' 分隔（Node 的 path.delimiter
+# 在這兩個平台就是它）、空項略過、相對項以 cwd 為基準解析。空項尤其要緊：不略過的
+# 話 "" 會解析成當前目錄，於是一個結尾冒號就讓使用者的工作目錄變成刪不掉的。
+# This variable is the only way a user can add protection of their own. The
+# agent-path hook reads it (evaluate() in hooks/protect-important-paths.js);
+# better-rm did not mention it anywhere in the file, so the same variable hardened
+# the agent path and did nothing for the rm replacement it exists to configure --
+# a user who sets it and watches the agent get refused believes they are covered.
+# The parsing has to match the hook's exactly: ':' separated (that is Node's
+# path.delimiter on both platforms), empty entries skipped, relative entries
+# resolved against the working directory. The empty entry matters most: keeping it
+# resolves "" to the current directory, so one trailing colon would make the user's
+# own working directory undeletable.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+extradirs_home="$TEST_WORK_DIR/extradirs-home"
+mkdir -p "$extradirs_home"
+# 絕對項、空項、相對項各一，一次把三種解析都放進同一個值裡。
+# One absolute, one empty and one relative entry, so all three parses are exercised
+# by the same value.
+extradirs_value="$TEST_WORK_DIR/secrets::relative-secrets"
+extradirs_says_yes() {
+    HOME="$3" BETTER_RM_PROTECTED_DIRS="$2" bash -c '
+        eval "$(sed -n "/^PROTECTED_DIRS=(/,/^)/p;/^PROTECTED_PATTERNS=(/,/^)/p" "$1")"
+        eval "$(sed -n "/^normalize_path()/,/^}/p;/^is_protected()/,/^}/p" "$1")"
+        if [ "$(type -t is_protected)" != function ] ||
+           [ "${#PROTECTED_DIRS[@]}" -eq 0 ] ||
+           [ "${#PROTECTED_PATTERNS[@]}" -eq 0 ]; then
+            exit 99
+        fi
+        is_protected "$2"
+    ' better-rm-is-protected "$BETTER_RM" "$1"
+}
+extradirs_unguarded=""
+extradirs_probe_broken=""
+for extradirs_path in "$TEST_WORK_DIR/secrets" "$TEST_WORK_DIR/secrets/" \
+                      "$TEST_WORK_DIR/relative-secrets" "relative-secrets"; do
+    extradirs_says_yes "$extradirs_path" "$extradirs_value" "$extradirs_home"
+    case $? in
+        0) ;;
+        99) extradirs_probe_broken="$extradirs_probe_broken $extradirs_path" ;;
+        *) extradirs_unguarded="$extradirs_unguarded $extradirs_path" ;;
+    esac
+done
+# 負對照：保護的是宣告的那個目錄本身，不是它底下的一切，也不是沒宣告的東西；
+# 而工作目錄本身必須照舊可刪，否則就是空項被當成了 "."。
+# Negative control: what is protected is the declared directory itself -- not what
+# is inside it, not what was never declared -- and the working directory must stay
+# removable, or the empty entry was read as ".".
+extradirs_false_positive=""
+for extradirs_ok in "$TEST_WORK_DIR/secrets/inside-item" "$TEST_WORK_DIR/not-secrets" \
+                    "$TEST_WORK_DIR/relative-secrets/inside-item" "$TEST_WORK_DIR"; do
+    if extradirs_says_yes "$extradirs_ok" "$extradirs_value" "$extradirs_home"; then
+        extradirs_false_positive="$extradirs_false_positive $extradirs_ok"
+    fi
+done
+# 反恆真：變數沒設的時候，同一條路徑必須是可刪的，否則上面每一列都可能是別的規則
+# 擋下來的。
+# Anti-tautology: with the variable unset the same path must be removable, or the
+# rows above could be passing because of some other rule entirely.
+if extradirs_says_yes "$TEST_WORK_DIR/secrets" "" "$extradirs_home"; then
+    extradirs_false_positive="$extradirs_false_positive unset:$TEST_WORK_DIR/secrets"
+fi
+if [ -z "$extradirs_unguarded" ] && [ -z "$extradirs_false_positive" ] &&
+   [ -z "$extradirs_probe_broken" ]; then
+    test_pass "BETTER_RM_PROTECTED_DIRS 的絕對／相對項受保護，空項與其內容未被誤擋"
+else
+    test_fail "宣告的目錄未受保護:${extradirs_unguarded:- 無}；誤擋:${extradirs_false_positive:- 無}；抽取失敗:${extradirs_probe_broken:- 無}"
+fi
+
+test_item "BETTER_RM_PROTECTED_DIRS 真的攔在 move_to_trash 前面（端到端）"
+# 上一項證明判斷認得這個變數，這一項證明那個判斷擋在真正的搬移之前。
+# The previous item proves the judgement reads the variable; this one proves it
+# gates the real move.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+mkdir -p secrets
+printf 'SECRET\n' > secrets/keep.txt
+extradirs_e2e=$(BETTER_RM_PROTECTED_DIRS="$TEST_WORK_DIR/secrets" "$BETTER_RM" -rf secrets 2>&1)
+extradirs_e2e_allowed=0
+BETTER_RM_PROTECTED_DIRS="$TEST_WORK_DIR/secrets" "$BETTER_RM" -rf secrets/keep.txt >/dev/null 2>&1 ||
+    extradirs_e2e_allowed=$?
+if printf '%s' "$extradirs_e2e" | grep -q "拒絕刪除受保護的目錄" &&
+   [ -d secrets ] && [ "$extradirs_e2e_allowed" -eq 0 ] && [ ! -e secrets/keep.txt ]; then
+    test_pass "宣告的目錄被拒絕，目錄內的檔案仍可刪除"
+else
+    test_fail "宣告的目錄未被保護或內容被誤擋（目錄存在=$([ -d secrets ] && echo yes || echo no)；刪內容 exit=${extradirs_e2e_allowed}；訊息=${extradirs_e2e}）"
+fi
+
 test_item "\$HOME 被拒絕且內容完好（端到端）"
 # 上一項證明清單被認定為受保護，這一項證明那個判斷真的攔在 move_to_trash 前面。
 # HOME 指向 sandbox，所以就算保護整個壞掉，被搬走的也只是 sandbox。

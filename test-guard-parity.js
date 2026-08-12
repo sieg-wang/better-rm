@@ -140,6 +140,13 @@ process.on('exit', () => {
   try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch (_) { /* best effort */ }
 });
 const EXTRA_PROTECTED = path.join(sandbox, 'secrets');
+const EXTRA_PROTECTED_RELATIVE = 'relative-secrets';
+// The value both guards are handed: an absolute entry, an EMPTY entry, and a
+// relative one. Written as one string rather than three constants because the
+// separator is part of what is being compared -- a guard that split on something
+// else would protect a different set.
+// 兩邊拿到的同一個值：絕對項、空項、相對項。分隔符本身就是比對的一部分。
+const EXTRA_PROTECTED_VALUE = [EXTRA_PROTECTED, '', EXTRA_PROTECTED_RELATIVE].join(path.delimiter);
 
 // Symlink fixtures. The link TARGET is /usr and only /usr: it is a real
 // directory on both macOS and ubuntu, while /etc and /var are symlinks on macOS
@@ -319,12 +326,26 @@ add('git', 'allow', path.join(REPO_FIXTURE, '.git.bak'));
 
 // -- BETTER_RM_PROTECTED_DIRS ----------------------------------------------
 // The hook reads this environment variable and adds its entries to the exact
-// list. better-rm has no reference to it anywhere in the file, so the same
-// variable that hardens the agent path does nothing for the shell alias.
-// hook 會讀這個環境變數並加進清單，better-rm 全檔沒有任何一處提到它。
+// list. It is the only interface a user has for adding protection of their own,
+// so both guards have to parse it the same way or a declared directory is
+// protected on one path and not the other.
+// The value below carries all three parses at once: one absolute entry, one
+// EMPTY entry, and one relative entry resolved against the working directory.
+// The empty entry is the dangerous one -- resolving "" lands on the working
+// directory, so one trailing colon would make the user's own project undeletable,
+// which is why the sandbox itself is an 'allow' row below.
+// hook 會讀這個環境變數並加進清單；這是使用者唯一能自己加保護的介面，兩邊的解析
+// 必須一致。下面的值一次帶三種解析：絕對項、空項、相對項。空項最危險：""會解析成
+// 當前目錄，一個結尾冒號就讓使用者的專案變成刪不掉的。
 add('extra-dirs', 'agree', EXTRA_PROTECTED, 'BETTER_RM_PROTECTED_DIRS entry');
 add('extra-dirs', 'agree', `${EXTRA_PROTECTED}/`);
 add('extra-dirs', 'allow', `${EXTRA_PROTECTED}/inside-item`);
+add('extra-dirs', 'agree', EXTRA_PROTECTED_RELATIVE, 'a relative entry, spelled as declared');
+add('extra-dirs', 'agree', path.join(sandbox, EXTRA_PROTECTED_RELATIVE),
+  'the same relative entry, resolved against the working directory');
+add('extra-dirs', 'allow', path.join(sandbox, EXTRA_PROTECTED_RELATIVE, 'inside-item'));
+add('extra-dirs', 'allow', sandbox, 'the empty entry must not protect the working directory');
+add('extra-dirs', 'allow', path.join(sandbox, 'not-declared'));
 
 // -- spellings that only one layer ever sees -------------------------------
 // The two guards sit at different layers: the hook parses the shell command
@@ -379,7 +400,7 @@ require_(groups.length >= 9, `the corpus lost a whole group (${groups.join(', ')
 // 4. Hook verdicts, through the exported evaluate()
 //    hook 端判定：走它匯出的 evaluate()
 // ---------------------------------------------------------------------------
-const hookEnv = { HOME, BETTER_RM_PROTECTED_DIRS: EXTRA_PROTECTED };
+const hookEnv = { HOME, BETTER_RM_PROTECTED_DIRS: EXTRA_PROTECTED_VALUE };
 const hookExtraDirs = hookEnv.BETTER_RM_PROTECTED_DIRS
   .split(path.delimiter).filter(Boolean).map((item) => path.resolve(sandbox, item));
 
@@ -475,7 +496,7 @@ try {
     env: {
       PATH: process.env.PATH,
       HOME,
-      BETTER_RM_PROTECTED_DIRS: EXTRA_PROTECTED,
+      BETTER_RM_PROTECTED_DIRS: EXTRA_PROTECTED_VALUE,
       LC_ALL: 'C',
     },
   });

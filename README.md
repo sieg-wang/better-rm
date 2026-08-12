@@ -290,6 +290,23 @@ export BETTER_RM_STATE_DIR="$HOME/.local/state/better-rm"
 
 日誌包含原始路徑與垃圾桶路徑。新建立的狀態目錄使用 `0700` 權限，新建立的日誌使用 `0600` 權限。
 
+### 自行宣告受保護的目錄
+
+`BETTER_RM_PROTECTED_DIRS` 可以把你自己的目錄加進保護清單，兩道守衛都認：`rm` 替身
+（本工具）與 coding agent 那道 PreToolUse hook。
+
+```bash
+# 暫時設定（單次使用）
+BETTER_RM_PROTECTED_DIRS="$HOME/work/secrets" rm -rf ~/work/secrets
+
+# 永久設定（在 ~/.bashrc 或 ~/.zshrc 中加入），多個目錄以 : 分隔
+export BETTER_RM_PROTECTED_DIRS="$HOME/work/secrets:$HOME/vault"
+```
+
+- 以 `:` 分隔，空項會被略過（所以結尾多一個冒號不會把你的工作目錄變成刪不掉的）。
+- 相對路徑以目前的工作目錄為基準解析。
+- 與內建清單一樣是完全比對：保護的是宣告的那個目錄本身，`secrets/notes.txt` 仍可刪除。
+
 ## 受保護的目錄
 
 為了防止災難性的誤刪，`better-rm` 會拒絕刪除以下重要目錄：
