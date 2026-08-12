@@ -5,7 +5,7 @@
 'use strict';
 
 const assert = require('assert');
-const { evaluate } = require('./hooks/protect-important-paths');
+const { SYSTEM_DIRS, evaluate } = require('./hooks/protect-important-paths');
 
 const env = { HOME: '/home/tester', BETTER_RM_PROTECTED_DIRS: '/workspace/secrets' };
 
@@ -204,20 +204,80 @@ for (let depthLevel = 0; depthLevel < 10; depthLevel += 1) {
 }
 blocked.push(deeplyNestedCarrier);
 
-// Every entry of SYSTEM_DIRS must be denied by name. Only 7 of the 16 were
-// reachable from the tables above, so deleting '/bin', '/dev', '/home', '/lib',
-// '/lib64', '/proc', '/root', '/sbin' or '/sys' from that one array turned
-// `rm -rf /root` into an allow with the whole suite still green — and nothing
-// logs that the list shrank. The 16 names are spelled out here on purpose:
-// reading them back from the module would shrink together with the array and
-// keep passing, which is the exact failure this pins.
-// SYSTEM_DIRS 每一項都必須被指名擋下：先前只有 7 項測得到，其餘 9 項可以整批
-// 從陣列刪掉而全套仍綠。清單刻意寫死——從模組讀回來會隨陣列一起縮小而永遠是綠的。
-for (const systemDir of [
-  '/', '/bin', '/boot', '/dev', '/etc', '/home', '/lib', '/lib64', '/mnt',
-  '/opt', '/proc', '/root', '/sbin', '/sys', '/usr', '/var',
-]) {
-  blocked.push(`rm -rf ${systemDir}`, `rm -rf ${systemDir}/`);
+// This repository carries TWO protected-path lists: better-rm's PROTECTED_DIRS
+// and this hook's SYSTEM_DIRS. Only the first was updated when the macOS entries
+// landed, so the hook still allowed `rm -rf /Applications`, and on the agent path
+// there is no alias over rm — this hook is the only guard there, with no trash,
+// no ledger and no undo behind it.
+//
+// The test that stood here asserted SYSTEM_DIRS coverage against its own
+// hard-coded copy of the same 16 names, which is why that shipped: an entry
+// missing from BOTH the array and the copy was structurally invisible. The
+// hard-coding was aimed at a real failure (a name read back from the module
+// shrinks with the module and keeps passing), but the fix for it is a SECOND
+// independent source, not a transcription. Both lists are therefore read from
+// where they actually live — PROTECTED_DIRS parsed out of the better-rm script
+// with the sed-range idiom test-better-rm.sh already uses, SYSTEM_DIRS imported
+// from the hook module — and compared. Neither file can gain or lose an entry
+// without this going red, and a transcription in this file could not drift with
+// them because there is none.
+// 本 repo 有兩份受保護清單，macOS 項目只加進了 better-rm。舊測試拿自己寫死的 16
+// 個名字去比對 SYSTEM_DIRS，兩邊同時缺項就永遠看不見——這正是缺漏得以出貨的原因。
+// 寫死是為了防「從模組讀回來會隨模組一起縮小」，但解法是第二個獨立來源，不是抄寫：
+// 兩份清單各自從真正的出處讀出來比對，任一邊增減都會立刻轉紅。
+const betterRmSource = require('fs').readFileSync(`${__dirname}/better-rm`, 'utf8');
+const protectedDirsBlock = betterRmSource.match(/^PROTECTED_DIRS=\(\n([\s\S]*?)^\)$/m);
+assert.ok(protectedDirsBlock, 'PROTECTED_DIRS was not found in better-rm; this extraction is broken');
+const cliProtectedDirs = protectedDirsBlock[1]
+  .split('\n')
+  .map((line) => line.trim())
+  .filter((line) => line && !line.startsWith('#'))
+  .map((line) => line.replace(/^"(.*)"$/, '$1'));
+// The extraction must fail loudly rather than quietly return nothing: an empty
+// or malformed parse would make the comparison below trivially true.
+// 抽取失敗必須大聲失敗，否則空清單會讓底下的比對變成恆真。
+assert.ok(cliProtectedDirs.length > 0, 'PROTECTED_DIRS parsed as empty; this extraction is broken');
+for (const entry of cliProtectedDirs) {
+  assert.match(entry, /^(\/|\$HOME)/, `PROTECTED_DIRS parsed a non-path entry: ${entry}`);
+  assert.doesNotMatch(entry, /["']/, `PROTECTED_DIRS entry kept its quoting: ${entry}`);
+}
+// $HOME reaches the hook as protectedReason's `home` argument rather than through
+// SYSTEM_DIRS, so it is added on the hook side of the comparison; trailing slashes
+// are a spelling, not an entry, and better-rm strips them before comparing too.
+// $HOME 在 hook 是走 protectedReason 的 home 參數而非 SYSTEM_DIRS；結尾斜線只是寫法。
+const stripTrailingSlash = (item) => item.replace(/(.)\/+$/, '$1');
+const cliProtectedSet = [...new Set(
+  cliProtectedDirs.map((item) => stripTrailingSlash(item.replace(/^\$HOME/, env.HOME))),
+)].sort();
+const hookProtectedSet = [...new Set([...SYSTEM_DIRS, env.HOME].map(stripTrailingSlash))].sort();
+assert.deepStrictEqual(
+  hookProtectedSet,
+  cliProtectedSet,
+  'the hook\'s SYSTEM_DIRS and better-rm\'s PROTECTED_DIRS have drifted apart',
+);
+
+// Parity of the two lists is a name check; these rows are what proves the hook
+// acts on them. Generated from the extracted list so a new entry is exercised
+// the moment it is added, in both directions: the directory itself refused, and
+// an item inside it still allowed. The second half is not decoration — widening
+// the comparison to a prefix match would satisfy every deny row above while
+// turning `rm -rf /Applications/Foo.app` (ordinary work, no root required) into
+// a refusal, which is a worse regression than the missing entries were.
+// Mount parents are excluded here and covered separately: everything at their
+// first level is a mount root, so an item there is protected, not allowed.
+// 名稱比對之外還要證明 hook 真的據此行動：由抽出的清單生成，兩個方向都測——目錄
+// 本身被拒、目錄內的項目仍放行。後者不是裝飾：比對一旦擴大成前綴匹配，上面每一
+// 列 deny 都仍是綠的，卻會把刪除單一 app bundle 這種日常操作變成拒絕。
+const cliMountParentLine = betterRmSource.match(/^\s*for mount_parent in (.+); do$/m);
+assert.ok(cliMountParentLine, 'the mount-parent loop was not found in better-rm; this extraction is broken');
+const cliMountParents = cliMountParentLine[1].trim().split(/\s+/);
+for (const entry of cliMountParents) {
+  assert.match(entry, /^\//, `the mount-parent loop parsed a non-path entry: ${entry}`);
+}
+for (const protectedDir of cliProtectedSet) {
+  blocked.push(`rm -rf ${protectedDir}`, `rm -rf ${protectedDir}/`);
+  if (protectedDir === '/' || cliMountParents.includes(protectedDir)) continue;
+  allowed.push(`rm -rf ${protectedDir}/inside-item`);
 }
 // The home directory itself, in the spellings a shell can hand over.
 // 家目錄本身的各種寫法。

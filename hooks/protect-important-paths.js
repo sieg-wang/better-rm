@@ -7,9 +7,13 @@
 const os = require('os');
 const path = require('path');
 
+// Kept in step with better-rm's own PROTECTED_DIRS; test-hooks.js compares the
+// two lists directly, because on the agent path this hook is the only guard.
+// 與 better-rm 的 PROTECTED_DIRS 保持一致；agent 路徑上只有這支 hook 在守。
 const SYSTEM_DIRS = [
-  '/', '/bin', '/boot', '/dev', '/etc', '/home', '/lib', '/lib64', '/mnt', '/opt',
-  '/proc', '/root', '/sbin', '/sys', '/usr', '/var',
+  '/', '/Applications', '/Library', '/Network', '/System', '/Users', '/Volumes',
+  '/bin', '/boot', '/cores', '/dev', '/etc', '/home', '/lib', '/lib64', '/mnt',
+  '/opt', '/private', '/proc', '/root', '/sbin', '/sys', '/usr', '/var',
 ];
 
 function decodeAnsiCEscape(input, slashIndex) {
@@ -725,4 +729,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { commandTargets, evaluate, globCanMatchGit, normalizedTarget, protectedReason, shellWords };
+module.exports = { SYSTEM_DIRS, commandTargets, evaluate, globCanMatchGit, normalizedTarget, protectedReason, shellWords };
