@@ -1645,6 +1645,27 @@ if (existed) {
   fs.writeFileSync(backupPath, original, { mode: originalMode, flag: 'wx' });
 }
 
+// The settings were read into `original` far above and the rename below replaces
+// whatever is at the path now, with no lock and no re-check in between. A writer
+// that lands in that window is a lost update, and an unrecoverable one: the
+// rename publishes a merge of the older snapshot, and the backup holds that same
+// older snapshot, so the newer content survives nowhere. Re-read and compare the
+// bytes instead. Aborting is the only safe answer -- silently re-merging would
+// publish a result the other writer never saw, and an installer has no business
+// picking a winner between two concurrent writes.
+function settingsChangedSinceRead() {
+  let current = '';
+  try {
+    const stat = fs.lstatSync(settingsPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) return true;
+    current = fs.readFileSync(settingsPath, 'utf8');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return existed;
+  }
+  return !existed || current !== original;
+}
+
 const temporaryPath = path.join(directory, `.${path.basename(settingsPath)}.better-rm.${process.pid}.tmp`);
 try {
   fs.writeFileSync(temporaryPath, `${JSON.stringify(settings, null, 2)}\n`, {
@@ -1652,6 +1673,14 @@ try {
     flag: 'wx'
   });
   fs.chmodSync(temporaryPath, originalMode);
+  if (settingsChangedSinceRead()) {
+    // fail() exits, so the catch below never runs; drop the temp file first.
+    try { fs.unlinkSync(temporaryPath); } catch (_) {}
+    const recovery = backupPath === ''
+      ? ''
+      : ` The content this run read is kept at ${backupPath}.`;
+    fail(`Settings changed on disk while they were being merged; nothing was written: ${settingsPath}.${recovery} Re-run the installer.`);
+  }
   fs.renameSync(temporaryPath, settingsPath);
 } catch (error) {
   try { fs.unlinkSync(temporaryPath); } catch (_) {}

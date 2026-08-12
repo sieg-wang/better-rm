@@ -572,6 +572,78 @@ assert_equal "a failed settings merge leaves the settings untouched" \
 assert_equal "a failed settings merge leaves no hook backup behind" "0" \
     "$(find "$HALF_HOME/.claude" -maxdepth 1 -name 'protect-important-paths.js.better-rm.bak.*' | wc -l | tr -d ' ')"
 
+# The merge reads the settings once and renames the merged temp file over them
+# much later. Anything written in between was silently lost: the rename replaced
+# it with a merge of the older snapshot, and the backup held that same older
+# snapshot, so the newer content survived nowhere. Inject the competing write
+# from inside the merge, when the temp file is written -- after the read, and
+# before any check the installer can make just ahead of the rename.
+CONCURRENT_HOME="$TMP_ROOT/concurrent-merge-home"
+mkdir -p "$CONCURRENT_HOME/.claude"
+CONCURRENT_SETTINGS="$CONCURRENT_HOME/.claude/settings.json"
+printf '{"env":{"FIRST_READ":"yes"}}\n' > "$CONCURRENT_SETTINGS"
+CONCURRENT_REPLACEMENT='{"env":{"WRITTEN_BY_SOMEONE_ELSE":"yes"}}'
+CONCURRENT_MARKER="$TMP_ROOT/concurrent-merge-marker"
+CONCURRENT_PRELOAD="$TMP_ROOT/concurrent-merge-preload.js"
+cat > "$CONCURRENT_PRELOAD" <<'PRELOAD'
+'use strict';
+// Preloaded into every node the installer starts. Only the settings merge writes
+// a `.better-rm.<pid>.tmp` file, and only after it has read the settings, so
+// this stands in for a writer landing inside the read/rename window.
+const fs = require('fs');
+const target = process.env.BETTER_RM_TEST_CONCURRENT_TARGET;
+const replacement = process.env.BETTER_RM_TEST_CONCURRENT_CONTENT;
+const marker = process.env.BETTER_RM_TEST_CONCURRENT_MARKER;
+if (target && replacement && marker) {
+  const write = fs.writeFileSync;
+  fs.writeFileSync = function (file, ...rest) {
+    const result = write.call(fs, file, ...rest);
+    if (typeof file === 'string' && file.includes('.better-rm.') && file.endsWith('.tmp')) {
+      write.call(fs, target, `${replacement}\n`);
+      write.call(fs, marker, 'hit\n');
+    }
+    return result;
+  };
+}
+PRELOAD
+CONCURRENT_STATUS=0
+CONCURRENT_OUTPUT=$(
+    cd "$TMP_ROOT" &&
+    NODE_OPTIONS="--require $CONCURRENT_PRELOAD" \
+    BETTER_RM_TEST_CONCURRENT_TARGET="$CONCURRENT_SETTINGS" \
+    BETTER_RM_TEST_CONCURRENT_CONTENT="$CONCURRENT_REPLACEMENT" \
+    BETTER_RM_TEST_CONCURRENT_MARKER="$CONCURRENT_MARKER" \
+    HOME="$CONCURRENT_HOME" CLAUDE_CONFIG_DIR= "$INSTALLER" -a claude --global 2>&1
+) || CONCURRENT_STATUS=$?
+if [ -s "$CONCURRENT_MARKER" ]; then
+    pass "the concurrent settings write was injected"
+else
+    fail "the concurrent settings write was injected"
+    printf '%s\n' "$CONCURRENT_OUTPUT" >&2
+fi
+if [ "$CONCURRENT_STATUS" -ne 0 ]; then
+    pass "settings changed during the merge abort the install"
+else
+    fail "settings changed during the merge abort the install"
+fi
+assert_equal "settings changed during the merge are not overwritten" \
+    "$CONCURRENT_REPLACEMENT" "$(cat "$CONCURRENT_SETTINGS")"
+assert_contains "the abort reports that the settings changed on disk" \
+    "$CONCURRENT_OUTPUT" "changed on disk"
+assert_equal "an aborted merge leaves no temporary settings file behind" "0" \
+    "$(find "$CONCURRENT_HOME/.claude" -maxdepth 1 -name '.settings.json.better-rm.*.tmp' | wc -l | tr -d ' ')"
+
+# Anti-tautology: the same route with nothing writing underneath still installs.
+UNCONTENDED_HOME="$TMP_ROOT/uncontended-merge-home"
+mkdir -p "$UNCONTENDED_HOME/.claude"
+printf '{"env":{"FIRST_READ":"yes"}}\n' > "$UNCONTENDED_HOME/.claude/settings.json"
+assert_success "an uncontended merge still rewrites the settings" bash -c "
+    cd '$TMP_ROOT' &&
+    HOME='$UNCONTENDED_HOME' CLAUDE_CONFIG_DIR= '$INSTALLER' -a claude --global"
+assert_equal "an uncontended merge keeps the pre-existing keys" "yes" \
+    "$(node -e 'process.stdout.write(String(require(process.argv[1]).env.FIRST_READ))' \
+        "$UNCONTENDED_HOME/.claude/settings.json")"
+
 # A hook that exits 0 with no output is an ALLOW under every agent contract in
 # this repo, so a truncated or 0-byte runtime hook does not merely fail to
 # update — it disarms the guard completely. That state must be unreachable no
