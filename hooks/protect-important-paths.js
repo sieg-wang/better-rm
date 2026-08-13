@@ -110,9 +110,58 @@ function decodeAnsiCEscape(input, slashIndex) {
   return { value: `\\${escape}`, end: slashIndex + 1 };
 }
 
+// Read a heredoc's delimiter, starting just past the '<<' (or '<<-') operator.
+// The delimiter can be quoted or backslash-escaped, and the quoting is what tells
+// the SHELL whether to expand the body -- it is not our business here, we only
+// need the text that ends the body.
+// 讀 heredoc 的結束標記。標記可以被引號或反斜線包住，那個引號決定 shell 會不會展開內文
+// ——這裡不管展開，只需要「什麼字串會結束這段內文」。
+function heredocDelimiter(input, start) {
+  let index = start;
+  while (index < input.length && (input[index] === ' ' || input[index] === '\t')) index += 1;
+  let delimiter = '';
+  let quote = '';
+  // Any quoting at all on the delimiter makes the body LITERAL: no parameter
+  // expansion, no command substitution. That is the shell's own switch for
+  // whether the body can execute anything, so it decides whether this guard
+  // reads the body as text or as something with commands hiding in it.
+  // 結束標記只要帶引號，內文就是字面的：不做參數展開、也不做命令替換。這是 shell 自己
+  // 用來決定「這段內文能不能執行東西」的開關，所以也由它決定守衛要不要往裡面看。
+  let quoted = false;
+  while (index < input.length) {
+    const char = input[index];
+    if (quote) {
+      if (char === quote) quote = '';
+      else delimiter += char;
+      index += 1;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+      quoted = true;
+      index += 1;
+    } else if (char === '\\' && index + 1 < input.length) {
+      delimiter += input[index + 1];
+      quoted = true;
+      index += 2;
+    } else if (/[\s;&|()<>]/.test(char)) {
+      break;
+    } else {
+      delimiter += char;
+      index += 1;
+    }
+  }
+  return { delimiter, end: index, quoted };
+}
+
 function shellWords(command) {
   const words = [];
   const dynamicExpansions = [];
+  // Bodies lifted OUT of the word stream, each remembering which '<<' word it
+  // belongs to, so commandTargets can hand a body back to a shell carrier and to
+  // nothing else.
+  // 從字流裡抽出來的 heredoc 內文，各自記得屬於哪一個 '<<'，好讓 commandTargets 只把它
+  // 交還給 shell carrier。
+  const heredocs = [];
+  const pendingHeredocs = [];
   const input = String(command || '');
   let word = '';
   let wordHasDynamicExpansion = false;
@@ -187,6 +236,65 @@ function shellWords(command) {
       }
     } else if (char === '"' || char === "'") {
       quote = char;
+    } else if (char === '<' && input[index + 1] === '<' && input[index + 2] !== '<') {
+      // A HEREDOC, not two redirections. The body that follows is DATA: this
+      // guard was tokenising it as shell, so a line of ordinary prose became a
+      // command, and a line whose first word is an expansion became an
+      // unknowable executable -- assumed to be rm, with its operands refused
+      // as '/'. Measured on 2026-08-13: a `git commit -F -` message written in
+      // this repository's own style was refused, twice, with no override.
+      // The operator and its delimiter stay in the stream as a redirection so
+      // the operand scans skip them; the body goes to the side, addressed by the
+      // index of this operator word, and only a shell carrier gets it back.
+      // '<<<' is a here-STRING and is excluded above -- it has no body.
+      // 這是 heredoc，不是兩個重導向。後面的內文是「資料」：這道守衛原本把它當 shell 斷
+      // 詞，於是一行散文變成一條命令，而以展開開頭的那一行變成不可知的執行檔——被假設成
+      // rm，操作元以 '/' 被拒。2026-08-13 實測擋掉兩次 `git commit -F -`。
+      // 運算子與結束標記留在字流裡當重導向（讓操作元掃描跳過），內文則移到旁邊，用這個
+      // 運算子的索引定址，只有 shell carrier 拿得回去。'<<<' 是 here-string，上面已排除。
+      if (word) pushWord(word), word = '';
+      const stripTabs = input[index + 2] === '-';
+      pushWord(stripTabs ? '<<-' : '<<');
+      const operatorIndex = words.length - 1;
+      const parsed = heredocDelimiter(input, index + (stripTabs ? 3 : 2));
+      pushWord(parsed.delimiter);
+      pendingHeredocs.push({
+        operatorIndex, delimiter: parsed.delimiter, stripTabs, quoted: parsed.quoted,
+      });
+      index = parsed.end - 1;
+    } else if (char === '\n' && pendingHeredocs.length > 0) {
+      // The bodies begin on the next line, in the order the operators appeared.
+      // 內文從下一行開始，順序與運算子出現的順序相同。
+      if (word) pushWord(word), word = '';
+      let position = index + 1;
+      for (const pending of pendingHeredocs) {
+        const bodyLines = [];
+        const bodyStart = position;
+        while (position <= input.length) {
+          let lineEnd = input.indexOf('\n', position);
+          const atEnd = lineEnd === -1;
+          if (atEnd) lineEnd = input.length;
+          const line = input.slice(position, lineEnd);
+          position = lineEnd + 1;
+          // An unterminated heredoc runs to the end of the input, exactly as a
+          // shell reading a script that stops mid-heredoc would see it.
+          if ((pending.stripTabs ? line.replace(/^\t+/, '') : line) === pending.delimiter) break;
+          bodyLines.push(line);
+          if (atEnd) break;
+        }
+        heredocs.push({
+          operatorIndex: pending.operatorIndex,
+          body: bodyLines.join('\n'),
+          // Where the body sits in the ORIGINAL text, so the substitution scan
+          // can be told to leave a literal body alone.
+          quoted: pending.quoted,
+          bodyStart,
+          bodyEnd: Math.min(position, input.length),
+        });
+      }
+      pendingHeredocs.length = 0;
+      pushWord('\n');
+      index = Math.min(position, input.length) - 1;
     } else if (';&|()<>\n'.includes(char)) {
       if (word) pushWord(word), word = '';
       pushWord(char);
@@ -200,6 +308,7 @@ function shellWords(command) {
   if (escaped) word += '\\';
   if (word) pushWord(word);
   Object.defineProperty(words, 'dynamicExpansions', { value: dynamicExpansions });
+  Object.defineProperty(words, 'heredocs', { value: heredocs });
   return words;
 }
 
@@ -610,7 +719,14 @@ function commandTargets(command, depth = 0) {
   // Redirections (`<`, `>`) stay within a simple command; they are not command
   // terminators. The rm/rmdir argument scan must skip a redirection and its
   // operand and keep collecting targets, or a leading `>/dev/null` hides them.
-  const redirectors = new Set(['<', '>']);
+  // `<<` and `<<-` are the same shape -- operator plus operand -- and their
+  // operand is a delimiter, never a path. The body they introduce is not in this
+  // word stream at all; it sits beside it, addressed by the operator's index.
+  // `<<` 與 `<<-` 形狀相同：運算子加操作元，而那個操作元是結束標記、不是路徑。它們帶出
+  // 來的內文根本不在這串字裡，而是放在旁邊、用運算子的索引定址。
+  const redirectors = new Set(['<', '>', '<<', '<<-']);
+  // operator word index -> the heredoc body it introduced.
+  const heredocBodies = new Map((words.heredocs || []).map((entry) => [entry.operatorIndex, entry.body]));
   const terminators = new Set([';', '&', '|', '(', ')', '\n']);
   const controlWords = new Set([
     'if', 'then', 'elif', 'else', 'fi',
@@ -627,7 +743,24 @@ function commandTargets(command, depth = 0) {
     ...shellCarriers,
     'rm', 'rmdir', 'better-rm',
   ]);
-  const substitutions = commandSubstitutions(command);
+  // A heredoc with a QUOTED delimiter is literal: the shell performs no
+  // substitution inside it, so neither does this scan. Blanking those spans (and
+  // only those) is what keeps ordinary text out of the command reader while a
+  // body with an UNQUOTED delimiter -- where `$(rm -rf /etc)` really does run
+  // before anyone reads the result -- is still scanned in full.
+  // Measured: without this, a commit message quoting the very example this guard
+  // exists for (a backtick-wrapped `$CMD -rf /`) was refused, through a heredoc
+  // whose delimiter was quoted and whose contents the shell never touched.
+  // 結束標記有引號的 heredoc 是字面的：shell 不在裡面做任何替換，這個掃描也就不做。只把
+  // 那些區段抹白，未加引號的內文照舊整段掃（那裡的 `$(rm -rf /etc)` 是真的會執行）。
+  const literalBodies = (words.heredocs || []).filter((entry) => entry.quoted);
+  const scannable = literalBodies.length === 0 ? command : literalBodies.reduce(
+    (text, entry) => text.slice(0, entry.bodyStart)
+      + ' '.repeat(entry.bodyEnd - entry.bodyStart)
+      + text.slice(entry.bodyEnd),
+    String(command || ''),
+  );
+  const substitutions = commandSubstitutions(scannable);
   if (substitutions.length > 0) {
     if (depth >= 8) targets.push('/');
     else {
@@ -870,6 +1003,15 @@ function commandTargets(command, depth = 0) {
     } else if (shellCarriers.has(executable)) {
       const nestedCommands = [];
       for (; i < words.length && !separators.has(words[i]); i += 1) {
+        // `bash <<EOF` has no -c: the heredoc body IS the script, and every rm in
+        // it runs. This is the one place a body is code rather than data, and it
+        // is why the body is kept beside the word stream instead of discarded.
+        // `bash <<EOF` 沒有 -c：那段內文就是腳本本身，裡面的每一個 rm 都會執行。這是
+        // 內文唯一算「程式碼」的地方，也正是它被留在旁邊而不是丟掉的理由。
+        if (heredocBodies.has(i)) {
+          nestedCommands.push(heredocBodies.get(i));
+          continue;
+        }
         const option = words[i];
         if (
           executable === 'fish'

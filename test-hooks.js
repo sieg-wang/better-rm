@@ -152,6 +152,18 @@ const blocked = [
   // 而後者在兩道守衛上都是放行的。刪掉解析後的那條，等於把保護 /etc 的意義整個拿掉。
   'rm -rf /private/etc',
   'rm -rf /private/var',
+  // A heredoc body is DATA -- unless the heredoc feeds a shell, where it is the
+  // script itself and every rm in it really runs.
+  // heredoc 內文是資料——除非它餵給的是一個 shell，那時它就是腳本本身。
+  "bash <<'EOF'\nrm -rf /etc\nEOF",
+  'bash <<EOF\nrm -rf /usr\nEOF',
+  "sh <<'EOF'\nrm -rf /boot\nEOF",
+  'bash -s <<EOF\nrm -rf /var\nEOF',
+  'zsh <<-EOF\n\trm -rf /opt\nEOF',
+  // An UNQUOTED delimiter still expands, so a command substitution inside the
+  // body is executed by the shell before the reader ever sees it.
+  // 未加引號的結束標記仍會展開，內文裡的命令替換會先被執行。
+  'cat <<EOF\n$(rm -rf /boot)\nEOF',
   // The outer single quotes keep the continuation literal, so it is the INNER
   // shell that joins the lines -- the nested parse has to remove it too.
   "bash -c 'rm -rf \\\n/boot'",
@@ -242,6 +254,34 @@ const allowed = [
   // follow /private/etc onto the list.
   // 比對維持精確比對：保護的是目錄本身、不是它的內容。/private/tmp 是暫存工作的地方，
   // 不可以跟著 /private/etc 一起被加進清單。
+  // A heredoc body is data, and this guard was reading it as shell. The refusals
+  // below are the ones actually measured on this machine on 2026-08-13: a commit
+  // message written in this repository's own house style, and a Makefile being
+  // written to disk. In both, the first word of a line is an expansion, so the
+  // executable was unknowable, the command was assumed to be rm, and an operand
+  // holding another expansion was refused with '/' as the target. Nothing in
+  // either body is ever executed.
+  // heredoc 內文是資料，而這道守衛把它當成 shell 在讀。下面兩列是 2026-08-13 實際被擋
+  // 下來的東西：一則照本 repo 慣例寫的 commit 訊息，以及一份正在寫入磁碟的 Makefile。
+  // 兩者的某一行都以展開開頭，於是執行檔不可知、被假設成 rm，該行另一個展開就被以 '/'
+  // 為由拒絕。這兩份內文沒有任何一個字會被執行。
+  "git commit -F - <<'MSG'\n`_age_days` is now a wrapper over `_age_seconds`/`_stamp_at`: the floor tests\nMSG",
+  "cat > Makefile <<'EOF'\nclean:\n\trm -rf $(BUILD)\nEOF",
+  "cat > run.sh <<'EOF'\nrm -rf /etc\nEOF",
+  'cat <<EOF > notes.txt\nplain prose, nothing runs here\nEOF',
+  "tee f <<'EOF'\nrm -rf /usr\nEOF",
+  // <<- strips leading TABS from the terminator; the body is still data.
+  "cat <<-'EOF' > f\n\trm -rf /var\n\tEOF",
+  // A QUOTED delimiter makes the body literal, so the shell performs no
+  // substitution in it and neither may this guard. The unquoted twin of the first
+  // row is in `blocked` above, which is the whole point of the pair.
+  // 結束標記加了引號，內文就是字面的：shell 不做任何替換，守衛也不能做。這一列未加引號
+  // 的雙胞胎在上面的 blocked 裡。
+  "cat <<'EOF'\n$(rm -rf /boot)\nEOF",
+  'cat <<\\EOF\n$(rm -rf /usr)\nEOF',
+  // The message this guard refused on 2026-08-13: prose that QUOTES the very
+  // example the fail-closed rule exists for.
+  "git commit -F - <<'MSG'\nAssuming an unknowable executable is rm must stay -- `CMD=rm; $CMD -rf /` really is rm.\nMSG",
   'rm -rf /private/etc/some-config',
   'rm -rf /private/var/folders/xx/scratch',
   'rm -rf /private/tmp/scratch',
