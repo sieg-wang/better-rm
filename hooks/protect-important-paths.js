@@ -119,7 +119,27 @@ function shellWords(command) {
   for (let index = 0; index < input.length; index += 1) {
     const char = input[index];
     if (escaped) {
-      word += char;
+      // A backslash-newline is a LINE CONTINUATION, and bash deletes BOTH
+      // characters before it tokenises anything -- unquoted and inside double
+      // quotes alike (measured with od(1): `/et\<nl>c` and `"/et\<nl>c"` both
+      // arrive as /etc, while the single-quoted spelling keeps the backslash and
+      // the newline, which is why this branch is never reached inside single
+      // quotes). Keeping the newline in the word instead spelled the target
+      // '\n/etc' -- a string on no list -- so `rm -rf \<nl>/etc` passed the one
+      // guard standing on the agent path, where there is no trash, no ledger and
+      // no undo. The executable was readable the same way: `r\<nl>m` is the word
+      // rm, and it really does run /bin/rm (measured: it answered with rm's own
+      // usage message).
+      // The same misreading also refused ordinary work: a continuation line was
+      // parsed as a fresh command, so a line beginning with "$HOME" became an
+      // unknowable executable, was assumed to be rm, and had its operands
+      // refused with '/' as the target.
+      // 反斜線接換行是行接續，bash 在斷詞前就把兩個字元一起刪掉（未加引號與雙引號內
+      // 皆然，od(1) 實測；單引號內原樣保留，所以這個分支在單引號裡永遠不會走到）。
+      // 把換行留在字裡會讓目標拼成 '\n/etc'——任何清單上都沒有的字串——於是
+      // `rm -rf \<nl>/etc` 直接穿過 agent 路徑上唯一的守衛。同一個誤讀也會反過來擋掉
+      // 普通指令：續行被當成新命令，開頭是 "$HOME" 就成了不可知的執行檔。
+      if (char !== '\n') word += char;
       escaped = false;
     } else if (quote === 'ansi-c') {
       if (char === "'") quote = '';

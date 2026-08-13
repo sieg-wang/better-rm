@@ -124,6 +124,27 @@ const blocked = [
   // \u and \U ANSI-C unicode escapes must decode to the protected path.
   "bash -c $'rm -rf \\u002fetc'",
   "bash -c $'rm -rf \\U0000002fboot'",
+  // A backslash-newline is a LINE CONTINUATION: bash deletes both characters
+  // before it tokenises anything, so every command below runs rm on a protected
+  // path. The guard kept the newline inside the word instead, spelling the
+  // target '\n/etc' -- a string on no list -- so the one guard on the agent path
+  // was bypassed by pressing Enter early, with no shell trick and nothing to
+  // quote. Measured with bash -c and od(1) rather than assumed: the unquoted and
+  // double-quoted spellings both arrive as /etc, and `r\<nl>m` really does
+  // execute /bin/rm (it answered with rm's own usage message).
+  // 反斜線接換行是「行接續」：bash 在斷詞之前就把這兩個字元一起刪掉。守衛卻把換行留
+  // 在字裡，於是目標拼成 '\n/etc'——任何清單上都沒有的字串——agent 路徑上唯一的守衛，
+  // 只要提早按 Enter 就繞過去了。以 bash -c 加 od(1) 實測而非推測。
+  'rm -rf \\\n/etc',
+  'rm -rf \\\n  /Users',
+  'rm \\\n-rf \\\n/System',
+  'r\\\nm -rf /etc',
+  'rm -rf /et\\\nc',
+  'rm -rf "/et\\\nc"',
+  'sudo rm -rf \\\n/var',
+  // The outer single quotes keep the continuation literal, so it is the INNER
+  // shell that joins the lines -- the nested parse has to remove it too.
+  "bash -c 'rm -rf \\\n/boot'",
 ];
 
 const allowed = [
@@ -193,6 +214,23 @@ const allowed = [
   // Redirections trailing an unprotected target stay allowed.
   'rm -rf build >/dev/null',
   'rm -rf build 2>/dev/null',
+  // Single quotes preserve a backslash-newline literally (measured: the argument
+  // arrives as / e t \ <nl> c), so this names a file with a newline in it and not
+  // /etc. Removing the continuation inside single quotes would refuse an
+  // ordinary filename.
+  // 單引號原樣保留反斜線接換行（實測引數就是 / e t \ <nl> c），所以這指的是一個名字裡
+  // 有換行的檔案，不是 /etc。
+  "rm -rf '/et\\\nc'",
+  // The same misreading, running the other way. A continuation line was parsed
+  // as a fresh command, so its first word became the executable; when that word
+  // is an expansion the executable is unknowable, the command is assumed to be
+  // rm, and its operands are refused with '/' as the target. Ordinary multi-line
+  // work was refused with no override -- measured live on 2026-08-13, when this
+  // very shape refused a baseline-capture command in this repository.
+  // 同一個誤讀的反方向：續行被當成新命令，第一個字成了執行檔；那個字是展開時執行檔
+  // 不可知，於是假設是 rm，操作元被以 '/' 為目標拒絕。普通的多行指令被擋，且無從蓋過。
+  'node run.js \\\n  "$HOME" "$HOME/projects"',
+  'echo a \\\n  "$PWD/b"',
 ];
 
 // Finding: a shell carrier nested past the recursion depth cap (8) must fail
