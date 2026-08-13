@@ -215,6 +215,50 @@ const blocked = [
   // /home/tester/../* is not recognised as /home/*.
   'rm -rf /home/tester/../*',
   'rm -rf /etc/../et[c]',
+  // A pattern whose PARENT is protected selects that directory's whole contents.
+  // Measured: `rm -rf /etc/*` hands rm all 79 entries of /etc. These were refused
+  // before this round by the blanket "any dir/* could select .git" rule, and were
+  // allowed for a few hours after it was replaced -- found by an acceptance
+  // review, not by this file, which is why they are rows now.
+  // 父目錄受保護的樣式，選中的是那個目錄的全部內容（實測 /etc/* 是 79 個項目）。
+  'rm -rf /etc/*',
+  'rm -rf /private/etc/*',
+  'rm -rf /home/tester/*',
+  'rm -rf ~/*',
+  // ...and the parent is matched as a pattern too.
+  'rm -rf /Vol*/Coca',
+  'rm -rf /S*/V*/Data',
+  // POSIX character classes are honoured by bash inside a bracket.
+  'rm -rf /et[[:alpha:]]',
+  'rm -rf /et[^x]',
+  // The protected alternative LAST, so a brace expansion that stops early misses
+  // it. Every other brace row here puts it first, which cannot tell.
+  'rm -rf /{a,b,c,d,etc}',
+  // An expansion too big to read is not answered from a partial list.
+  `rm -rf ${'{a,b}'.repeat(40)}`,
+  // find: options before the path, a root that only exists after expansion, the
+  // exec command's OWN operands, and -ok as the only thing making it a deleter.
+  'find -x /etc -delete',
+  'find $DIR -delete',
+  'find "$DIR" -delete',
+  'find . -exec rm -rf /etc \\;',
+  'find . -execdir rm -rf /usr +',
+  'find . -ok rm -rf /etc \\;',
+  // A heredoc body executed by a shell that is NOT the heredoc's own command.
+  // All measured to run the rm, all refused before this round, all allowed after
+  // it until the command-position check landed.
+  // 由「不是它自己的命令」的 shell 執行的 heredoc 內文。
+  'cat <<EOF | bash\nrm -rf /etc\nEOF',
+  "cat <<'EOF' | bash\nrm -rf /etc\nEOF",
+  "cat <<'EOF' | sudo bash\nrm -rf /etc\nEOF",
+  'source /dev/stdin <<EOF\nrm -rf /etc\nEOF',
+  'tee /dev/null <<EOF | bash\nrm -rf /etc\nEOF',
+  // Two heredocs, and it is the SECOND that feeds the shell: a body must go back
+  // to the operator it belongs to, not to whichever came first.
+  "cat <<'A' ; bash <<'B'\njust data\nA\nrm -rf /etc\nB",
+  // <<- strips leading tabs from the TERMINATOR. If it stops, the body swallows
+  // the command after it and that command stops being read.
+  'cat <<-EOF\n\tjust data\n\tEOF\nrm -rf /etc',
   // The outer single quotes keep the continuation literal, so it is the INNER
   // shell that joins the lines -- the nested parse has to remove it too.
   "bash -c 'rm -rf \\\n/boot'",
@@ -366,6 +410,21 @@ const allowed = [
   // protected path cannot name it.
   'rm -rf /home/tester/projects/*',
   'rm -rf /mnt/c/project/*',
+  // Two heredocs where an earlier body reaches end-of-input and a later delimiter
+  // is quoted. This THREW -- ' '.repeat(-1) -- and a throw on a PreToolUse gate is
+  // exit 2, which BLOCKS the tool call: twenty bytes of legitimate shell, hard
+  // refused, with a message blaming the hook's input. The realistic way in is a
+  // typo'd delimiter, exactly when the user is already confused.
+  // 前一段內文吃到輸入結尾、後一個結束標記又加了引號時，這裡會丟例外（repeat(-1)），而
+  // PreToolUse 丟例外等於 exit 2、會擋掉那次呼叫。最可能的入口是打錯結束標記。
+  "cat <<'A' <<'B'\nbody",
+  "cat <<'A' <<'B'\nA",
+  "cat <<A <<'B'\nbody",
+  "cat <<-'A' <<-'B'\nbody",
+  // A shell name that is an ARGUMENT, not a command, leaves the body as data.
+  "grep bash <<'EOF'\nrm -rf /etc\nEOF",
+  // Ordinary brace use is nowhere near the expansion cap.
+  'rm -f report-{2024,2025}-{01,02,03}.csv',
   'rm -rf /private/etc/some-config',
   'rm -rf /private/var/folders/xx/scratch',
   'rm -rf /private/tmp/scratch',

@@ -269,7 +269,20 @@ function shellWords(command) {
       let position = index + 1;
       for (const pending of pendingHeredocs) {
         const bodyLines = [];
-        const bodyStart = position;
+        // Clamped, and this is not cosmetic. A body that runs to the end of the
+        // input leaves `position` one PAST the end, so a SECOND heredoc in the
+        // same command started after the end while its end was clamped to it --
+        // a negative span, and the ' '.repeat() that masks a literal body threw
+        // `Invalid count value: -1`. On a PreToolUse gate a throw is exit 2,
+        // which BLOCKS the tool call, so twenty bytes of legitimate shell
+        // (`cat <<'A' <<'B'` and one line of body) hard-refused with a message
+        // that blamed the hook's input. Measured; found by an acceptance review,
+        // not by any of the three suites.
+        // 夾住上下界，而且這不是美化。內文一路吃到輸入結尾時 position 會停在結尾之後一
+        // 格，於是同一條命令裡的「第二個 heredoc」起點在終點之後——一段負長度，用來把
+        // 字面內文抹白的 ' '.repeat() 就丟出 Invalid count value: -1。PreToolUse 丟例外
+        // 等於 exit 2，會擋掉那次工具呼叫。
+        const bodyStart = Math.min(position, input.length);
         while (position <= input.length) {
           let lineEnd = input.indexOf('\n', position);
           const atEnd = lineEnd === -1;
@@ -547,9 +560,24 @@ function hasUnresolvedTargetExpansion(isDynamic) {
 // Brace expansion, bounded. `{a,b}` is not a glob operator -- the shell expands
 // it into separate words before matching -- so it is expanded here too.
 // 大括號展開（有上限）。它不是 glob 運算子，shell 會在比對之前先把它展成多個字。
+// The cap has to bound the RECURSION, not just what the recursion pushes. It did
+// not: every alternative's recursive call ran to completion before the cap was
+// consulted, so the cost was 2^groups and the string `{a,b}` twenty-six times --
+// 137 bytes -- took 6.8 seconds end to end, past the hook's 5,000 ms timeout.
+// A timed-out PreToolUse hook is documented as rendering no decision and NOT
+// blocking, so this was not a slow guard, it was an ABSENT one; and bash does
+// not expand a QUOTED brace word at all, so a word inert to the shell could
+// knock the gate out. Measured before the fix: `rm -rf '{a,b}x40' ; rm -rf /etc`
+// exceeded 12 s and never answered, while the same pair with /etc first denied.
+// 上限必須限制「遞迴」，不是只限制遞迴推進去的結果。原本每一個分支的遞迴呼叫都會整個
+// 跑完才去看上限，成本是 2^群組數：`{a,b}` 重複 26 次（137 bytes）端到端要 6.8 秒，超過
+// hook 的 5,000 ms 逾時。逾時的 PreToolUse hook 依官方文件不做任何裁決、也不會擋下工具
+// 呼叫，所以那不是「慢」，是「不存在」；而 bash 根本不展開加了引號的大括號，於是一個對
+// shell 完全無作用的字就能把閘門打掉。
 function expandBraces(pattern, limit = 64) {
+  if (limit <= 0) return { patterns: [], truncated: true };
   const open = pattern.indexOf('{');
-  if (open === -1) return [pattern];
+  if (open === -1) return { patterns: [pattern], truncated: false };
   let depth = 0;
   let close = -1;
   const commas = [];
@@ -560,19 +588,19 @@ function expandBraces(pattern, limit = 64) {
       if (depth === 0) { close = i; break; }
     } else if (pattern[i] === ',' && depth === 1) commas.push(i);
   }
-  if (close === -1 || commas.length === 0) return [pattern];
+  if (close === -1 || commas.length === 0) return { patterns: [pattern], truncated: false };
   const head = pattern.slice(0, open);
   const tail = pattern.slice(close + 1);
   const bounds = [open, ...commas, close];
-  const expanded = [];
+  const patterns = [];
   for (let i = 0; i < bounds.length - 1; i += 1) {
+    if (patterns.length >= limit) return { patterns, truncated: true };
     const alternative = pattern.slice(bounds[i] + 1, bounds[i + 1]);
-    for (const rest of expandBraces(`${head}${alternative}${tail}`, limit)) {
-      if (expanded.length >= limit) return expanded;
-      expanded.push(rest);
-    }
+    const nested = expandBraces(`${head}${alternative}${tail}`, limit - patterns.length);
+    for (const expansion of nested.patterns) patterns.push(expansion);
+    if (nested.truncated) return { patterns, truncated: true };
   }
-  return expanded;
+  return { patterns, truncated: false };
 }
 
 // Does the bracket expression starting at `open` close, and where?
@@ -581,9 +609,37 @@ function bracketEnd(pattern, open) {
   let i = open + 1;
   if (pattern[i] === '!' || pattern[i] === '^') i += 1;
   if (pattern[i] === ']') i += 1;
-  while (i < pattern.length && pattern[i] !== ']') i += 1;
+  while (i < pattern.length && pattern[i] !== ']') {
+    // A `[:class:]` carries a ']' of its own; the bracket does not end there.
+    if (pattern[i] === '[' && pattern[i + 1] === ':') {
+      const classEnd = pattern.indexOf(':]', i + 2);
+      if (classEnd !== -1) { i = classEnd + 2; continue; }
+    }
+    i += 1;
+  }
   return i < pattern.length ? i : -1;
 }
+
+// POSIX character classes, because bash honours them inside a bracket and a
+// guard that does not is answering a different question: measured,
+// `rm -rf /et[[:alpha:]]` hands rm /etc.
+// bash 在中括號裡認 POSIX 字元類別，不認的守衛回答的是另一個問題：實測
+// `rm -rf /et[[:alpha:]]` 交給 rm 的就是 /etc。
+const POSIX_CLASSES = {
+  alpha: (c) => /[A-Za-z]/.test(c),
+  digit: (c) => /[0-9]/.test(c),
+  alnum: (c) => /[0-9A-Za-z]/.test(c),
+  lower: (c) => /[a-z]/.test(c),
+  upper: (c) => /[A-Z]/.test(c),
+  space: (c) => /\s/.test(c),
+  blank: (c) => c === ' ' || c === '\t',
+  punct: (c) => /[!-/:-@[-`{-~]/.test(c),
+  print: (c) => /[ -~]/.test(c),
+  graph: (c) => /[!-~]/.test(c),
+  cntrl: (c) => /[\x00-\x1f\x7f]/.test(c),
+  xdigit: (c) => /[0-9A-Fa-f]/.test(c),
+  word: (c) => /\w/.test(c),
+};
 
 function bracketMatches(spec, character) {
   let body = spec;
@@ -594,6 +650,17 @@ function bracketMatches(spec, character) {
   }
   let matched = false;
   for (let i = 0; i < body.length; i += 1) {
+    if (body[i] === '[' && body[i + 1] === ':') {
+      const end = body.indexOf(':]', i + 2);
+      if (end !== -1) {
+        const test = POSIX_CLASSES[body.slice(i + 2, end)];
+        // An unknown class name is not ours to interpret; treat it as matching so
+        // the verdict errs toward refusing rather than toward missing.
+        if (!test || test(character)) matched = true;
+        i = end + 1;
+        continue;
+      }
+    }
     if (body[i + 1] === '-' && i + 2 < body.length) {
       if (character >= body[i] && character <= body[i + 2]) matched = true;
       i += 2;
@@ -683,7 +750,10 @@ function hasGlob(value) {
 function globCanMatchGit(value) {
   const basename = value.slice(value.lastIndexOf('/') + 1);
   if (!hasGlob(basename)) return false;
-  return expandBraces(basename).some((pattern) => globMatchesPath(pattern, '.git'));
+  const expansion = expandBraces(basename);
+  // A truncated expansion has words this never saw; one of them could be .git.
+  if (expansion.truncated) return true;
+  return expansion.patterns.some((pattern) => globMatchesPath(pattern, '.git'));
 }
 
 // Today's rules, asked of ONE already-normalised spelling. Split out of
@@ -756,7 +826,16 @@ function protectedSpelling(spelling, home, extraDirs, cwd) {
   // 而上面每一條規則比的都是字串，`/et[c]` 不是 /etc 這個字串。
   if (hasGlob(normalized)) {
     const base = cwd.replace(/\/+$/, '');
-    for (const pattern of expandBraces(normalized)) {
+    const expansion = expandBraces(normalized);
+    // An expansion that hit the cap was not fully read, so one of the words this
+    // guard never saw could be a protected path. Refuse rather than answer from a
+    // partial list -- and nothing ordinary reaches this: 64 alternatives is far
+    // past `report-{2024,2025}-{01,02,03}.csv`, and a word big enough to truncate
+    // is one bash would expand into millions.
+    // 展開撞到上限就代表沒讀完，沒看到的那些字裡可能就有受保護的路徑。寧可拒絕，也不要
+    // 拿一份不完整的清單去回答。普通用法碰不到這裡。
+    if (expansion.truncated) return normalized;
+    for (const pattern of expansion.patterns) {
       // '..' is collapsed lexically here, and only here. Everywhere else in this
       // file a lexical collapse would be wrong, because '..' after a symlink
       // resolves onto the TARGET's parent -- but a pattern cannot be resolved at
@@ -770,6 +849,26 @@ function protectedSpelling(spelling, home, extraDirs, cwd) {
       const patternBase = absolute.slice(absolute.lastIndexOf('/') + 1);
       if (globMatchesPath(patternBase, '.git')) return normalized;
       if (exactDirs.some((directory) => globMatchesPath(absolute, directory))) return normalized;
+      // A pattern whose PARENT is protected selects that directory's entire
+      // contents. `rm -rf /etc/*` hands rm all 79 entries of /etc (measured) --
+      // /etc/sudoers, /etc/master.passwd, /etc/ssh -- and `rm -rf ~/*` empties
+      // the home directory. Both were refused before this round, by the blanket
+      // "any dir/* could select .git" rule that was replaced here for being
+      // wrong about dotfiles; that rule was over-broad AND was the only thing
+      // standing between the agent path and these. Asking about the parent keeps
+      // them refused without bringing the over-refusal back: `dist/*` has an
+      // unprotected parent and stays ordinary.
+      // The parent is matched as a PATTERN too, so `/Vol*/Coca` -- measured, bash
+      // hands rm the mounted volume /Volumes/Coca -- and `/S*/V*/Data` are read
+      // for what they can name rather than for how they are spelled.
+      // 父目錄受保護的樣式，選中的是那個目錄的全部內容：`rm -rf /etc/*` 實測會把 /etc 底下
+      // 79 個項目全部交給 rm，`rm -rf ~/*` 則清空家目錄。這兩個在本輪之前是被擋的——擋它們
+      // 的正是那條「凡 dir/* 都可能選到 .git」的粗規則，而那條規則同時是錯的、也是 agent
+      // 路徑上唯一擋住這些的東西。改問父目錄，就能留住這份保護而不把誤擋帶回來。父目錄本身
+      // 也當樣式比對，所以 `/Vol*/Coca`（實測交給 rm 的是掛載中的 /Volumes/Coca）也算。
+      const patternParent = absolute.slice(0, absolute.lastIndexOf('/')) || '/';
+      if (exactDirs.some((directory) => globMatchesPath(patternParent, directory))) return normalized;
+      if (MOUNT_PARENTS.some((parent) => globMatchesPath(patternParent, parent))) return normalized;
       // Mount roots need nothing here: the loop above already reads `/Volumes/*`
       // as a first-level entry under a mount parent and refuses it, because that
       // rule never cared whether the name was literal. Measured -- an added
@@ -937,6 +1036,44 @@ function commandTargets(command, depth = 0) {
       + text.slice(entry.bodyEnd),
     String(command || ''),
   );
+  // A heredoc body is data because of what its command does with it -- and the
+  // command that READS a heredoc is not always the one that RUNS it. Measured,
+  // all nine refused before this round and allowed after it until this block:
+  //   cat <<EOF | bash          cat <<'EOF' | sudo bash     source /dev/stdin <<EOF
+  //   eval "$(cat <<'EOF' … )"  bash -c "$(cat <<'EOF' … )" bash < <(cat <<EOF … )
+  // Asking only whether the heredoc's OWN command is a shell missed every one.
+  // So when a shell appears anywhere in COMMAND POSITION in this command line,
+  // every body in it is read as code as well. Command position matters: it keeps
+  // `grep bash <<'EOF'` -- where bash is a search string -- data.
+  // heredoc 內文之所以是資料，取決於它的命令拿它做什麼；而「讀」heredoc 的命令未必是「執
+  // 行」它的那個。只問 heredoc 自己的命令是不是 shell，上面九種全都漏掉。因此只要這條命令
+  // 列裡有 shell 出現在「命令位置」，裡面每一段內文就同時當程式碼讀。限定命令位置是為了讓
+  // `grep bash <<'EOF'`（bash 是搜尋字串）維持資料。
+  const bodies = words.heredocs || [];
+  if (bodies.length > 0) {
+    const carriers = new Set([...shellCarriers, 'eval', 'source', '.']);
+    const transparent = new Set([
+      'sudo', 'env', 'command', 'builtin', 'nohup', 'setsid', 'exec', 'time',
+      'nice', 'timeout', '!', 'coproc', 'noglob',
+    ]);
+    let atCommandPosition = true;
+    let carrierPresent = false;
+    for (const word of words) {
+      if (separators.has(word)) { atCommandPosition = true; continue; }
+      if (!atCommandPosition) continue;
+      const name = path.basename(word);
+      if (carriers.has(name)) { carrierPresent = true; break; }
+      if (transparent.has(name) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
+      atCommandPosition = false;
+    }
+    if (carrierPresent) {
+      for (const entry of bodies) {
+        if (depth >= 8) targets.push('/');
+        else targets.push(...commandTargets(entry.body, depth + 1));
+      }
+    }
+  }
+
   const substitutions = commandSubstitutions(scannable);
   if (substitutions.length > 0) {
     if (depth >= 8) targets.push('/');
@@ -1266,18 +1403,57 @@ function commandTargets(command, depth = 0) {
       // find 只是在讀，而絕大多數 find 都是在讀，全部當成刪除工具會擋掉列檔案。
       const searchRoots = [];
       let deletes = false;
-      while (i < words.length && !terminators.has(words[i]) && !words[i].startsWith('-')) {
-        searchRoots.push(words[i]);
+      // Options come BEFORE the paths on BSD find (-x -d -s -E -H -L -P, and -f
+      // whose operand IS a path). Stopping at the first '-' made `find -x /etc
+      // -delete` collect no roots at all and fall back to '.', so the one path it
+      // was given went unjudged -- measured, that command deletes /etc.
+      // BSD find 的選項排在路徑前面（-f 的操作元本身就是路徑）。碰到第一個 '-' 就停下，會
+      // 讓 `find -x /etc -delete` 一個 root 都沒收到、退回 '.'，於是它拿到的那條路徑根本
+      // 沒被判——實測那條命令會刪掉 /etc。
+      const leadingOptions = new Set(['-x', '-d', '-s', '-E', '-H', '-L', '-P', '-h', '-X']);
+      while (i < words.length && !terminators.has(words[i])) {
+        // A root that only exists after expansion is unknowable, exactly as an rm
+        // operand is: `find $DIR -delete` and `find "$DIR" -delete` both delete
+        // (measured), and the rm branch already folds that shape to '/'. The find
+        // branch pushed the raw word, so the same unknowable got two answers.
+        // 展開後才知道的 root 與 rm 的操作元一樣不可知：`find $DIR -delete` 與
+        // `find "$DIR" -delete` 實測都會刪。rm 那邊早就把這種形狀折成 '/'，find 這邊卻推
+        // 原字，同一種不可知得到兩種答案。
+        const asRoot = (index) => (hasUnresolvedTargetExpansion(dynamicExpansions[index]) ? '/' : words[index]);
+        if (words[i] === '-f') {
+          if (i + 1 < words.length && !terminators.has(words[i + 1])) searchRoots.push(asRoot(i + 1));
+          i += 2;
+          continue;
+        }
+        if (leadingOptions.has(words[i])) { i += 1; continue; }
+        if (words[i].startsWith('-')) break;
+        searchRoots.push(asRoot(i));
         i += 1;
       }
+      const execOperands = [];
       for (; i < words.length && !terminators.has(words[i]); i += 1) {
         if (words[i] === '-delete') deletes = true;
         if (['-exec', '-execdir', '-ok', '-okdir'].includes(words[i])
-          && ['rm', 'rmdir'].includes(path.basename(words[i + 1] || ''))) deletes = true;
+          && ['rm', 'rmdir'].includes(path.basename(words[i + 1] || ''))) {
+          deletes = true;
+          // The exec command has operands of its own, and they are not the search
+          // roots: `find . -exec rm -rf /etc \;` runs rm on /etc once per file
+          // found (measured). Judging only the roots read the wrong argument.
+          // exec 那個命令自己也有操作元，而它們不是搜尋起點：`find . -exec rm -rf /etc \;`
+          // 每找到一個檔案就對 /etc 跑一次 rm（實測）。只判 roots 是讀錯了引數。
+          for (let j = i + 2; j < words.length && !terminators.has(words[j]) && words[j] !== '+'; j += 1) {
+            if (words[j] === '{}' || words[j].startsWith('-')) continue;
+            execOperands.push(
+              hasUnresolvedTargetExpansion(dynamicExpansions[j]) ? '/' : words[j],
+            );
+          }
+        }
       }
       if (deletes) {
         // GNU find defaults to the working directory when no path is given.
-        for (const root of searchRoots.length > 0 ? searchRoots : ['.']) targets.push(root);
+        const roots = searchRoots.length > 0 ? searchRoots : ['.'];
+        for (let r = 0; r < roots.length; r += 1) targets.push(roots[r]);
+        for (const operand of execOperands) targets.push(operand);
       }
     } else if (executable === 'eval') {
       const nestedCommand = [];
