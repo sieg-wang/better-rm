@@ -437,6 +437,7 @@ is_protected() {
     # single trailing colon would make the user's own working directory undeletable.
     # read -ra rather than letting the variable word-split: the latter would also
     # glob an entry containing a wildcard, while the hook only splits.
+    local -a declared_extras=()
     if [ -n "${BETTER_RM_PROTECTED_DIRS:-}" ]; then
         local extra_entry
         local -a extra_entries=()
@@ -448,6 +449,11 @@ is_protected() {
             fi
             extra_entry=$(normalize_path "$extra_entry")
             extra_entry="${extra_entry%/}"
+            # 收下正規化後的拼寫，讓底下的身分比對能問同一批項目，而不是把這段解析
+            # 再抄一次。
+            # Keep the normalised spelling so the identity comparison below asks about
+            # the same entries instead of carrying a second copy of this parse.
+            declared_extras[${#declared_extras[@]}]="$extra_entry"
             if [ "$real_path" = "$extra_entry" ] || [ "$norm_path" = "$extra_entry" ]; then
                 return 0  # 使用者宣告的受保護目錄
             fi
@@ -482,6 +488,52 @@ is_protected() {
         fi
     done
     
+    # 引數自己就是一條連結時，上面每一輪比的都是「拼寫」——而拼寫是字串，清單上的項目
+    # 卻是一個物件。這台 Mac 上 /etc、/var、/home 都是連結：/ETC 與 /etc 是同一條連結
+    # （實測 stat 同 dev:ino），卻只有小寫那種寫法被擋下來；是真目錄的項目則在
+    # readlink -f 之後全都折對了，因為那一段有問過檔案系統。所以這裡也去問檔案系統
+    # 「這個引數是不是清單上那一項」，而不是把字串折成小寫——後者是在猜這顆卷宗分不分
+    # 大小寫，猜錯的那一邊會誤擋。
+    # 兩邊都用 stat 的預設語意（不加 -L，BSD 與 GNU 皆為 lstat）：問的是「引數是不是那
+    # 一項」，不是「兩者指到同一處」；跟著解析下去會讓 ~/applink -> /Applications 這種
+    # 捷徑變成刪不掉的，而那正是 2c34f8d 立下不解析規則的理由。
+    # 成本：只有「引數本身是連結」才會走到（其餘情形上面的 readlink -f 已經答過），而且
+    # 只對清單裡本身也是連結的項目 stat（[ -L ] 是內建測試，不 fork）。
+    # A symlink argument is judged by its SPELLING once every rule above has missed,
+    # and a spelling is a string while a list entry is an object. On this Mac /etc,
+    # /var and /home are symlinks: /ETC names the same link as /etc (measured with
+    # stat: one dev:ino) and only the lower-case spelling was refused, while every
+    # entry that is a real directory folded correctly because readlink -f had asked
+    # the filesystem. So ask the filesystem here too -- is this argument that entry?
+    # -- rather than folding the string, which guesses at whether the volume is
+    # case-insensitive and refuses ordinary paths where the guess is wrong.
+    # stat's default semantics on BOTH sides (no -L; lstat on BSD and GNU alike):
+    # the question is whether the argument IS that entry, never whether the two
+    # point at the same place. Following either side would make ~/applink ->
+    # /Applications undeletable, which is the false positive 2c34f8d exists to
+    # prevent.
+    if [ -L "$path" ]; then
+        local link_identity declared_identity declared_entry
+        link_identity=$(stat -c '%d:%i' "$path" 2>/dev/null ||
+            stat -f '%d:%i' "$path" 2>/dev/null || true)
+        if [ -n "$link_identity" ]; then
+            for declared_entry in "${PROTECTED_DIRS[@]}" \
+                                  ${declared_extras[@]+"${declared_extras[@]}"}; do
+                declared_entry="${declared_entry%/}"
+                [ -n "$declared_entry" ] || continue
+                # 清單上不是連結的項目不可能是這個引數，而且這個測試是內建的，不 fork。
+                # An entry that is not a link cannot be this argument, and the test is
+                # a builtin.
+                [ -L "$declared_entry" ] || continue
+                declared_identity=$(stat -c '%d:%i' "$declared_entry" 2>/dev/null ||
+                    stat -f '%d:%i' "$declared_entry" 2>/dev/null || true)
+                if [ -n "$declared_identity" ] && [ "$link_identity" = "$declared_identity" ]; then
+                    return 0  # 引數就是清單上那一條連結，只是換了一種拼寫
+                fi
+            done
+        fi
+    fi
+
     return 1  # 不是受保護的目錄
 }
 

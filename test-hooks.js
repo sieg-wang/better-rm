@@ -807,6 +807,10 @@ let resolutionChecks = 0;
   fs.symlinkSync(`${box}/loop-b`, `${box}/loop-a`);
   fs.symlinkSync(`${box}/loop-a`, `${box}/loop-b`);
   fs.symlinkSync(linkedActual, linkedDeclared);
+  // An alias for the fixture root itself, so a declared entry can be reached by
+  // a SECOND spelling without depending on a case-insensitive filesystem.
+  // 給 fixture 根目錄一個別名，讓「同一個項目的第二種拼寫」不必依賴不分大小寫的檔案系統。
+  fs.symlinkSync(box, `${box}/self`);
 
   const boxEnv = {
     HOME: boxHome,
@@ -899,6 +903,29 @@ let resolutionChecks = 0;
   denies(`${box}/linked-secrets/.`, 'the same, spelled absolutely');
   allows('actual', 'what the declared link points at was never the declared entry');
 
+  // ...and the hole that opens on the far side of that rule. When the argument
+  // IS a symlink, resolution stops there on purpose -- deleting a link cannot
+  // touch what it points at -- so the only thing still judging it is its
+  // spelling, and a spelling is a string while the entry is an OBJECT. Reach the
+  // declared link by a second spelling and the guard did not recognise it: this
+  // is the /ETC and /VAR row on macOS, where /etc is a symlink, /ETC names the
+  // same link (measured: one dev:ino) and only the lower-case spelling was
+  // refused. The fixture goes through an aliased parent instead of a case fold,
+  // so the row means the same thing on a case-sensitive filesystem.
+  // 這條規則的另一面所開的洞。引數本身是連結時解析會停住（刪連結碰不到 target），於是
+  // 只剩「拼寫」在判它——但拼寫是字串，清單上的項目卻是一個物件。用第二種拼寫指到同一
+  // 條宣告過的連結，守衛就認不出來了：這正是 macOS 上 /ETC 與 /VAR 那幾列。這裡走的是
+  // 別名父目錄而不是大小寫，所以在分大小寫的檔案系統上意義相同。
+  denies('self/linked-secrets', 'a declared entry reached by a second spelling is the same link');
+  denies(`${box}/self/linked-secrets`, 'the same, spelled absolutely');
+  // Anti-tautology: the rule must say "this argument IS a declared entry", not
+  // "anything reached through an alias is refused" and not "every symlink is
+  // refused". Both partners below are symlinks reached the same way.
+  // 反恆真：規則要說的是「這個引數就是清單上那一項」，不是「凡經別名一律拒絕」，也不是
+  // 「凡是連結一律拒絕」。下面兩列都是用同一種方式碰到的連結。
+  allows('self/link-to-secrets', 'an undeclared link reached through the alias is ordinary work');
+  allows('self/actual', 'an undeclared directory reached through the alias is ordinary work');
+
   // Two spellings name one object, or they do not: asked of the filesystem
   // rather than assumed from the platform. A case-insensitive volume can be
   // mounted on Linux and a case-SENSITIVE one formatted on macOS, so an
@@ -923,6 +950,18 @@ let resolutionChecks = 0;
     allows(`${foldedSpelling}/inside-item`, 'inside it is still ordinary work');
   } else {
     allows(foldedSpelling, 'a case-SENSITIVE filesystem: the folded spelling is a different path');
+  }
+  // The same question asked of a declared entry that IS a symlink, which is the
+  // exact shape of /ETC on this Mac: every declared entry that is a real
+  // directory folded correctly once the filesystem was consulted, and every one
+  // that is a symlink did not, because resolution stops at a link.
+  // 對「本身就是 symlink 的宣告項目」問同一個問題——這正是這台 Mac 上 /ETC 的形狀：
+  // 真目錄在問過檔案系統之後都折對了，是 symlink 的那幾個沒有，因為解析在連結處停住。
+  const foldedLinkSpelling = `${box}/LINKED-secrets`;
+  if (sameObject(linkedDeclared, foldedLinkSpelling)) {
+    denies(foldedLinkSpelling, 'a case-folded spelling of a declared symlink entry is that entry');
+  } else {
+    allows(foldedLinkSpelling, 'a case-SENSITIVE filesystem: the folded spelling is a different link');
   }
   const nfdSpelling = unicodeFixture.normalize('NFD');
   assert.notEqual(nfdSpelling, unicodeFixture, 'the Unicode fixture has no second encoding');

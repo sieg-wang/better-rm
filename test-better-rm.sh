@@ -4094,6 +4094,76 @@ else
     test_fail "宣告的目錄未被保護或內容被誤擋（目錄存在=$([ -d secrets ] && echo yes || echo no)；刪內容 exit=${extradirs_e2e_allowed}；訊息=${extradirs_e2e}）"
 fi
 
+test_item "宣告的項目本身是連結時，指到同一個物件的第二種拼寫仍受保護"
+# 引數自己是連結時 is_protected 不解析（刪連結碰不到 target），於是只剩「拼寫」在判
+# 它——但拼寫是字串，清單上的項目是一個物件。這台 Mac 上 /etc、/var、/home 都是連結：
+# /ETC 與 /etc 是同一條連結（實測同 dev:ino），卻只有小寫那種寫法被擋下來，而是真目錄
+# 的項目在 readlink -f 之後全都折對了。這裡用「別名父目錄」而不是大小寫造出第二種拼
+# 寫，所以這一項在分大小寫的檔案系統上測到的是同一件事。
+# A symlink argument is not resolved (deleting a link cannot touch its target), so
+# the only thing left judging it is its spelling -- and a spelling is a string
+# while a list entry is an OBJECT. On this Mac /etc, /var and /home are symlinks:
+# /ETC names the same link as /etc (measured: one dev:ino) and only the lower-case
+# spelling was refused, while every entry that is a real directory folded once
+# readlink -f had run. The second spelling here is made with an aliased parent
+# rather than a case fold, so the row means the same thing on a case-sensitive
+# filesystem.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+identity_home="$TEST_WORK_DIR/identity-home"
+mkdir -p "$identity_home" identity/actual
+ln -s "$TEST_WORK_DIR/identity/actual" "$TEST_WORK_DIR/identity/declared-link"
+ln -s "$TEST_WORK_DIR/identity/actual" "$TEST_WORK_DIR/identity/other-link"
+ln -s "$TEST_WORK_DIR/identity" "$TEST_WORK_DIR/identity-alias"
+identity_declared="$TEST_WORK_DIR/identity/declared-link"
+identity_unguarded=""
+identity_false_positive=""
+identity_probe_broken=""
+extradirs_says_yes "$TEST_WORK_DIR/identity-alias/declared-link" "$identity_declared" "$identity_home"
+case $? in
+    0) ;;
+    99) identity_probe_broken="$identity_probe_broken alias-spelling" ;;
+    *) identity_unguarded="$identity_unguarded $TEST_WORK_DIR/identity-alias/declared-link" ;;
+esac
+# 反恆真：規則要說的是「這個引數就是清單上那一項」，不是「凡是連結一律拒絕」，也不是
+# 「凡經別名碰到的一律拒絕」。三個對照全部是同樣方式碰到的路徑。
+# Anti-tautology: the rule must say "this argument IS that entry", not "every
+# symlink is refused" and not "anything reached through the alias is refused".
+for identity_ordinary in "$TEST_WORK_DIR/identity/other-link" \
+                         "$TEST_WORK_DIR/identity-alias/other-link" \
+                         "$TEST_WORK_DIR/identity/actual"; do
+    extradirs_says_yes "$identity_ordinary" "$identity_declared" "$identity_home"
+    case $? in
+        0) identity_false_positive="$identity_false_positive $identity_ordinary" ;;
+        99) identity_probe_broken="$identity_probe_broken $identity_ordinary" ;;
+        *) ;;
+    esac
+done
+if [ -z "$identity_unguarded" ] && [ -z "$identity_false_positive" ] &&
+   [ -z "$identity_probe_broken" ]; then
+    test_pass "同一條連結的第二種拼寫受保護，其他連結與 target 未被誤擋"
+else
+    test_fail "第二種拼寫未受保護:${identity_unguarded:- 無}；誤擋:${identity_false_positive:- 無}；抽取失敗:${identity_probe_broken:- 無}"
+fi
+
+test_item "同一條連結的第二種拼寫真的攔在 move_to_trash 前面（端到端）"
+# 上一項證明判斷認得那個物件，這一項證明那個判斷擋在真正的搬移之前。
+# The previous item proves the judgement recognises the object; this one proves it
+# gates the real move.
+identity_e2e=$(BETTER_RM_PROTECTED_DIRS="$identity_declared" \
+    "$BETTER_RM" -rf "$TEST_WORK_DIR/identity-alias/declared-link" 2>&1)
+identity_other_allowed=0
+BETTER_RM_PROTECTED_DIRS="$identity_declared" \
+    "$BETTER_RM" -rf "$TEST_WORK_DIR/identity-alias/other-link" >/dev/null 2>&1 ||
+    identity_other_allowed=$?
+if printf '%s' "$identity_e2e" | grep -q "拒絕刪除受保護的目錄" &&
+   [ -L "$identity_declared" ] && [ "$identity_other_allowed" -eq 0 ] &&
+   [ ! -L "$TEST_WORK_DIR/identity/other-link" ]; then
+    test_pass "第二種拼寫被拒絕，宣告的連結還在，其他連結仍可刪除"
+else
+    test_fail "第二種拼寫未被保護或誤擋（連結存在=$([ -L "$identity_declared" ] && echo yes || echo no)；刪其他連結 exit=${identity_other_allowed}；訊息=${identity_e2e}）"
+fi
+
 test_item "\$HOME 被拒絕且內容完好（端到端）"
 # 上一項證明清單被認定為受保護，這一項證明那個判斷真的攔在 move_to_trash 前面。
 # HOME 指向 sandbox，所以就算保護整個壞掉，被搬走的也只是 sandbox。

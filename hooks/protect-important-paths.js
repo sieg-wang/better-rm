@@ -488,8 +488,70 @@ function protectedReason(target, cwd, home, extraDirs = []) {
   const lexicalReason = protectedSpelling(lexical, home, extraDirs);
   if (lexicalReason) return lexicalReason;
   const resolved = resolvedTarget(target, cwd, home);
-  if (resolved === null || resolved === lexical) return null;
-  return protectedSpelling(resolved, home, extraDirs);
+  if (resolved !== null && resolved !== lexical) {
+    const resolvedReason = protectedSpelling(resolved, home, extraDirs);
+    if (resolvedReason) return resolvedReason;
+  }
+  return declaredLink(target, cwd, home, extraDirs);
+}
+
+// The one question left when the argument IS a symlink. Resolution stops there
+// on purpose -- deleting a link cannot touch what it points at -- so the only
+// thing still judging such an argument is its spelling, and a spelling is a
+// string while the entry on the list is an OBJECT. On this Mac /etc, /var and
+// /home are symlinks: /ETC names the same link as /etc (measured: one dev:ino)
+// and only the lower-case spelling was refused, while every declared entry that
+// is a real directory folded correctly the moment resolvedTarget() consulted the
+// filesystem. So ask the filesystem the same way here -- is this argument that
+// entry? -- rather than folding the string, which would be a guess about the
+// volume and wrong on a case-sensitive one.
+// It cannot widen the class it protects: the answer is yes only when the
+// argument IS a declared entry, so the ~/applink shortcut this rule exists to
+// keep deletable stays deletable, and so does every other link that merely
+// points at something declared.
+// 引數自己就是一條連結時，剩下的唯一問題。解析在那裡停住是刻意的（刪連結碰不到它指向
+// 的東西），於是只剩「拼寫」在判它——但拼寫是字串，清單上的項目是一個物件。這台 Mac 上
+// /etc、/var、/home 都是連結：/ETC 與 /etc 是同一條連結（實測同 dev:ino），卻只有小寫
+// 那種寫法被擋下來；而是真目錄的宣告項目，在 resolvedTarget 問過檔案系統之後全都折對
+// 了。所以這裡也去問檔案系統，而不是把字串折成小寫——後者是在猜這顆卷宗的性質，在分
+// 大小寫的檔案系統上會猜錯。這不會擴大保護範圍：只有「引數就是清單上那一項」才成立。
+function declaredLink(value, cwd, home, extraDirs) {
+  const absolute = absoluteSpelling(value, cwd, home);
+  if (absolute === null) return null;
+  // BigInt, not the default Number: an APFS inode is routinely larger than
+  // 2^53 (measured on this volume: /etc is ino 1152921500312571429), and a
+  // Number-typed inode is rounded. Two distinct links would then compare equal
+  // and this rule would refuse an unrelated path.
+  // 用 BigInt 而不是預設的 Number：APFS 的 inode 動輒超過 2^53（實測 /etc 是
+  // 1152921500312571429），Number 會捨入，兩條不同的連結就會比對成相等。
+  let argument;
+  try {
+    argument = fs.lstatSync(absolute, { bigint: true });
+  } catch (_) {
+    // The filesystem could not answer, exactly as in resolvedTarget(): nothing
+    // learned, so nothing changes. It must not throw -- this gate runs on every
+    // agent command, and an exception here denies every Bash call on the machine.
+    return null;
+  }
+  // Only a symlink argument can reach a verdict the two rules above missed. Any
+  // other kind of file was already handed to protectedSpelling() under the
+  // spelling the filesystem itself gave for it.
+  if (!argument.isSymbolicLink()) return null;
+  for (const entry of [...SYSTEM_DIRS, home, ...extraDirs]) {
+    const spelling = path.resolve(entry);
+    try {
+      const declared = fs.lstatSync(spelling, { bigint: true });
+      // lstat, not stat, on BOTH sides: the question is whether the argument is
+      // that entry, never whether the two point at the same place. Following
+      // either side would refuse ~/applink for naming /Applications.
+      // 兩邊都用 lstat 而不是 stat：問的是「引數是不是那一項」，不是「兩者指向同一處」。
+      if (!declared.isSymbolicLink()) continue;
+      if (declared.dev === argument.dev && declared.ino === argument.ino) return spelling;
+    } catch (_) {
+      // An entry that is not on this machine cannot be the argument.
+    }
+  }
+  return null;
 }
 
 function commandTargets(command, depth = 0) {
