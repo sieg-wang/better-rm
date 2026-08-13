@@ -997,7 +997,7 @@ function declaredLink(value, cwd, home, extraDirs) {
   return null;
 }
 
-function commandTargets(command, depth = 0) {
+function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
   const words = shellWords(command);
   const dynamicExpansions = words.dynamicExpansions || [];
   const targets = [];
@@ -1059,15 +1059,23 @@ function commandTargets(command, depth = 0) {
   // 行」它的那個。只問 heredoc 自己的命令是不是 shell，上面九種全都漏掉。因此只要這條命令
   // 列裡有 shell 出現在「命令位置」，裡面每一段內文就同時當程式碼讀。限定命令位置是為了讓
   // `grep bash <<'EOF'`（bash 是搜尋字串）維持資料。
+  // The flag is INHERITED into command substitutions, because the shell that
+  // runs the body can sit outside them: in `eval "$(cat <<'EOF' … )"` the
+  // heredoc belongs to `cat`, which is not a carrier, while the thing that
+  // executes the result is the `eval` one level up. Without inheriting, that
+  // shape was the last row still more permissive than the pushed baseline.
+  // 這個旗標會被帶進命令替換裡，因為真正執行內文的 shell 可能在外面：
+  // `eval "$(cat <<'EOF' … )"` 的 heredoc 屬於 cat（不是 carrier），執行它的是外面那個
+  // eval。不往下傳的話，這一種形狀就是最後一列仍比已推送基準寬鬆的。
   const bodies = words.heredocs || [];
-  if (bodies.length > 0) {
-    const carriers = new Set([...shellCarriers, 'eval', 'source', '.']);
-    const transparent = new Set([
-      'sudo', 'env', 'command', 'builtin', 'nohup', 'setsid', 'exec', 'time',
-      'nice', 'timeout', '!', 'coproc', 'noglob',
-    ]);
+  const carriers = new Set([...shellCarriers, 'eval', 'source', '.']);
+  const transparent = new Set([
+    'sudo', 'env', 'command', 'builtin', 'nohup', 'setsid', 'exec', 'time',
+    'nice', 'timeout', '!', 'coproc', 'noglob',
+  ]);
+  let carrierPresent = bodiesAreCodeFromCaller;
+  if (!carrierPresent) {
     let atCommandPosition = true;
-    let carrierPresent = false;
     for (const word of words) {
       if (separators.has(word)) { atCommandPosition = true; continue; }
       if (!atCommandPosition) continue;
@@ -1076,11 +1084,11 @@ function commandTargets(command, depth = 0) {
       if (transparent.has(name) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
       atCommandPosition = false;
     }
-    if (carrierPresent) {
-      for (const entry of bodies) {
-        if (depth >= 8) targets.push('/');
-        else targets.push(...commandTargets(entry.body, depth + 1));
-      }
+  }
+  if (carrierPresent) {
+    for (const entry of bodies) {
+      if (depth >= 8) targets.push('/');
+      else targets.push(...commandTargets(entry.body, depth + 1, true));
     }
   }
 
@@ -1089,7 +1097,7 @@ function commandTargets(command, depth = 0) {
     if (depth >= 8) targets.push('/');
     else {
       for (const nested of substitutions) {
-        targets.push(...commandTargets(nested, depth + 1));
+        targets.push(...commandTargets(nested, depth + 1, carrierPresent));
       }
     }
   }

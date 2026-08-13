@@ -253,6 +253,12 @@ const blocked = [
   "cat <<'EOF' | sudo bash\nrm -rf /etc\nEOF",
   'source /dev/stdin <<EOF\nrm -rf /etc\nEOF',
   'tee /dev/null <<EOF | bash\nrm -rf /etc\nEOF',
+  // The shell that runs the body sits OUTSIDE the substitution the heredoc lives
+  // in: the heredoc belongs to `cat`, which is not a carrier, and `eval` is one
+  // level up. This was the last shape still more permissive than the baseline.
+  // 執行內文的 shell 在命令替換「外面」：heredoc 屬於 cat（不是 carrier），eval 在上一層。
+  "eval \"$(cat <<'EOF'\nrm -rf /etc\nEOF\n)\"",
+  "bash -c \"$(cat <<'EOF'\nrm -rf /usr\nEOF\n)\"",
   // Two heredocs, and it is the SECOND that feeds the shell: a body must go back
   // to the operator it belongs to, not to whichever came first.
   "cat <<'A' ; bash <<'B'\njust data\nA\nrm -rf /etc\nB",
