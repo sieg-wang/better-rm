@@ -531,17 +531,159 @@ function hasUnresolvedTargetExpansion(isDynamic) {
   return Boolean(isDynamic);
 }
 
+// A glob is a QUESTION ABOUT PATHS, and this file used to answer only one small
+// part of it: "can the basename select a .git?", by building a regular
+// expression. That was wrong in three ways at once, all measured.
+//   rm -rf /et[c]   bash hands rm the path /etc   the guard said ALLOW
+//   rm -rf dist/*   bash never matches dist/.git  the guard REFUSED it
+//   rm -rf ****…    ~85 stars                     the regex exceeded the 5s timeout
+// The three share one cause: a pattern was turned into a regex and asked a
+// question about a string, instead of being matched against paths the way a
+// shell matches them. What follows is a matcher, not a translator.
+// glob 是一個「關於路徑」的問題，而這支檔案原本只回答其中很小的一塊（「basename 有沒有
+// 可能選到 .git」），做法是組一個正則。三個症狀同源：把 pattern 翻譯成正則去問一個關於
+// 字串的問題，而不是照 shell 的方式拿它去比對路徑。
+
+// Brace expansion, bounded. `{a,b}` is not a glob operator -- the shell expands
+// it into separate words before matching -- so it is expanded here too.
+// 大括號展開（有上限）。它不是 glob 運算子，shell 會在比對之前先把它展成多個字。
+function expandBraces(pattern, limit = 64) {
+  const open = pattern.indexOf('{');
+  if (open === -1) return [pattern];
+  let depth = 0;
+  let close = -1;
+  const commas = [];
+  for (let i = open; i < pattern.length; i += 1) {
+    if (pattern[i] === '{') depth += 1;
+    else if (pattern[i] === '}') {
+      depth -= 1;
+      if (depth === 0) { close = i; break; }
+    } else if (pattern[i] === ',' && depth === 1) commas.push(i);
+  }
+  if (close === -1 || commas.length === 0) return [pattern];
+  const head = pattern.slice(0, open);
+  const tail = pattern.slice(close + 1);
+  const bounds = [open, ...commas, close];
+  const expanded = [];
+  for (let i = 0; i < bounds.length - 1; i += 1) {
+    const alternative = pattern.slice(bounds[i] + 1, bounds[i + 1]);
+    for (const rest of expandBraces(`${head}${alternative}${tail}`, limit)) {
+      if (expanded.length >= limit) return expanded;
+      expanded.push(rest);
+    }
+  }
+  return expanded;
+}
+
+// Does the bracket expression starting at `open` close, and where?
+// A ']' immediately after '[' or '[!' is a literal, not the close.
+function bracketEnd(pattern, open) {
+  let i = open + 1;
+  if (pattern[i] === '!' || pattern[i] === '^') i += 1;
+  if (pattern[i] === ']') i += 1;
+  while (i < pattern.length && pattern[i] !== ']') i += 1;
+  return i < pattern.length ? i : -1;
+}
+
+function bracketMatches(spec, character) {
+  let body = spec;
+  let negated = false;
+  if (body.startsWith('!') || body.startsWith('^')) {
+    negated = true;
+    body = body.slice(1);
+  }
+  let matched = false;
+  for (let i = 0; i < body.length; i += 1) {
+    if (body[i + 1] === '-' && i + 2 < body.length) {
+      if (character >= body[i] && character <= body[i + 2]) matched = true;
+      i += 2;
+    } else if (body[i] === character) matched = true;
+  }
+  return negated ? !matched : matched;
+}
+
+// One path COMPONENT against one pattern component. Iterative, with a single
+// backtrack point per '*', so the cost is bounded by pattern x text rather than
+// exploding: the regular expression this replaces took over five seconds on
+// ~85 stars (measured), which on a PreToolUse gate is a timeout, and a timed-out
+// gate is a gate that did not answer.
+// 單一路徑「段」對單一 pattern 段。迭代式、每個 '*' 只留一個回溯點，成本上限是
+// pattern×text 而不會爆炸：它取代的那個正則在約 85 個 '*' 時要五秒以上（實測），對
+// PreToolUse 閘門而言那就是逾時，而逾時的閘門等於沒有回答。
+function componentMatches(pattern, text) {
+  let p = 0;
+  let t = 0;
+  let starPattern = -1;
+  let starText = 0;
+  while (t < text.length) {
+    const character = pattern[p];
+    if (p < pattern.length && character === '[') {
+      const end = bracketEnd(pattern, p);
+      if (end !== -1) {
+        if (bracketMatches(pattern.slice(p + 1, end), text[t])) {
+          p = end + 1;
+          t += 1;
+          continue;
+        }
+      } else if (character === text[t]) {
+        p += 1;
+        t += 1;
+        continue;
+      }
+    } else if (p < pattern.length && (character === '?' || character === text[t])) {
+      p += 1;
+      t += 1;
+      continue;
+    } else if (p < pattern.length && character === '*') {
+      starPattern = p;
+      starText = t;
+      p += 1;
+      continue;
+    }
+    if (starPattern !== -1) {
+      starText += 1;
+      t = starText;
+      p = starPattern + 1;
+      continue;
+    }
+    return false;
+  }
+  while (p < pattern.length && pattern[p] === '*') p += 1;
+  return p === pattern.length;
+}
+
+// A whole path. Two rules that a regex translation cannot express and that are
+// exactly where the old answer went wrong:
+//   - '*', '?' and '[...]' never cross a '/', so the two sides must have the
+//     same number of components;
+//   - none of them matches a LEADING DOT. `dist/*` cannot select `dist/.git`
+//     (measured in bash: it does not), which is why refusing it was wrong. A
+//     pattern component that starts with a literal '.' can, which is why `.*`
+//     and `.gi*` are still refused.
+// 兩條正則翻譯表達不出來、而舊答案正好錯在這裡的規則：萬用字元不跨 '/'；而且都不匹配
+// 開頭的點——`dist/*` 選不到 `dist/.git`（bash 實測），所以擋它是錯的；以字面 '.' 開頭的
+// pattern 段則選得到，所以 `.*` 與 `.gi*` 照樣擋。
+function globMatchesPath(pattern, target) {
+  const patternParts = pattern.split('/');
+  const targetParts = target.split('/');
+  if (patternParts.length !== targetParts.length) return false;
+  for (let i = 0; i < patternParts.length; i += 1) {
+    if (targetParts[i].startsWith('.') && !patternParts[i].startsWith('.')) return false;
+    if (!componentMatches(patternParts[i], targetParts[i])) return false;
+  }
+  return true;
+}
+
+function hasGlob(value) {
+  return /[*?[\]{}]/.test(value);
+}
+
+// Kept as its own name because test-guard-parity.js asks the hook this exact
+// question when it classifies a declared cross-layer difference.
 function globCanMatchGit(value) {
-  const basename = path.basename(value);
-  if (!/[*?\[\]{}]/.test(basename)) return false;
-  const alternatives = basename.replace(/^\{(.+)\}$/, '$1').split(',');
-  return alternatives.some((pattern) => {
-    const expression = pattern
-      .replace(/[.+^$()|\\]/g, '\\$&')
-      .replace(/\*/g, '.*')
-      .replace(/\?/g, '.');
-    try { return new RegExp(`^${expression}$`).test('.git'); } catch (_) { return true; }
-  });
+  const basename = value.slice(value.lastIndexOf('/') + 1);
+  if (!hasGlob(basename)) return false;
+  return expandBraces(basename).some((pattern) => globMatchesPath(pattern, '.git'));
 }
 
 // Today's rules, asked of ONE already-normalised spelling. Split out of
@@ -549,7 +691,7 @@ function globCanMatchGit(value) {
 // and of what the filesystem says it is, without either being a second copy.
 // 同一組規則，對「一個已正規化的拼寫」提問。從 protectedReason 拆出來，好讓字面拼寫
 // 與檔案系統解析後的拼寫走完全相同的規則，而不是兩份副本。
-function protectedSpelling(spelling, home, extraDirs) {
+function protectedSpelling(spelling, home, extraDirs, cwd) {
   let normalized = spelling;
 
   // macOS firmlink: /System/Volumes/Data/X and /X are the same object. Measured
@@ -600,9 +742,41 @@ function protectedSpelling(spelling, home, extraDirs) {
   if (normalized === '.git' || normalized.endsWith(`${path.sep}.git`)) return normalized;
 
   if (/(^|[\\/])\.git([\\/]|$)/.test(normalized)) return normalized;
-  // A glob that can select .git is unsafe even though it cannot be resolved beforehand.
-  // 可能選中 .git 的萬用字元無法事先解析，因此一律視為不安全。
-  if (globCanMatchGit(normalized)) return normalized;
+
+  // A pattern cannot be expanded here -- the filesystem it will be expanded
+  // against is the one that exists a moment from now -- but it can be ASKED
+  // whether it is capable of naming something protected. Two questions, and the
+  // second one was never asked before: can it select a .git, and can it name a
+  // protected directory itself? `rm -rf /et[c]` hands rm the path /etc (measured
+  // with a fake rm printing its argv) and was allowed by every rule above it,
+  // because each of them compares strings and `/et[c]` is not the string /etc.
+  // 樣式在這裡展不開（它要對付的是「下一刻」的檔案系統），但可以問它「有沒有能力指到
+  // 受保護的東西」。兩個問題，而第二個以前從來沒問過：它能不能選到 .git、它能不能指名
+  // 一個受保護的目錄本身。`rm -rf /et[c]` 交給 rm 的就是 /etc（用會印 argv 的假 rm 實測），
+  // 而上面每一條規則比的都是字串，`/et[c]` 不是 /etc 這個字串。
+  if (hasGlob(normalized)) {
+    const base = cwd.replace(/\/+$/, '');
+    for (const pattern of expandBraces(normalized)) {
+      // '..' is collapsed lexically here, and only here. Everywhere else in this
+      // file a lexical collapse would be wrong, because '..' after a symlink
+      // resolves onto the TARGET's parent -- but a pattern cannot be resolved at
+      // all, so the choice is between collapsing and not asking: without it
+      // `/Users/sieg/../*` is not recognised as `/Users/*`. Collapsing can only
+      // make this rule match MORE patterns, never fewer.
+      // '..' 只在這裡做詞法折疊。本檔其他地方這樣做都是錯的（'..' 經過 symlink 會落在
+      // target 的父目錄），但樣式根本無法解析，所以選擇只有「折疊」或「不問」：不折疊的
+      // 話 `/Users/sieg/../*` 就不會被認出是 `/Users/*`。折疊只會讓這條規則match 更多。
+      const absolute = path.posix.normalize(pattern.startsWith('/') ? pattern : `${base}/${pattern}`);
+      const patternBase = absolute.slice(absolute.lastIndexOf('/') + 1);
+      if (globMatchesPath(patternBase, '.git')) return normalized;
+      if (exactDirs.some((directory) => globMatchesPath(absolute, directory))) return normalized;
+      // A pattern one level under a mount parent can name a mount root, which is
+      // protected for the same reason /Volumes/Backup is.
+      // 掛載父目錄底下一層的樣式可以指到掛載根，理由與 /Volumes/Backup 相同。
+      const patternParent = absolute.slice(0, absolute.lastIndexOf('/'));
+      if (patternBase !== '' && MOUNT_PARENTS.includes(patternParent)) return normalized;
+    }
+  }
   return null;
 }
 
@@ -623,11 +797,11 @@ function protectedSpelling(spelling, home, extraDirs) {
 // 其中一邊就會開洞。TOCTOU：判定發生在命令執行之前，這個競態是前置閘門本質上就有的。
 function protectedReason(target, cwd, home, extraDirs = []) {
   const lexical = normalizedTarget(target, cwd, home);
-  const lexicalReason = protectedSpelling(lexical, home, extraDirs);
+  const lexicalReason = protectedSpelling(lexical, home, extraDirs, cwd);
   if (lexicalReason) return lexicalReason;
   const resolved = resolvedTarget(target, cwd, home);
   if (resolved !== null && resolved !== lexical) {
-    const resolvedReason = protectedSpelling(resolved, home, extraDirs);
+    const resolvedReason = protectedSpelling(resolved, home, extraDirs, cwd);
     if (resolvedReason) return resolvedReason;
   }
   return declaredLink(target, cwd, home, extraDirs);
@@ -1211,4 +1385,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { MOUNT_PARENTS, SYSTEM_DIRS, commandTargets, evaluate, globCanMatchGit, normalizedTarget, protectedReason, shellWords };
+module.exports = { MOUNT_PARENTS, SYSTEM_DIRS, commandTargets, evaluate, globCanMatchGit, hasGlob, normalizedTarget, protectedReason, shellWords };

@@ -184,6 +184,37 @@ const blocked = [
   'find /usr -exec rm -rf {} +',
   'find /var -type d -execdir rm -rf {} \\;',
   'find / -name core -delete',
+  // A pattern that can NAME a protected path. bash expands it and hands rm the
+  // real thing -- measured with a fake rm printing its argv:
+  //   rm -rf /et[c]   ->   ARGV: [-rf] [/etc]
+  // Every rule above these compares strings, and `/et[c]` is not the string
+  // /etc, so all of them missed it.
+  // 能「指名」受保護路徑的樣式。bash 展開後交給 rm 的就是真正那一個（用會印 argv 的假
+  // rm 實測）。上面每一條規則比的都是字串，而 `/et[c]` 不是 /etc 這個字串。
+  'rm -rf /et[c]',
+  'rm -rf /et?',
+  'rm -rf /va[r]',
+  'rm -rf /User[s]',
+  'rm -rf /hom[e]',
+  'rm -rf /et[a-z]',
+  'rm -rf /et[!x]',
+  'rm -rf /e*',
+  'rm -rf /*',
+  'rm -rf /{etc,var}',
+  // HOME is on the list like any other entry, so a pattern that can name it is
+  // refused for the same reason.
+  'rm -rf /home/*',
+  // One level under a mount parent is a mount root.
+  'rm -rf /mnt/*',
+  'rm -rf /Volumes/*',
+  // A pattern component that starts with a literal dot CAN select a .git.
+  'rm -rf .gi*',
+  'rm -rf .g[i]t',
+  // ...and the same patterns reached through '..'. A pattern cannot be resolved,
+  // so '..' is collapsed lexically before the question is asked; without that,
+  // /home/tester/../* is not recognised as /home/*.
+  'rm -rf /home/tester/../*',
+  'rm -rf /etc/../et[c]',
   // The outer single quotes keep the continuation literal, so it is the INNER
   // shell that joins the lines -- the nested parse has to remove it too.
   "bash -c 'rm -rf \\\n/boot'",
@@ -316,6 +347,25 @@ const allowed = [
   // xargs that does not reach rm is ordinary.
   'echo hi | xargs -n1 echo',
   'find . -name "*.o" | xargs grep -l main',
+  // The other half of the glob question, and the half that was refusing ordinary
+  // work: `*`, `?` and `[...]` do not match a LEADING DOT in bash, so none of
+  // these can select a .git. They were all refused before, on a rule that turned
+  // `*` into the regex `.*` and asked whether it matched the string '.git'.
+  // glob 問題的另一半，也是原本在擋普通工作的那一半：bash 的 `*`、`?`、`[...]` 都不匹配
+  // 開頭的點，所以下面沒有一個選得到 .git。它們原本全部被擋，因為舊規則把 `*` 變成正則
+  // 的 `.*` 再去問它匹不匹配 '.git' 這個字串。
+  'rm -rf dist/*',
+  'rm -rf build/*',
+  'rm -rf node_modules/*',
+  'rm -rf *.log',
+  'rm -rf ~/Library/Developer/Xcode/DerivedData/*',
+  'rm -rf *',
+  'rm -rf ./*',
+  'rm -rf /tmp/*',
+  // A wildcard never crosses a '/', so a pattern with more components than a
+  // protected path cannot name it.
+  'rm -rf /home/tester/projects/*',
+  'rm -rf /mnt/c/project/*',
   'rm -rf /private/etc/some-config',
   'rm -rf /private/var/folders/xx/scratch',
   'rm -rf /private/tmp/scratch',
@@ -1147,6 +1197,33 @@ let resolutionChecks = 0;
 // 正對照不能用「宣告項目自己」：那條路徑在清單上，拒絕來自字面比對，根本走不到身分
 // 規則（實測：把身分規則整個 stub 成 null，那條斷言照樣通過，等於什麼都沒證明）。
 // 下面用的是「經別名父目錄碰到同一條宣告連結」，只有身分規則能拒絕它。
+// A pattern must be answered in bounded time. The regular expression this
+// replaced backtracked catastrophically: measured 0.93 ms at 20 stars, 8.8 ms at
+// 34, roughly 1.35x per two more, so around 85 stars it passed the hook's 5,000 ms
+// timeout in settings.json -- and a gate that times out is a gate that did not
+// answer. Both a matching and a NON-matching heavy pattern are timed, because
+// backtracking blows up on the failing side.
+// 樣式必須在有界時間內得到答案。被取代的那個正則會災難性回溯（實測 20 個星號 0.93 ms、
+// 34 個 8.8 ms，每多兩個約 1.35 倍），約 85 個就超過 settings.json 裡 5,000 ms 的逾時
+// ——逾時的閘門等於沒有回答。匹配與不匹配兩種重載都要計時，因為回溯是在「不匹配」那一
+// 側爆炸的。
+let globTimingChecks = 0;
+{
+  const time = (command) => {
+    const started = process.hrtime.bigint();
+    const verdict = evaluate(claude(command), env)?.hookSpecificOutput?.permissionDecision;
+    return { verdict, ms: Number(process.hrtime.bigint() - started) / 1e6 };
+  };
+  const stars = '*'.repeat(300);
+  const matching = time(`rm -rf .${stars}git`);
+  assert.equal(matching.verdict, 'deny', 'a heavy pattern that can select .git is still refused');
+  assert.ok(matching.ms < 500, `a matching heavy pattern took ${matching.ms}ms`);
+  const failing = time(`rm -rf .${stars}gitx`);
+  assert.notEqual(failing.verdict, 'deny', 'a heavy pattern that cannot select .git is ordinary');
+  assert.ok(failing.ms < 500, `a NON-matching heavy pattern took ${failing.ms}ms`);
+  globTimingChecks += 4;
+}
+
 let deviceChecks = 0;
 {
   const box = fs.realpathSync(fs.mkdtempSync(`${os.tmpdir()}/better-rm-hook-device-`));
@@ -1396,7 +1473,7 @@ async function runOpenCodePluginChecks() {
 // 否則「沒跑到」會看起來是綠的。
 process.exitCode = 1;
 runOpenCodePluginChecks().then((pluginChecks) => {
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + pluginChecks}`);
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + pluginChecks}`);
   process.exitCode = 0;
 }).catch((error) => {
   console.error(error && error.stack ? error.stack : error);

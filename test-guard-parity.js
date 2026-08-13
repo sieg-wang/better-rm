@@ -935,16 +935,24 @@ declareCrossLayerClass({
   // Two shapes, both meaning "the hook did not read this as a filename": it
   // resolved the text to a DIFFERENT path than the literal one (~, $HOME,
   // ${HOME}, and a trailing backslash, which the hook strips as a separator), or
-  // it refused the text as a pattern that could select .git without being able
-  // to expand it. Neither can hide a hole: the direction is the hook refusing
-  // MORE than better-rm.
-  // 兩種形狀都代表「hook 沒把它讀成檔名」：把文字解析成與字面不同的路徑，或當成可能
-  // 選中 .git 的樣式而拒絕。方向是 hook 比 better-rm 更嚴，藏不住洞。
+  // the text is a PATTERN, which the hook must read as the set of paths it could
+  // expand to while argv carries it as one literal filename. The second test
+  // used to be the narrower "could it select .git"; that stopped covering
+  // `$SANDBOX/*` when the hook learned bash's rule that a wildcard does not
+  // match a leading dot, even though the hook still refuses it -- for the better
+  // reason that it can name a DECLARED directory. Asking "is it a pattern" names
+  // the actual layering difference instead of one symptom of it.
+  // Neither shape can hide a hole: the direction is the hook refusing MORE.
+  // 兩種形狀都代表「hook 沒把它讀成檔名」：把文字解析成與字面不同的路徑，或者它根本是
+  // 一個「樣式」——hook 必須把它讀成「所有可能展開成的路徑」，而 argv 帶的是一個字面
+  // 檔名。第二個判準本來是較窄的「有沒有可能選到 .git」，在 hook 學會 bash 那條「萬用
+  // 字元不匹配開頭的點」之後就不再涵蓋 `$SANDBOX/*`，儘管 hook 仍然拒絕它（理由更好：
+  // 它能指名一個已宣告的目錄）。問「它是不是樣式」才是在講真正的分層差異。
   mechanism(row) {
     if (!hookRefuses(row.spelling)) return false;
     const asHookReadsIt = lexicalTarget(row.spelling);
     return asHookReadsIt !== path.resolve(sandbox, row.spelling)
-      || hook.globCanMatchGit(asHookReadsIt);
+      || hook.hasGlob(asHookReadsIt);
   },
 });
 
