@@ -553,9 +553,16 @@ function declaredLink(value, cwd, home, extraDirs) {
     // agent command, and an exception here denies every Bash call on the machine.
     return null;
   }
-  // Only a symlink argument can reach a verdict the two rules above missed. Any
-  // other kind of file was already handed to protectedSpelling() under the
-  // spelling the filesystem itself gave for it.
+  // A COST short-circuit, not a rule: deleting it cannot change a verdict, and
+  // no test here goes red for it (measured -- the whole suite stays green with
+  // this line removed). An inode is unique within its device, so an argument
+  // that is not a link can never carry the same dev:ino as an entry that is one;
+  // the loop below would simply run and find nothing. What it saves is the loop
+  // itself, on every ordinary target that reaches this far -- one lstat instead
+  // of twenty-six, on a gate that runs on every agent command.
+  // 這是成本短路，不是規則：拿掉它判定不會變，套件也不會紅（實測）。inode 在同一個
+  // device 內唯一，非連結的引數不可能與是連結的清單項目同 dev:ino。它省下的是底下那圈
+  // 迴圈——每一個走到這裡的普通目標，一次 lstat 而不是二十六次。
   if (!argument.isSymbolicLink()) return null;
   for (const entry of [...SYSTEM_DIRS, home, ...extraDirs]) {
     const spelling = path.resolve(entry);

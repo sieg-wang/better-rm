@@ -521,9 +521,14 @@ is_protected() {
                                   ${declared_extras[@]+"${declared_extras[@]}"}; do
                 declared_entry="${declared_entry%/}"
                 [ -n "$declared_entry" ] || continue
-                # 清單上不是連結的項目不可能是這個引數，而且這個測試是內建的，不 fork。
-                # An entry that is not a link cannot be this argument, and the test is
-                # a builtin.
+                # 成本短路，不是規則：拿掉它判定不會變，套件也不會紅（實測）。inode 在
+                # 同一個 device 內唯一，不是連結的項目不可能與這個引數同 dev:ino。它省下
+                # 的是 stat：這個測試是內建的（不 fork），一次擋掉二十幾次 stat 呼叫。
+                # A COST short-circuit, not a rule: removing it cannot change a verdict
+                # and no test goes red for it (measured). An inode is unique within its
+                # device, so an entry that is not a link can never carry this
+                # argument's dev:ino. What it saves is the stat -- the test itself is a
+                # builtin, and it removes twenty-odd forks per symlink argument.
                 [ -L "$declared_entry" ] || continue
                 declared_identity=$(stat -c '%d:%i' "$declared_entry" 2>/dev/null ||
                     stat -f '%d:%i' "$declared_entry" 2>/dev/null || true)

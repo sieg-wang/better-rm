@@ -1030,6 +1030,84 @@ let resolutionChecks = 0;
   fs.rmSync(box, { recursive: true, force: true });
 }
 
+// An inode number identifies an object only WITHIN a device, so the identity
+// comparison above has to carry both halves. Dropping the device half is a
+// refusal in the wrong direction: a link on a second volume that happens to be
+// numbered like a declared entry would be refused with no override, on a hook
+// that gates every agent command.
+// Two objects with equal inode numbers on different devices cannot be made to
+// order -- inode numbers are not ours to choose -- so this is the one property
+// here that no fixture can produce. It is driven through a stat shim instead:
+// the hook runs as its own process with fs.lstatSync patched to answer for ONE
+// path with a borrowed inode and a device that is one higher. Correct code sees
+// two devices and allows; code that compares inodes alone refuses. That is the
+// same technique test-better-rm.sh uses on the CLI side (make_xdev_stat_shim),
+// applied to the guard that has no PATH to shim.
+// inode 只在同一個 device 內唯一，所以身分比對必須帶著 dev 那一半。少了它是往「誤擋」
+// 的方向錯：第二顆卷宗上編號恰好相同的連結會被無條件拒絕。可是「不同 device、相同
+// inode」的兩個物件造不出來（inode 編號不是我們能指定的），所以這一項改用 stat shim
+// 驅動：hook 跑在自己的行程裡，fs.lstatSync 被替換成對某一條路徑回報「借來的 inode ＋
+// 高一號的 device」。正確的碼看見兩個 device 而放行，只比 inode 的碼則拒絕。
+let deviceChecks = 0;
+{
+  const box = fs.realpathSync(fs.mkdtempSync(`${os.tmpdir()}/better-rm-hook-device-`));
+  fs.mkdirSync(`${box}/actual`);
+  fs.symlinkSync(`${box}/actual`, `${box}/declared-link`);
+  fs.symlinkSync(`${box}/actual`, `${box}/other-link`);
+
+  const shim = `${box}/borrow-inode.js`;
+  fs.writeFileSync(shim, `
+    const fs = require('fs');
+    const real = fs.lstatSync;
+    const BORROWER = ${JSON.stringify(`${box}/other-link`)};
+    const LENDER = ${JSON.stringify(`${box}/declared-link`)};
+    fs.lstatSync = function (target, options) {
+      const stats = real.call(fs, target, options);
+      if (String(target) !== BORROWER) return stats;
+      const lender = real.call(fs, LENDER, options);
+      // The borrower keeps its own everything except the two fields the identity
+      // rule reads: it takes the lender's inode and sits on the next device.
+      return new Proxy(stats, {
+        get(object, key) {
+          if (key === 'ino') return lender.ino;
+          if (key === 'dev') return typeof lender.dev === 'bigint' ? lender.dev + 1n : lender.dev + 1;
+          const value = object[key];
+          return typeof value === 'function' ? value.bind(object) : value;
+        },
+      });
+    };
+  `);
+
+  const shimmedVerdict = (spelling) => {
+    const child = spawnSync('node', ['-r', shim, `${__dirname}/hooks/protect-important-paths.js`], {
+      input: JSON.stringify({
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: `rm -rf '${spelling}'` },
+        cwd: box,
+      }),
+      encoding: 'utf8',
+      env: { ...process.env, HOME: `${box}/home`, BETTER_RM_PROTECTED_DIRS: `${box}/declared-link` },
+    });
+    assert.equal(child.status, 0, `the shimmed hook must answer, not crash: ${child.stderr}`);
+    return /"permissionDecision":"deny"/.test(child.stdout || '') ? 'DENY' : 'ALLOW';
+  };
+
+  // Positive control first: with the shim in place the declared entry itself is
+  // still refused, so an ALLOW below means the device was compared and not that
+  // the shim broke the rule outright.
+  // 先立正對照：shim 在的情況下宣告的那一條仍然被拒絕，這樣底下的 ALLOW 才代表
+  // 「device 有被比對」，而不是 shim 把整條規則弄壞了。
+  assert.equal(shimmedVerdict(`${box}/declared-link`), 'DENY',
+    'the declared entry is still refused while the shim is loaded');
+  deviceChecks += 1;
+  assert.equal(shimmedVerdict(`${box}/other-link`), 'ALLOW',
+    'a link on another device with the same inode number is not the declared entry');
+  deviceChecks += 1;
+
+  fs.rmSync(box, { recursive: true, force: true });
+}
+
 // ---------------------------------------------------------------------------
 // The OpenCode plugin's own decision. install-hooks.sh embeds a byte-identical
 // copy of the plugin and test-install-hooks.sh pins the installed file to that
@@ -1149,7 +1227,7 @@ async function runOpenCodePluginChecks() {
 // 否則「沒跑到」會看起來是綠的。
 process.exitCode = 1;
 runOpenCodePluginChecks().then((pluginChecks) => {
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + pluginChecks}`);
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + pluginChecks}`);
   process.exitCode = 0;
 }).catch((error) => {
   console.error(error && error.stack ? error.stack : error);
