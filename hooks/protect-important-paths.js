@@ -770,11 +770,14 @@ function protectedSpelling(spelling, home, extraDirs, cwd) {
       const patternBase = absolute.slice(absolute.lastIndexOf('/') + 1);
       if (globMatchesPath(patternBase, '.git')) return normalized;
       if (exactDirs.some((directory) => globMatchesPath(absolute, directory))) return normalized;
-      // A pattern one level under a mount parent can name a mount root, which is
-      // protected for the same reason /Volumes/Backup is.
-      // 掛載父目錄底下一層的樣式可以指到掛載根，理由與 /Volumes/Backup 相同。
-      const patternParent = absolute.slice(0, absolute.lastIndexOf('/'));
-      if (patternBase !== '' && MOUNT_PARENTS.includes(patternParent)) return normalized;
+      // Mount roots need nothing here: the loop above already reads `/Volumes/*`
+      // as a first-level entry under a mount parent and refuses it, because that
+      // rule never cared whether the name was literal. Measured -- an added
+      // mount-root question for patterns was mutation-tested and NOTHING went
+      // red, which is the whole reason it is not here.
+      // 掛載根不需要在這裡處理：上面那圈迴圈本來就把 `/Volumes/*` 讀成掛載父目錄下的第一
+      // 層項目而拒絕，因為那條規則從來不在意名字是不是字面的。實測：為樣式另外加的掛載根
+      // 判斷做突變測試時沒有任何測試轉紅，這正是它不在這裡的理由。
     }
   }
   return null;
