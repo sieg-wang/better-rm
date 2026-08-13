@@ -610,9 +610,29 @@ const CASE_VARIANTS = [
   ['lower', (value) => value.toLowerCase()],
   ['mixed', (value) => [...value].map((ch, index) => (index % 2 ? ch.toLowerCase() : ch.toUpperCase())).join('')],
 ];
+// Both spellings of every protected entry, not just the root one. A case fold
+// and a firmlink prefix compose: measured, /SYSTEM/VOLUMES/DATA/Users is device
+// 16777229 inode 17205, the same object as /Users, and better-rm refuses it
+// (readlink -f case-canonicalises, then the prefix rewrite fires) while the hook
+// permits it -- its prefix comparison is case-sensitive, so the rewrite never
+// runs and the folded spelling is compared against nothing. Folding only the
+// root spellings would have found /USERS and stopped one composition short of a
+// second, separate hole: making the hook's exact-directory comparison
+// case-insensitive fixes /USERS and does NOT fix this one.
+// 兩種拼寫都要折：大小寫與 firmlink 前綴會疊加。實測 /SYSTEM/VOLUMES/DATA/Users 與
+// /Users 同 device 同 inode，better-rm 拒絕（readlink -f 會正規化大小寫，接著前綴改寫
+// 生效），hook 放行（它的前綴比對分大小寫，改寫根本沒跑）。只折根拼寫會找到 /USERS
+// 就停在離第二個獨立缺口一步之遙的地方：把 hook 的完全比對改成不分大小寫能修好
+// /USERS，修不好這一條。
+const caseBases = [...new Set([
+  ...exactProtected,
+  FIRMLINK_PREFIX,
+  ...protectedDirs.filter((dir) => dir !== '/').map((dir) => `${FIRMLINK_PREFIX}${dir}`),
+])].sort();
+
 let caseRowCount = 0;
 const caseVariantsProduced = new Map(CASE_VARIANTS.map(([label]) => [label, 0]));
-for (const base of exactProtected) {
+for (const base of caseBases) {
   let produced = 0;
   for (const [label, transform] of CASE_VARIANTS) {
     const variant = transform(base);
