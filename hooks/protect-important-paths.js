@@ -840,11 +840,21 @@ function protectedSpelling(spelling, home, extraDirs, cwd) {
       // file a lexical collapse would be wrong, because '..' after a symlink
       // resolves onto the TARGET's parent -- but a pattern cannot be resolved at
       // all, so the choice is between collapsing and not asking: without it
-      // `/Users/sieg/../*` is not recognised as `/Users/*`. Collapsing can only
-      // make this rule match MORE patterns, never fewer.
-      // '..' 只在這裡做詞法折疊。本檔其他地方這樣做都是錯的（'..' 經過 symlink 會落在
-      // target 的父目錄），但樣式根本無法解析，所以選擇只有「折疊」或「不問」：不折疊的
-      // 話 `/Users/sieg/../*` 就不會被認出是 `/Users/*`。折疊只會讓這條規則match 更多。
+      // `/Users/sieg/../*` is not recognised as `/Users/*`.
+      // This comment used to end "collapsing can only make this rule match MORE
+      // patterns, never fewer". That is FALSE and was measured false: with
+      // `userlink -> /Users`, the shell reaches /Users from `userlink/../[U]sers`
+      // while the collapse lands on `<cwd>/[U]sers` and the pattern is allowed --
+      // the same path without the bracket is refused, by the resolution rules
+      // that do get to ask the filesystem. Collapsing trades one class of miss
+      // for another, and this is the class that stays open. Closing it needs a
+      // pattern to be resolved against a filesystem, which is the one thing a
+      // pattern cannot do before the shell expands it.
+      // '..' 只在這裡做詞法折疊（本檔其他地方這樣做都是錯的，因為 '..' 經過 symlink 會落在
+      // target 的父目錄），因為樣式根本無法解析，選擇只有「折疊」或「不問」。
+      // 這段註解原本結尾寫「折疊只會讓規則 match 更多、不會更少」——那是錯的，而且已被實測
+      // 推翻：`userlink -> /Users` 時，shell 從 `userlink/../[U]sers` 會走到 /Users，而折疊
+      // 落在 `<cwd>/[U]sers`，於是放行。這一類仍是開著的。
       const absolute = path.posix.normalize(pattern.startsWith('/') ? pattern : `${base}/${pattern}`);
       const patternBase = absolute.slice(absolute.lastIndexOf('/') + 1);
       if (globMatchesPath(patternBase, '.git')) return normalized;

@@ -4218,6 +4218,39 @@ else
     test_fail "第二種拼寫未被保護或誤擋（連結存在=$([ -L "$identity_declared" ] && echo yes || echo no)；刪其他連結 exit=${identity_other_allowed}；訊息=${identity_e2e}）"
 fi
 
+test_item "清單上的 macOS 實體路徑項目由這一套自己釘住"
+# 這幾項原本只被「兩份清單互相比對」的漂移守衛釘住：把 /private/etc 從 better-rm 的
+# PROTECTED_DIRS 拿掉，這一套 126 個測試照樣全綠（實測）。漂移守衛住在 hook 那一套裡，
+# 它證明的是「兩邊一致」，不是「這一項存在」——兩份一起拿掉它就什麼都不說了。
+# These entries were pinned only by the cross-list drift guard: removing
+# /private/etc from better-rm's PROTECTED_DIRS left this 126-test suite green
+# (measured). That guard lives in the hook suite and proves the two lists AGREE,
+# not that any particular entry exists; remove it from both and it says nothing.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+physical_home="$TEST_WORK_DIR/physical-home"
+mkdir -p "$physical_home"
+physical_missing=""
+physical_false_positive=""
+for physical_path in /private/etc /private/var /etc /var; do
+    if ! extradirs_says_yes "$physical_path" "" "$physical_home"; then
+        physical_missing="$physical_missing $physical_path"
+    fi
+done
+# 負對照：保護的是那個目錄本身，不是它的內容；/private/tmp 刻意不在清單上。
+# Negative control: the directory itself, not its contents; /private/tmp is
+# deliberately absent because scratch work lives there.
+for physical_ordinary in /private/etc/some-config /private/var/folders /private/tmp; do
+    if extradirs_says_yes "$physical_ordinary" "" "$physical_home"; then
+        physical_false_positive="$physical_false_positive $physical_ordinary"
+    fi
+done
+if [ -z "$physical_missing" ] && [ -z "$physical_false_positive" ]; then
+    test_pass "/private/etc 與 /private/var 受保護，其內容與 /private/tmp 未被誤擋"
+else
+    test_fail "未受保護:${physical_missing:- 無}；誤擋:${physical_false_positive:- 無}"
+fi
+
 test_item "身分比對必須帶著 device 那一半，不能只比 inode"
 # inode 只在同一個 device 內唯一。少了 dev 這一半，第二顆卷宗上編號恰好相同的連結會被
 # 無條件拒絕。「不同 device、相同 inode」的兩個物件造不出來（inode 編號不是我們能指定
