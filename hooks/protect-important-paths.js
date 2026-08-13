@@ -4,6 +4,7 @@
 
 'use strict';
 
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
@@ -289,25 +290,100 @@ function normalizedTarget(value, cwd, home) {
   // truncated here too; otherwise the guard compares '/etc\0' (never a match)
   // while the shell actually runs rm on '/etc'.
   const truncated = String(value).split('\0')[0];
-  // A trailing slash is dropped here, and with it the one thing that would tell
-  // this guard the argument reaches a symlink's TARGET: `rm -rf link/` resolves
-  // the final component, destroys what the link points at and leaves the link.
-  // better-rm refuses those spellings because it can see the filesystem. This
-  // cannot: it is a PreToolUse gate on every agent command, and a stat that blocks
-  // -- an unresponsive network or cloud mount -- would block the agent itself, so
-  // it stays filesystem-free by design. Refusing every trailing-slash argument
-  // instead would refuse `rm -rf build/`, which is ordinary work. So this is a
-  // known, deliberate gap on the agent path, declared as such in the differential
-  // parity suite (test-guard-parity.js, section 3b) rather than left to be
-  // rediscovered.
-  // 結尾斜線在這裡被去掉，連同「這個引數會碰到 symlink target」的唯一線索：`rm -rf
-  // link/` 解析最後一段，毀掉的是 target 的內容。better-rm 看得見檔案系統所以會拒絕；
-  // 這支不行——它是每一次 agent 命令都會經過的閘門，一次會阻塞的 stat 就卡住整個
-  // agent。而「一律拒絕結尾斜線」會連 `rm -rf build/` 都擋掉。這是刻意留下的缺口，
-  // 在差分測試 test-guard-parity.js 的 3b 節逐條宣告。
+  // A trailing slash is dropped here, and with it the one thing that tells this
+  // guard the argument reaches a symlink's TARGET: `rm -rf link/` resolves the
+  // final component, destroys what the link points at and leaves the link.
+  // This function stays purely lexical, because a path that does not exist yet
+  // must still be judged -- but it is no longer the only thing protectedReason()
+  // consults. resolvedTarget() lstats the spelling AS WRITTEN, where `link` and
+  // `link/` are two different objects, and the two verdicts are unioned.
+  // 結尾斜線在這裡被去掉，連同「這個引數會碰到 symlink target」的唯一線索。本函式維持
+  // 純字面（不存在的路徑也必須判得出來），但它不再是 protectedReason 唯一的依據：
+  // resolvedTarget 會對「原樣拼寫」做 lstat，那裡 `link` 與 `link/` 是兩個不同的東西，
+  // 兩邊的判定取聯集。
   const expanded = expandHome(truncated.replace(/[\\/]+$/, '') || '/', home);
   if (/[*?\[\]{}]/.test(expanded)) return expanded;
   return path.resolve(cwd, expanded);
+}
+
+// The argument as an absolute spelling, expanded but NOT lexically collapsed.
+// path.resolve() folds '..' away before anything is asked of the filesystem, and
+// `link/..` is precisely the spelling whose meaning depends on the link:
+// measured, realpath(3) reports '<sandbox>/link-to-usr/..' as '/' -- the parent
+// of the link's TARGET -- while a lexical collapse says '<sandbox>'. The
+// filesystem has to be handed the spelling the shell would hand it.
+// 原樣的絕對拼寫，不做字面收斂：path.resolve 會先把 '..' 折掉，而 `link/..` 的意義
+// 正好取決於那條連結（實測 realpath 回報的是連結目標的父目錄，不是字面上的上一層）。
+function absoluteSpelling(value, cwd, home) {
+  const truncated = String(value).split('\0')[0];
+  // A pattern names no single file, so there is nothing to ask the filesystem
+  // about; the lexical rules already refuse the ones that could select .git.
+  // 萬用字元不指名任何一個檔案，沒有東西可問檔案系統。
+  if (/[*?[\]{}]/.test(truncated)) return null;
+  // The trailing slash is the whole point of this function, so it survives the
+  // same home expansion normalizedTarget() performs. Re-appended rather than
+  // carried through, because the path.join() inside expandHome() would drop it.
+  // 結尾斜線正是本函式存在的理由，所以要在同一套 home 展開之後補回來。
+  const trailingSlash = truncated.endsWith('/') ? '/' : '';
+  const expanded = expandHome(truncated.replace(/[\\/]+$/, '') || '/', home) + trailingSlash;
+  return path.isAbsolute(expanded) ? expanded : `${cwd}/${expanded}`;
+}
+
+// What the FILESYSTEM says this spelling names, or null when it cannot say.
+// Case folding, Unicode normalisation and symlink-through spellings are all
+// properties of the filesystem rather than of the string, and there is no
+// enumerating one's way out of them: /Users alone has 2^5 case spellings before
+// Unicode is considered. The guard that has to answer for them must ask the only
+// thing that knows.
+// 大小寫、Unicode 正規化、穿過 symlink 的拼寫，三者都是檔案系統的性質而不是字串的
+// 性質，列舉不完（光 /Users 就有 2^5 種大小寫寫法，還沒算 Unicode）。要回答這些，只能
+// 去問唯一知道答案的那個東西。
+function resolvedTarget(value, cwd, home) {
+  const absolute = absoluteSpelling(value, cwd, home);
+  if (absolute === null) return null;
+  try {
+    // lstat the spelling AS WRITTEN. An argument that IS a symlink is judged by
+    // the link's own path and never by its target: deleting a link cannot touch
+    // what it points at, so resolving one would refuse `rm ~/applink` because
+    // /Applications is protected -- a false positive with no override. That is
+    // the rule better-rm adopted in 2c34f8d, reached here through the same test
+    // it uses ([ ! -L "$path" ]).
+    // A trailing slash then separates the two cases by itself, with no second
+    // rule: measured on macOS 26.6 and ubuntu-24.04, lstat('link') reports a
+    // symlink while lstat('link/') reports the directory it points at, because a
+    // trailing slash forces POSIX resolution of the final component. So `link`
+    // is judged leniently and `link/` -- which really does destroy the target's
+    // contents -- is judged by what it reaches.
+    // 引數自己就是連結時不解析（刪連結碰不到 target，解析會把 ~/applink 這種捷徑變成
+    // 刪不掉）。而結尾斜線本身就把兩種情形分開了，不需要第二條規則：實測
+    // lstat('link') 是連結、lstat('link/') 是它指向的目錄。
+    if (fs.lstatSync(absolute).isSymbolicLink()) return null;
+    // realpathSync.NATIVE, not realpathSync: the JavaScript implementation walks
+    // the path itself and hands back the spelling it was given (measured:
+    // fs.realpathSync('/USERS') is '/USERS'), while the native one goes through
+    // realpath(3) and returns what is on disk (measured: '/Users'). Only the
+    // native call asks the filesystem, and the filesystem is the whole point.
+    // 用 realpathSync.native 而不是 realpathSync：後者自己走路徑、原樣回傳拼寫（實測
+    // fs.realpathSync('/USERS') 就是 '/USERS'），前者才會經過 realpath(3) 拿到磁碟上的
+    // 拼寫（實測 '/Users'）。
+    return fs.realpathSync.native(absolute);
+  } catch (_) {
+    // Every errno lands here on purpose, and every one of them means one thing:
+    // the filesystem could not answer, so the verdict stays the lexical one this
+    // guard produced before it ever looked. ENOENT and ENOTDIR are the ordinary
+    // case -- a target that does not exist yet must still be judged, which is why
+    // this guard was filesystem-free to begin with -- and EACCES on an unreadable
+    // parent, ELOOP on a symlink cycle and ENAMETOOLONG say the same thing:
+    // nothing learned, nothing changed. That cannot open a hole, because the
+    // lexical rules still run and still refuse everything they refused before; it
+    // can only decline to close one. It also must not throw: this is a PreToolUse
+    // gate on every agent command, and an exception here denies every Bash call
+    // on the machine.
+    // 所有 errno 都落到這裡，而且意思都一樣：檔案系統答不出來，判定就維持原本的字面
+    // 判定。這不會開洞（字面規則照跑），只會少補一個洞。而且絕不能往外丟例外：這是每
+    // 一次 agent 命令都會經過的閘門，一個例外就會擋掉整台機器上所有 Bash 呼叫。
+    return null;
+  }
 }
 
 function hasUnresolvedTargetExpansion(isDynamic) {
@@ -330,8 +406,13 @@ function globCanMatchGit(value) {
   });
 }
 
-function protectedReason(target, cwd, home, extraDirs = []) {
-  let normalized = normalizedTarget(target, cwd, home);
+// Today's rules, asked of ONE already-normalised spelling. Split out of
+// protectedReason() so the same rules can be asked of the spelling as written
+// and of what the filesystem says it is, without either being a second copy.
+// 同一組規則，對「一個已正規化的拼寫」提問。從 protectedReason 拆出來，好讓字面拼寫
+// 與檔案系統解析後的拼寫走完全相同的規則，而不是兩份副本。
+function protectedSpelling(spelling, home, extraDirs) {
+  let normalized = spelling;
 
   // macOS firmlink: /System/Volumes/Data/X and /X are the same object. Measured
   // with stat -f '%d:%i', /Users/<user> and /System/Volumes/Data/Users/<user>
@@ -385,6 +466,30 @@ function protectedReason(target, cwd, home, extraDirs = []) {
   // 可能選中 .git 的萬用字元無法事先解析，因此一律視為不安全。
   if (globCanMatchGit(normalized)) return normalized;
   return null;
+}
+
+// The union of what the spelling says and what the filesystem says it is, which
+// is what better-rm's is_protected() has always compared: it tests both its
+// readlink-resolved path and its unresolved one against every list. The union is
+// not a belt-and-braces choice, it is load-bearing in both directions --
+// `/var/.` resolves to /private/var, which is not on the list, while the
+// spelling as written is /var, which is; and `/USERS` is not on the list as
+// written while what it names is. Judging by either one alone opens a hole.
+// TOCTOU: this verdict is produced before the command runs, so what the
+// filesystem says here can change before rm sees it. That race is inherent to a
+// pre-execution gate -- better-rm's own stat has it too -- and is not something
+// this guard can close.
+// 取「字面拼寫」與「檔案系統認定」的聯集，與 better-rm 的 is_protected 一直以來的做法
+// 相同（它同時拿 real_path 與 norm_path 去比對每一份清單）。兩個方向都會用到：`/var/.`
+// 解析後是 /private/var（不在清單上）但字面是 /var（在清單上），`/USERS` 則相反。只取
+// 其中一邊就會開洞。TOCTOU：判定發生在命令執行之前，這個競態是前置閘門本質上就有的。
+function protectedReason(target, cwd, home, extraDirs = []) {
+  const lexical = normalizedTarget(target, cwd, home);
+  const lexicalReason = protectedSpelling(lexical, home, extraDirs);
+  if (lexicalReason) return lexicalReason;
+  const resolved = resolvedTarget(target, cwd, home);
+  if (resolved === null || resolved === lexical) return null;
+  return protectedSpelling(resolved, home, extraDirs);
 }
 
 function commandTargets(command, depth = 0) {

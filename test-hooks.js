@@ -753,6 +753,207 @@ hookShapeChecks += 1;
 fs.rmSync(scratch, { recursive: true, force: true });
 
 // ---------------------------------------------------------------------------
+// What the FILESYSTEM says the argument names.
+//
+// Case folding, Unicode normalisation and symlink-through spellings are
+// properties of the filesystem, not of the string, and no list of spellings can
+// keep up with them: /Users alone has 2^5 case spellings before Unicode is
+// considered. This hook was purely lexical, so `rm -rf link/` -- which resolves
+// the final component, destroys the target's contents and leaves the link --
+// read as an ordinary directory removal on the one path where this hook is the
+// only guard.
+// The fixtures below are symlinks and declared directories rather than /Users
+// and /etc, so every row means the same thing on a case-sensitive filesystem as
+// it does on macOS. The two questions only the filesystem can answer (a case
+// fold, a Unicode normalisation) MEASURE the aliasing and assert whichever
+// answer is true there, so neither platform is handed a row that silently tests
+// nothing.
+// 大小寫、Unicode 正規化、穿過 symlink 的拼寫都是檔案系統的性質而不是字串的性質，
+// 列不完（光 /Users 就有 2^5 種大小寫寫法，還沒算 Unicode）。這支 hook 原本純字面，
+// 於是 `rm -rf link/`——它會解析最後一段、毀掉 target 的內容、只留下連結——在只有它
+// 在守的那條路徑上，讀起來就只是一次普通的目錄刪除。下面的 fixture 一律用 symlink
+// 與自行宣告的目錄，因此每一列在分大小寫的檔案系統上與在 macOS 上意義相同；只有檔案
+// 系統能回答的那兩列則實地量測別名關係、兩種答案各自斷言，沒有任何一個平台會拿到
+// 一列什麼都沒測到的測試。
+// ---------------------------------------------------------------------------
+let resolutionChecks = 0;
+{
+  // realpathSync so the fixture root is the PHYSICAL path: macOS resolves TMPDIR
+  // through /var -> /private/var, and a fixture reached through a symlink
+  // component would make every row below about that symlink instead.
+  // 取實體路徑：macOS 的 TMPDIR 會經過 /var -> /private/var，否則下面每一列測到的都是
+  // 那條 symlink。
+  const box = fs.realpathSync(fs.mkdtempSync(`${os.tmpdir()}/better-rm-hook-resolve-`));
+  const boxHome = `${box}/home`;
+  const declared = `${box}/secrets`;
+  const inner = `${declared}/inner`;
+  const project = `${box}/project`;
+  const caseFixture = `${box}/CaseSecrets`;
+  const unicodeFixture = `${box}/café-secrets`; // NFC, as a JavaScript source file produces it
+  // A declared directory that IS a symlink, for the union rule below.
+  // 一個「本身就是 symlink」的宣告目錄，給下面的聯集規則用。
+  const linkedDeclared = `${box}/linked-secrets`;
+  const linkedActual = `${box}/actual`;
+  for (const directory of [boxHome, inner, `${project}/build`, `${project}/.git`,
+    caseFixture, unicodeFixture, linkedActual]) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+  fs.symlinkSync(declared, `${box}/link-to-secrets`);
+  fs.symlinkSync(inner, `${box}/link-to-inner`);
+  fs.symlinkSync(`${project}/build`, `${box}/link-to-build`);
+  fs.symlinkSync(`${project}/.git`, `${box}/link-to-git`);
+  fs.symlinkSync(project, `${box}/projlink`);
+  fs.symlinkSync(`${box}/nothing-is-mounted-here/item`, `${box}/dangling`);
+  fs.symlinkSync(`${box}/loop-b`, `${box}/loop-a`);
+  fs.symlinkSync(`${box}/loop-a`, `${box}/loop-b`);
+  fs.symlinkSync(linkedActual, linkedDeclared);
+
+  const boxEnv = {
+    HOME: boxHome,
+    BETTER_RM_PROTECTED_DIRS: [declared, caseFixture, unicodeFixture, linkedDeclared].join(':'),
+  };
+  const boxVerdict = (command, environment = boxEnv) => (evaluate({
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Bash',
+    tool_input: { command },
+    cwd: box,
+  }, environment)?.hookSpecificOutput?.permissionDecision === 'deny' ? 'DENY' : 'ALLOW');
+  const rmOf = (spelling) => `rm -rf '${spelling}'`;
+  const denies = (spelling, why) => {
+    assert.equal(boxVerdict(rmOf(spelling)), 'DENY', `${why}: ${spelling}`);
+    resolutionChecks += 1;
+  };
+  const allows = (spelling, why) => {
+    assert.equal(boxVerdict(rmOf(spelling)), 'ALLOW', `${why}: ${spelling}`);
+    resolutionChecks += 1;
+  };
+
+  // The link itself is not its target. Deleting a link cannot touch what it
+  // points at, so refusing this would make every ~/applink shortcut undeletable
+  // with no override -- the rule better-rm adopted in 2c34f8d.
+  // 連結本身不是它的目標：刪連結碰不到 target，拒絕它會讓 ~/applink 這種捷徑刪不掉，
+  // 而且沒有任何旗標可以蓋過去。
+  allows('link-to-secrets', 'a symlink argument is judged by the link, not by its target');
+  allows(`${box}/link-to-secrets`, 'the same, spelled absolutely');
+  // ...but a trailing slash (and `/.`, and `//`, and `/./`) forces resolution of
+  // the final component, so these spellings reach the TARGET: `rm -rf link/`
+  // returns 0, destroys the target's contents and leaves the link behind. Each
+  // spelling is its own row because each is a different string arriving at the
+  // same place, and a rule written for one of them can miss the others.
+  // 結尾斜線（以及 /.、//、/./）會強制解析最後一段，這些拼寫碰到的是 target 本身。
+  // 每一種拼寫各佔一列：它們是不同的字串、同一個落點，只針對其中一種寫的規則會漏掉
+  // 其他幾種。
+  for (const spelling of ['link-to-secrets/', 'link-to-secrets//', 'link-to-secrets/.',
+    'link-to-secrets/./', `${box}/link-to-secrets/`]) {
+    denies(spelling, 'a trailing slash resolves the final component and reaches the target');
+  }
+  // '..' resolves through the link as well, onto the parent of the TARGET rather
+  // than the directory the link sits in: realpath of '<box>/link-to-inner/..' is
+  // '<box>/secrets', while a lexical collapse says '<box>'. A guard that
+  // collapsed '..' before asking the filesystem would answer a different
+  // question from the one the shell is about to ask.
+  // '..' 同樣會穿過連結，落在 target 的父目錄而不是連結所在的目錄；先把 '..' 字面折掉
+  // 再問，問到的就不是 shell 接下來要做的那件事。
+  denies('link-to-inner/..', "'..' resolves through the link, onto the declared directory");
+  denies('link-to-inner/../', "'..' resolves through the link, onto the declared directory");
+  denies('link-to-git/', 'the resolved path is a .git directory');
+
+  // Anti-tautology, and the failure that matters most here: resolution must not
+  // become "anything reached through a link is refused". This hook gates EVERY
+  // agent command on the machine, so an over-broad rule costs more than the hole
+  // it closes.
+  // 反恆真，而且是這裡最要緊的失敗模式：解析不能變成「凡是穿過連結的一律拒絕」。這支
+  // hook 是每一次 agent 命令都會經過的閘門，過度拒絕的代價比它補起來的洞還大。
+  allows('link-to-build/', 'a link to ordinary build output stays ordinary');
+  allows('link-to-inner/', 'inside a declared directory is ordinary work');
+  allows('projlink/build', 'a project reached through a symlinked root is ordinary work');
+  allows('projlink/build/', 'the same, with a trailing slash');
+  allows(`${box}/projlink/build`, 'the same, spelled absolutely');
+  allows('project/build', 'and the same project reached directly');
+
+  // A partial resolution must not be trusted, and nothing here may throw: a
+  // dangling link and a symlink cycle make the filesystem answer ENOENT and
+  // ELOOP, and every errno means the same thing -- nothing learned, so the
+  // lexical verdict stands. An exception instead of a verdict would deny every
+  // Bash call on the machine.
+  // 半途的解析結果不可採信，而且這裡絕不能丟例外：斷連結與連結環會讓檔案系統回
+  // ENOENT／ELOOP，每一種 errno 的意思都一樣——什麼都沒學到，維持字面判定。這裡丟出
+  // 例外會擋掉整台機器上所有的 Bash 呼叫。
+  allows('dangling', 'a dangling link is not a protected path');
+  allows('dangling/', 'a partial resolution must not be trusted');
+  allows('loop-a/', 'a symlink cycle answers ELOOP; the verdict falls back, it does not throw');
+  allows('loop-a/../', 'the same, through ..');
+
+  // The union of both spellings, which is what better-rm's is_protected() has
+  // always compared: it tests its readlink-resolved path AND its unresolved one
+  // against every list. The declared directory here IS a symlink, so its
+  // resolved path is something else entirely -- judging by the RESOLVED path
+  // alone would permit removing a declared entry, the mirror image of the hole
+  // above. This is the shape of `/var/.` on macOS, without depending on macOS.
+  // 取聯集，與 better-rm 的 is_protected 一直以來的做法相同（同時拿解析後與未解析的
+  // 拼寫去比對每一份清單）。這裡宣告的受保護目錄本身就是一條 symlink，只看解析後的
+  // 路徑會放行對「已宣告項目」的刪除——與上面那個洞正好相反的方向。這就是 macOS 上
+  // `/var/.` 的形狀，而且不必依賴 macOS。
+  denies('linked-secrets', 'a declared directory that is a symlink is still declared');
+  denies('linked-secrets/.', 'the spelling as written is still the declared directory');
+  denies(`${box}/linked-secrets/.`, 'the same, spelled absolutely');
+  allows('actual', 'what the declared link points at was never the declared entry');
+
+  // Two spellings name one object, or they do not: asked of the filesystem
+  // rather than assumed from the platform. A case-insensitive volume can be
+  // mounted on Linux and a case-SENSITIVE one formatted on macOS, so an
+  // expectation derived from process.platform would be wrong on both. lstat
+  // dev+ino rather than realpath, because Node's own realpath hands back the
+  // spelling it was given (measured: fs.realpathSync('/USERS') is '/USERS').
+  // 兩種拼寫是不是同一個物件，用問檔案系統的、不是照平台猜的：Linux 可以掛不分大小寫
+  // 的卷宗，macOS 也能格式化分大小寫的。用 lstat 的 dev+ino 而不是 realpath——Node 自己
+  // 的 realpath 會原樣回傳拼寫（實測 fs.realpathSync('/USERS') 就是 '/USERS'）。
+  const sameObject = (left, right) => {
+    try {
+      const a = fs.lstatSync(left);
+      const b = fs.lstatSync(right);
+      return a.dev === b.dev && a.ino === b.ino;
+    } catch (_) {
+      return false;
+    }
+  };
+  const foldedSpelling = `${box}/casesecrets`;
+  if (sameObject(caseFixture, foldedSpelling)) {
+    denies(foldedSpelling, 'a case-folded spelling of a declared directory is that directory');
+    allows(`${foldedSpelling}/inside-item`, 'inside it is still ordinary work');
+  } else {
+    allows(foldedSpelling, 'a case-SENSITIVE filesystem: the folded spelling is a different path');
+  }
+  const nfdSpelling = unicodeFixture.normalize('NFD');
+  assert.notEqual(nfdSpelling, unicodeFixture, 'the Unicode fixture has no second encoding');
+  resolutionChecks += 1;
+  if (sameObject(unicodeFixture, nfdSpelling)) {
+    denies(nfdSpelling, 'the NFD spelling of a directory declared NFC is that directory');
+  } else {
+    allows(nfdSpelling, 'a normalisation-sensitive filesystem: the NFD spelling is a different path');
+  }
+
+  // A path that does not exist has to be judged exactly as it was before this
+  // hook could see anything. That is the whole reason it was filesystem-free:
+  // an inode needs the path to exist, and a home directory that has not been
+  // created yet must still be protected.
+  // 不存在的路徑必須與「還看不見檔案系統」時判得一模一樣——這正是它原本完全不碰檔案
+  // 系統的理由：inode 要求路徑存在，而還沒建立的家目錄同樣必須受保護。
+  denies(boxHome, 'the home directory is protected');
+  allows(`${boxHome}/keep`, 'inside the home directory is ordinary work');
+  allows(`${box}/never-created`, 'a path that does not exist is not protected by accident');
+  const absentHomeEnv = { HOME: `${box}/never-created`, BETTER_RM_PROTECTED_DIRS: '' };
+  assert.equal(
+    boxVerdict(rmOf(`${box}/never-created`), absentHomeEnv),
+    'DENY',
+    'a home directory that has not been created yet is still protected',
+  );
+  resolutionChecks += 1;
+
+  fs.rmSync(box, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
 // The OpenCode plugin's own decision. install-hooks.sh embeds a byte-identical
 // copy of the plugin and test-install-hooks.sh pins the installed file to that
 // source by hash — but nothing ever RAN the handler, so inverting the deny
@@ -871,7 +1072,7 @@ async function runOpenCodePluginChecks() {
 // 否則「沒跑到」會看起來是綠的。
 process.exitCode = 1;
 runOpenCodePluginChecks().then((pluginChecks) => {
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + pluginChecks}`);
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + pluginChecks}`);
   process.exitCode = 0;
 }).catch((error) => {
   console.error(error && error.stack ? error.stack : error);

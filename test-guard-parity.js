@@ -20,15 +20,15 @@
 // 只加進 better-rm，而 test-hooks.js 全綠）。唯一抓得到的形狀是差分測試：一份共用
 // 的路徑拼寫語料，兩道守衛各跑一次，判定逐列比對。
 //
-// Neither guard is given a real path to act on. Both are pure predicates: the
-// hook never touches the filesystem at all, and is_protected() only stats and
-// resolves (readlink/realpath/basename). Nothing here deletes, moves or writes
-// outside its own temporary sandbox.
-// 兩邊都只是純判斷式：hook 完全不碰檔案系統，is_protected 只做 stat 與解析。
+// Neither guard is given a real path to act on. Both are pure predicates: each
+// only stats and resolves (lstat/realpath/readlink/basename), and neither is
+// ever asked to act. Nothing here deletes, moves or writes outside its own
+// temporary sandbox.
+// 兩邊都只是純判斷式，只做 stat 與解析，不會對任何路徑動手。
 //
 // A few spellings cannot agree, because the two guards do not observe the same
 // thing: one reads command text before the shell expands it, the other reads argv
-// after, and one may touch the filesystem while the other must not. Those are
+// after. Those are
 // declared one by one in section 3b with their direction and reason, and the
 // declarations are checked in both directions so the list cannot become a place
 // to hide rows -- see the comment there.
@@ -864,21 +864,23 @@ for (const required of ['protected-spelling', 'inside-protected', 'mount-root', 
 //     consistent". Every case and Unicode row generated above carries a MEASURED
 //     'deny' or 'allow', so no class can reach them however its predicate is
 //     later widened.
-//   * The predicate has to name the MECHANISM, not the direction. For the
-//     agent-path holes (hook ALLOW, better-rm DENY -- the dangerous direction)
-//     the mechanism is "resolution walked through a symlink component, and the
-//     hook would have refused the resolved path if it could have seen it". The
-//     test for that is positive on all four counts: an argument that is not
-//     itself a link, a strict prefix that IS a link, a resolved path the hook's
-//     own predicate calls protected, and a lexical path it does not. Two
-//     spellings that name one object WITHOUT a symlink -- a case fold, a
-//     different Unicode normalisation, a firmlink prefix -- are explicitly
-//     excluded, because the hook can close those with a string operation and
-//     therefore they are holes, not layering.
-//   * The other direction (hook DENY, better-rm ALLOW) is the hook refusing more
+//   * The predicate has to name the MECHANISM, not the direction.
+//   * ONE class is left, and it is the safe direction: the hook refusing more
 //     than argv can carry. Its class can only ever absorb an OVER-refusal, which
 //     cannot open a hole in either guard; that is why its predicate is allowed to
 //     be the broader of the two.
+//   * There is no class for the dangerous direction (hook ALLOW, better-rm DENY)
+//     and there must not be one. There WAS: the hook was purely lexical, so every
+//     spelling that resolves through a symlink component -- `rm -rf ~/applink/`,
+//     which destroys the target's contents and leaves the link -- was permitted on
+//     the agent path and declared an accepted difference of layering, with the
+//     reason that a PreToolUse gate must not stat. It was never layering, it was a
+//     hole with a rationale attached; the hook now lstats the spelling as written
+//     and all fourteen members converged, so the declaration was deleted. A
+//     divergence in that direction is a finding and gets reported as one.
+//   * 危險方向（hook 放行、better-rm 拒絕）沒有類，也不該有。原本是有的：hook 純字面，
+//     所以每一種穿過 symlink 的拼寫都被當成「分層造成的差異」接受下來——那不是分層，那是
+//     一個附了理由的洞。hook 改成對原樣拼寫做 lstat 之後，十四個成員全部收斂，宣告已刪。
 // 宣告的是「類」＋判準，不是拼寫清單。原本是清單，而清單錯在清單會犯的錯：它列了四
 // 條 link 拼寫，於是有人補上 `link-to-usr//`、`link-to-usr/./` 等七條完全相同情形的
 // 拼寫時，得到的是七個新工作項目——一個已經審視並接受過的差異。類會自己吸收新成員；
@@ -910,65 +912,6 @@ function declareCrossLayerClass({ name, hook: hookVerdictDeclared, cli: cliVerdi
 // 匯出的判斷式來問，分類才不會跟它描述的守衛脫節。
 const lexicalTarget = (spelling) => hook.normalizedTarget(spelling, sandbox, HOME);
 const hookRefuses = (spelling) => hook.protectedReason(spelling, sandbox, HOME, hookExtraDirs) !== null;
-const absoluteSpelling = (spelling) => (path.isAbsolute(spelling) ? spelling : path.join(sandbox, spelling));
-// NFC + lower-case: the two ways one object can wear two spellings without a
-// symlink. Folding them together is how the symlink class refuses to claim them.
-// NFC ＋小寫：同一物件在沒有 symlink 的情況下能有兩種拼寫的兩種方式；把它們折疊在
-// 一起，正是 symlink 那一類拒絕認領它們的方法。
-const foldSpelling = (value) => value.normalize('NFC').toLowerCase();
-
-// Walked over the spelling AS WRITTEN, not over its lexical resolution:
-// `link/..` collapses lexically to a path with no link in it at all, and the
-// only place the symlink is still visible is the spelling.
-// 走的是「原樣拼寫」而不是字面解析後的路徑：`link/..` 字面收斂後裡面一條連結都沒有。
-// What a resolver that FOLLOWS links sees, which is what better-rm is looking at
-// when it calls readlink -f. Node's own fs.realpathSync cannot be used for this:
-// it lexically collapses '..' before it resolves anything, so it reports
-// realpathSync('<sandbox>/link-to-usr/..') as the sandbox, while `readlink -f`
-// on the same spelling prints '/' -- the parent of the link's TARGET. Getting
-// that wrong does not make the class too broad, it makes it too narrow: the
-// `link/..` row would be reported as a brand new hole on every run.
-// 這是「會跟著連結走」的解析器看到的東西，也就是 better-rm 呼叫 readlink -f 時看到
-// 的。不能用 Node 的 fs.realpathSync：它會先字面收斂 '..' 再解析，於是把
-// '<sandbox>/link-to-usr/..' 說成 sandbox，而 readlink -f 印的是 '/'（連結目標的父
-// 目錄）。搞錯的後果不是類太寬而是太窄：那一列每次執行都會被當成全新的洞。
-function resolveFollowingLinks(absolute) {
-  let current = '/';
-  for (const part of absolute.split('/')) {
-    if (part === '' || part === '.') continue;
-    if (part === '..') {
-      current = path.dirname(current);
-      continue;
-    }
-    current = path.join(current, part);
-    for (let hops = 0; hops < 40; hops += 1) {
-      let entry;
-      try {
-        entry = fs.lstatSync(current);
-      } catch (_) {
-        return null;
-      }
-      if (!entry.isSymbolicLink()) break;
-      const target = fs.readlinkSync(current);
-      current = path.isAbsolute(target) ? target : path.resolve(path.dirname(current), target);
-    }
-  }
-  return current;
-}
-
-function someStrictPrefixIsSymlink(absolute) {
-  const parts = absolute.split('/');
-  let prefix = '';
-  for (let index = 1; index < parts.length - 1; index += 1) {
-    prefix += `/${parts[index]}`;
-    try {
-      if (fs.lstatSync(prefix).isSymbolicLink()) return true;
-    } catch (_) {
-      return false;
-    }
-  }
-  return false;
-}
 
 // -- the hook reads command text, better-rm reads argv ---------------------
 // The hook is handed the command BEFORE the shell expands it, and it cannot know
@@ -1002,66 +945,6 @@ declareCrossLayerClass({
     const asHookReadsIt = lexicalTarget(row.spelling);
     return asHookReadsIt !== path.resolve(sandbox, row.spelling)
       || hook.globCanMatchGit(asHookReadsIt);
-  },
-});
-
-// -- the hook never touches the filesystem, better-rm must ------------------
-// A trailing slash (and `/.`, and `/..`) forces resolution of the final component,
-// so `link/` reaches the TARGET: measured, `rm -rf link/` returns 0, destroys the
-// target's contents and leaves the link behind. better-rm sees that -- it has to,
-// because its own move would follow the link -- and refuses. The hook resolves the
-// path lexically and cannot see it.
-// It stays that way on purpose. The hook runs as a PreToolUse gate on EVERY agent
-// command; a stat that blocks blocks the agent itself, and this machine mounts a
-// cloud filesystem that has hard-deadlocked on exactly that kind of access. The
-// alternative -- refusing every trailing-slash argument -- would refuse
-// `rm -rf build/`, which is ordinary work, and the brief is explicit that ordinary
-// directory removals must keep working. So the hook accepts that it cannot see a
-// symlink, and the residual gap (`rm -rf ~/applink/` on the agent path) is recorded
-// as an open item rather than papered over.
-// 結尾斜線會強制解析最後一段，所以 `link/` 碰到的是 target；better-rm 看得見（它自己
-// 的搬移也會跟過去）因此拒絕，hook 只做字面解析看不見。這是刻意的：hook 是每一次
-// agent 命令都會經過的閘門，一次會阻塞的 stat 就會卡住整個 agent，而這台機器上就掛著
-// 一個曾經因為這種存取而硬死鎖的雲端檔案系統；而「一律拒絕結尾斜線」會連 `rm -rf
-// build/` 都擋掉。殘留的缺口列為待辦，不是假裝不存在。
-declareCrossLayerClass({
-  name: 'the hook cannot stat, better-rm must',
-  hook: 'ALLOW',
-  cli: 'DENY',
-  why: 'resolution walked through a symlink component onto a path the hook would refuse if it could see it',
-  mechanism(row) {
-    const absolute = absoluteSpelling(row.spelling);
-    let itself;
-    try {
-      itself = fs.lstatSync(absolute);
-    } catch (_) {
-      // Nothing to resolve: a dangling link, a glob, a path that is not there.
-      // 沒有東西可解析：斷連結、萬用字元、不存在的路徑。
-      return false;
-    }
-    // better-rm deliberately does NOT resolve an argument that is itself a link,
-    // so a bare link cannot be in this class -- and the corpus proves it agrees.
-    // better-rm 刻意不解析「引數自己就是連結」，所以裸連結不屬於這一類。
-    if (itself.isSymbolicLink()) return false;
-    if (!someStrictPrefixIsSymlink(absolute)) return false;
-    const resolved = resolveFollowingLinks(absolute);
-    if (resolved === null) return false;
-    const lexical = lexicalTarget(row.spelling);
-    if (resolved === lexical) return false;
-    // One object under two spellings with no symlink in the way -- a case fold
-    // or a different Unicode normalisation. The hook can close those with a
-    // string operation, so they are holes and stay red.
-    // 同一物件的兩種拼寫、路上沒有 symlink——大小寫或 Unicode 正規化。hook 用字串
-    // 運算就能補，所以那是洞，必須維持紅燈。
-    if (foldSpelling(resolved) === foldSpelling(lexical)) return false;
-    // The hook has to be right about the resolved path and wrong only because it
-    // could not reach it. If it would refuse the lexical path too, the row is not
-    // about resolution; if it would permit the resolved path, better-rm's refusal
-    // is a difference of POLICY and belongs in the report, not in a class.
-    // hook 必須「對解析後的路徑判斷正確、只是搆不到」。字面路徑它也拒絕，那這一列
-    // 就不是解析造成的；解析後的路徑它會放行，那 better-rm 的拒絕是政策差異。
-    if (hookRefuses(lexical)) return false;
-    return hookRefuses(resolved);
   },
 });
 
