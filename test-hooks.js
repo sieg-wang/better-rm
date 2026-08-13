@@ -142,6 +142,16 @@ const blocked = [
   'rm -rf /et\\\nc',
   'rm -rf "/et\\\nc"',
   'sudo rm -rf \\\n/var',
+  // What /etc and /var NAME. On macOS both are symlinks into /private, so the
+  // protected spelling and the thing holding the data are different paths:
+  // measured, realpath(/etc) is /private/etc and realpath(/var) is /private/var,
+  // and both were ALLOW on both guards while /etc and /var were DENY. Removing
+  // the resolved path destroys exactly what protecting /etc is for.
+  // /etc 與 /var 在 macOS 上都是指進 /private 的連結，所以「受保護的拼寫」與「真正存資料
+  // 的那個目錄」是兩條不同的路徑（實測 realpath 分別是 /private/etc 與 /private/var），
+  // 而後者在兩道守衛上都是放行的。刪掉解析後的那條，等於把保護 /etc 的意義整個拿掉。
+  'rm -rf /private/etc',
+  'rm -rf /private/var',
   // The outer single quotes keep the continuation literal, so it is the INNER
   // shell that joins the lines -- the nested parse has to remove it too.
   "bash -c 'rm -rf \\\n/boot'",
@@ -227,6 +237,14 @@ const allowed = [
   // 歸位字元不是換行，bash 也不把「反斜線接 CR」當接續（od 實測引數是 / e t <CR> c）。
   // 修復只丟換行、不丟別的，所以這一列必須維持放行。
   'rm -rf /et\\\rc',
+  // Matching stays EXACT: what is protected is the directory itself, never its
+  // contents. /private/tmp in particular is where scratch work lives and must not
+  // follow /private/etc onto the list.
+  // 比對維持精確比對：保護的是目錄本身、不是它的內容。/private/tmp 是暫存工作的地方，
+  // 不可以跟著 /private/etc 一起被加進清單。
+  'rm -rf /private/etc/some-config',
+  'rm -rf /private/var/folders/xx/scratch',
+  'rm -rf /private/tmp/scratch',
   // The same misreading, running the other way. A continuation line was parsed
   // as a fresh command, so its first word became the executable; when that word
   // is an expansion the executable is unknowable, the command is assumed to be

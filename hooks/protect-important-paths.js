@@ -11,11 +11,20 @@ const path = require('path');
 // Kept in step with better-rm's own PROTECTED_DIRS; test-hooks.js compares the
 // two lists directly, because on the agent path this hook is the only guard.
 // 與 better-rm 的 PROTECTED_DIRS 保持一致；agent 路徑上只有這支 hook 在守。
+// /private/etc and /private/var are what /etc and /var NAME on macOS (measured:
+// realpath(/etc) is /private/etc). A protected spelling whose contents live at an
+// unprotected path is not protected: removing /private/etc destroys exactly what
+// listing /etc is for, and both were allowed on both guards. /private/tmp is
+// deliberately NOT here -- that is where scratch work lives.
+// /private/etc 與 /private/var 是 macOS 上 /etc 與 /var 真正指到的地方（實測 realpath）。
+// 受保護的拼寫如果內容存在一條沒受保護的路徑上，那份保護就是空的。/private/tmp 刻意不
+// 加：那是暫存工作的地方。
 const SYSTEM_DIRS = [
   '/', '/Applications', '/Library', '/Network', '/System', '/System/Volumes',
   '/Users', '/Volumes',
   '/bin', '/boot', '/cores', '/dev', '/etc', '/home', '/lib', '/lib64', '/mnt',
-  '/opt', '/private', '/proc', '/root', '/sbin', '/sys', '/usr', '/var',
+  '/opt', '/private', '/private/etc', '/private/var', '/proc', '/root', '/sbin',
+  '/sys', '/usr', '/var',
 ];
 
 // The directories whose first level is a mount root rather than an ordinary
