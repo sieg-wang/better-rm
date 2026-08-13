@@ -23,18 +23,34 @@ FAILED_TESTS=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BETTER_RM="$SCRIPT_DIR/better-rm"
 
+# 每一次執行都有自己的一組 fixture。這四個路徑本來是寫死的 /tmp/better-rm-test-*，而
+# setup() 一開頭就對它們 rm -rf，於是兩個同時跑的 test-better-rm.sh 會互相把對方正在用的
+# 目錄刪掉。實際發生過：2026-08-13 一位獨立驗收者量到「baseline 3 個失敗 vs HEAD 67 個
+# 失敗」，差一步就要回報一次大規模退化，而真正的原因是另一個 session 在跑同一套測試。
+# 這種假失敗特別危險，因為它看起來完全像真的退化——數字很大、只出現在 HEAD、重跑還會變。
+# 加上 PID 之後，同一台機器上的並行執行各自獨立；BETTER_RM_TEST_RUN_ID 讓呼叫者（CI
+# matrix、手動並跑）能指定自己的識別碼。
+# Each run gets its own fixtures. These four paths were fixed literals under /tmp
+# and setup() begins by rm -rf'ing them, so two concurrent test-better-rm.sh runs
+# delete each other's live directories. This happened: on 2026-08-13 an independent
+# reviewer measured "3 failures at baseline vs 67 at HEAD" and was one step from
+# reporting a catastrophic regression that was entirely another session running the
+# same suite. That failure mode is especially dangerous because it looks exactly
+# like a real regression -- large, one-sided, and it changes on re-run.
+TEST_RUN_ID="${BETTER_RM_TEST_RUN_ID:-$$}"
+
 # 測試用的垃圾桶目錄 (Test trash directory)
-TEST_TRASH_DIR="/tmp/better-rm-test-trash"
+TEST_TRASH_DIR="/tmp/better-rm-test-trash.$TEST_RUN_ID"
 
 # 測試用的狀態目錄 (Test state directory)
-TEST_STATE_DIR="/tmp/better-rm-test-state"
+TEST_STATE_DIR="/tmp/better-rm-test-state.$TEST_RUN_ID"
 
 # 測試用的工作目錄 (Test working directory)
-TEST_WORK_DIR="/tmp/better-rm-test-work"
+TEST_WORK_DIR="/tmp/better-rm-test-work.$TEST_RUN_ID"
 
 # 測試不可寫狀態目錄時使用的一般檔案
 # Regular file used to test an unavailable state directory
-TEST_STATE_BLOCKER="/tmp/better-rm-test-state-blocker"
+TEST_STATE_BLOCKER="/tmp/better-rm-test-state-blocker.$TEST_RUN_ID"
 
 # 顯示測試標題 (Display test title)
 test_title() {
@@ -112,6 +128,44 @@ echo ""
 # ============================================================================
 # 測試 1: 版本與說明 (Test 1: Version and Help)
 # ============================================================================
+test_title "測試 0: 測試框架本身"
+
+test_item "setup() 不得刪掉另一個並行執行的 fixture"
+# 造一個「另一個執行」會擁有的目錄，用的正是修掉之前那個寫死的名稱，所以這一列在寫死
+# 的版本上必定紅：那個版本的 setup() 會把它刪掉。
+# Plant a directory a CONCURRENT run would own, spelled with the fixed name these
+# paths used to have, so this row is red on that version by construction: its
+# setup() deletes exactly this path.
+concurrent_fixture="/tmp/better-rm-test-work"
+mkdir -p "$concurrent_fixture"
+: > "$concurrent_fixture/canary"
+setup
+if [ -f "$concurrent_fixture/canary" ]; then
+    test_pass "並行執行的 fixture 未被這一次的 setup 刪除"
+else
+    test_fail "setup() 刪掉了另一個執行的 fixture（fixture 路徑又變回寫死的了）"
+fi
+rm -rf "$concurrent_fixture"
+
+test_item "四個 fixture 路徑都必須帶著這一次執行的識別碼"
+# 上一項是行為，這一項是結構：任何一個路徑被改回寫死的字面值，這裡就紅。兩項都要，
+# 因為行為那一項只驗到 work 目錄，而 trash/state/blocker 同樣會互相踩。
+# The row above is behavioural and only exercises the work directory; this one is
+# structural and covers all four, so trash/state/blocker cannot quietly go back to
+# a fixed literal while the behavioural row stays green.
+runid_missing=""
+for fixture_path in "$TEST_TRASH_DIR" "$TEST_STATE_DIR" "$TEST_WORK_DIR" "$TEST_STATE_BLOCKER"; do
+    case "$fixture_path" in
+      *".$TEST_RUN_ID") ;;
+      *) runid_missing="$runid_missing $fixture_path" ;;
+    esac
+done
+if [ -z "$runid_missing" ]; then
+    test_pass "四個 fixture 路徑都以執行識別碼結尾"
+else
+    test_fail "這些 fixture 路徑沒有帶執行識別碼:${runid_missing}"
+fi
+
 test_title "測試 1: 版本與說明資訊"
 
 test_item "測試 --version 參數"
