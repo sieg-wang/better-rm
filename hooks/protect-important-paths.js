@@ -780,6 +780,9 @@ function commandTargets(command, depth = 0) {
     }
     let executable = '';
     let executableIndex = -1;
+    // Set when a wrapper hands the command its operands on stdin (xargs), where
+    // the paths are unknowable before the command runs.
+    let stdinCompletesOperands = false;
 
     // Wrapper commands can be chained arbitrarily (for example
     // `sudo env SAFE=1 command bash -c ...`). Unwrap each layer until the
@@ -964,6 +967,28 @@ function commandTargets(command, depth = 0) {
         continue;
       }
 
+      if (executable === 'xargs') {
+        // xargs EXECUTES the command itself, so `| xargs rm -rf` reaches /bin/rm
+        // with no `rm` in command position, past the shell alias and past this
+        // guard. Unwrap to the command it runs, and remember that its operands
+        // are completed from stdin -- which a pre-execution gate cannot read.
+        // xargs 自己就會執行那個命令，所以 `| xargs rm -rf` 會直接碰到 /bin/rm，命令位置
+        // 上根本沒有 rm，shell alias 與這道守衛都繞過去了。這裡拆到它真正要跑的命令，並
+        // 記住它的操作元會由 stdin 補上——那是前置閘門讀不到的東西。
+        stdinCompletesOperands = true;
+        i += 1;
+        const optionsWithValue = new Set([
+          '-a', '--arg-file', '-d', '--delimiter', '-E', '-e', '--eof',
+          '-I', '--replace', '-i', '-L', '--max-lines', '-l',
+          '-n', '--max-args', '-P', '--max-procs', '-s', '--max-chars',
+        ]);
+        while (i < words.length && words[i].startsWith('-')) {
+          i += optionsWithValue.has(words[i]) ? 2 : 1;
+        }
+        executable = '';
+        continue;
+      }
+
       break;
     }
 
@@ -977,6 +1002,14 @@ function commandTargets(command, depth = 0) {
     const unresolvedExecutable = executable !== ''
       && hasUnresolvedTargetExpansion(dynamicExpansions[executableIndex]);
     if (executable) i += 1;
+    if (['rm', 'rmdir'].includes(executable) && stdinCompletesOperands) {
+      // The literal operands below are still scanned, but the ones arriving on
+      // stdin are the whole point of the pipeline and cannot be read here. That
+      // is the same unknowable as `rm -rf "$DIR"`, and it gets the same answer.
+      // 底下的字面操作元照舊掃，但整條管線的重點是那些從 stdin 進來的路徑，這裡讀不到。
+      // 這與 `rm -rf "$DIR"` 是同一種不可知，答案也一樣。
+      targets.push('/');
+    }
     if (['rm', 'rmdir'].includes(executable) || unresolvedExecutable) {
       for (; i < words.length && !terminators.has(words[i]); i += 1) {
         const candidate = words[i];
@@ -1043,6 +1076,32 @@ function commandTargets(command, depth = 0) {
         else targets.push(...commandTargets(nestedCommand, depth + 1));
       }
       while (i < words.length && !separators.has(words[i])) i += 1;
+    } else if (executable === 'find') {
+      // find deletes on its own with -delete, and through the -exec family when
+      // the command it runs is rm. Either way the paths it walks are literal
+      // operands sitting right here, so they are judged as rm targets -- which
+      // keeps `find . -name '*.pyc' -delete` ordinary and refuses
+      // `find /etc -delete`.
+      // A find that neither deletes nor execs rm is a reader, and almost every
+      // find is a reader; treating them all as deleters would refuse a listing.
+      // find 自己用 -delete 就會刪，用 -exec 那一族碰到 rm 也會刪。兩種情形要走的路徑都是
+      // 就寫在指令裡的字面操作元，所以直接拿它們當 rm 的目標判。既不刪也不 exec rm 的
+      // find 只是在讀，而絕大多數 find 都是在讀，全部當成刪除工具會擋掉列檔案。
+      const searchRoots = [];
+      let deletes = false;
+      while (i < words.length && !terminators.has(words[i]) && !words[i].startsWith('-')) {
+        searchRoots.push(words[i]);
+        i += 1;
+      }
+      for (; i < words.length && !terminators.has(words[i]); i += 1) {
+        if (words[i] === '-delete') deletes = true;
+        if (['-exec', '-execdir', '-ok', '-okdir'].includes(words[i])
+          && ['rm', 'rmdir'].includes(path.basename(words[i + 1] || ''))) deletes = true;
+      }
+      if (deletes) {
+        // GNU find defaults to the working directory when no path is given.
+        for (const root of searchRoots.length > 0 ? searchRoots : ['.']) targets.push(root);
+      }
     } else if (executable === 'eval') {
       const nestedCommand = [];
       for (; i < words.length && !separators.has(words[i]); i += 1) {

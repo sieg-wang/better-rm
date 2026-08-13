@@ -164,6 +164,26 @@ const blocked = [
   // body is executed by the shell before the reader ever sees it.
   // 未加引號的結束標記仍會展開，內文裡的命令替換會先被執行。
   'cat <<EOF\n$(rm -rf /boot)\nEOF',
+  // rm reached through another program. `xargs` runs /bin/rm directly, so it
+  // bypasses the shell alias as well as this guard -- and the paths arrive on
+  // stdin, where a pre-execution gate cannot see them. That is the same
+  // unknowable this file already fails closed on for `rm -rf "$DIR"`, so it is
+  // answered the same way rather than with a second, softer rule.
+  // 透過別的程式碰到 rm。xargs 直接執行 /bin/rm，繞過 shell alias 也繞過這道守衛，而路徑
+  // 從 stdin 進來——前置閘門看不見。這與本檔對 `rm -rf "$DIR"` 已經採取的 fail-closed 是
+  // 同一種「不可知」，所以用同一種方式回答。
+  'echo /etc | xargs rm -rf',
+  'find . -name x | xargs rm -rf',
+  'xargs -0 rm -rf',
+  'find /tmp -print0 | xargs -0 -n 50 rm -rf',
+  'xargs rm -rf /var',
+  // find deletes by itself, and the paths it walks are right there in the words.
+  // find 自己就會刪，而它要走的路徑就寫在指令裡。
+  'find /etc -delete',
+  'find /etc -name x -delete',
+  'find /usr -exec rm -rf {} +',
+  'find /var -type d -execdir rm -rf {} \\;',
+  'find / -name core -delete',
   // The outer single quotes keep the continuation literal, so it is the INNER
   // shell that joins the lines -- the nested parse has to remove it too.
   "bash -c 'rm -rf \\\n/boot'",
@@ -282,6 +302,20 @@ const allowed = [
   // The message this guard refused on 2026-08-13: prose that QUOTES the very
   // example the fail-closed rule exists for.
   "git commit -F - <<'MSG'\nAssuming an unknowable executable is rm must stay -- `CMD=rm; $CMD -rf /` really is rm.\nMSG",
+  // find that does not delete is a reader, and the overwhelming majority of find
+  // invocations are readers. Only -delete and the -exec family reaching rm make
+  // it a deleter.
+  // 不刪東西的 find 只是在讀，而絕大多數 find 都是在讀。只有 -delete 與 -exec 那一族碰到
+  // rm 時它才是刪除工具。
+  'find /etc -name x',
+  'find / -type f -print',
+  'find /usr -exec grep -l TODO {} +',
+  'find . -name "*.pyc" -delete',
+  'find build -delete',
+  'find . -exec rm -rf {} +',
+  // xargs that does not reach rm is ordinary.
+  'echo hi | xargs -n1 echo',
+  'find . -name "*.o" | xargs grep -l main',
   'rm -rf /private/etc/some-config',
   'rm -rf /private/var/folders/xx/scratch',
   'rm -rf /private/tmp/scratch',
