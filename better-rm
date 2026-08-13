@@ -521,14 +521,17 @@ is_protected() {
                                   ${declared_extras[@]+"${declared_extras[@]}"}; do
                 declared_entry="${declared_entry%/}"
                 [ -n "$declared_entry" ] || continue
-                # 成本短路，不是規則：拿掉它判定不會變，套件也不會紅（實測）。inode 在
-                # 同一個 device 內唯一，不是連結的項目不可能與這個引數同 dev:ino。它省下
-                # 的是 stat：這個測試是內建的（不 fork），一次擋掉二十幾次 stat 呼叫。
-                # A COST short-circuit, not a rule: removing it cannot change a verdict
-                # and no test goes red for it (measured). An inode is unique within its
-                # device, so an entry that is not a link can never carry this
-                # argument's dev:ino. What it saves is the stat -- the test itself is a
-                # builtin, and it removes twenty-odd forks per symlink argument.
+                # 這一行與上面 [ -L "$path" ] 那一行，單獨拿掉任一行都不會改變判定
+                # （inode 在同一 device 內唯一，非連結不可能與連結同 dev:ino），各自只
+                # 買到速度（省下二十幾次 stat fork）。但兩行一起拿掉就是規則本身：比對
+                # 會脫離 symlink 的範圍，宣告過的普通檔案的第二個名字（hard link）會被
+                # 拒絕，而刪掉那個名字不會動到那個檔案。
+                # This line and the [ -L "$path" ] test above are removable one at a
+                # time without changing a verdict -- an inode is unique within its
+                # device, so a non-link cannot carry a link's dev:ino -- and each on its
+                # own buys only speed (twenty-odd fewer stat forks). TOGETHER they are
+                # the rule: remove both and a second NAME for a declared ordinary file
+                # is refused, though unlinking it leaves that file in place.
                 [ -L "$declared_entry" ] || continue
                 declared_identity=$(stat -c '%d:%i' "$declared_entry" 2>/dev/null ||
                     stat -f '%d:%i' "$declared_entry" 2>/dev/null || true)

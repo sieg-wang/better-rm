@@ -221,6 +221,12 @@ const allowed = [
   // 單引號原樣保留反斜線接換行（實測引數就是 / e t \ <nl> c），所以這指的是一個名字裡
   // 有換行的檔案，不是 /etc。
   "rm -rf '/et\\\nc'",
+  // A carriage return is not a newline, and bash does not treat backslash-CR as
+  // a continuation: measured with od, `/et\<CR>c` arrives as / e t <CR> c. The
+  // fix drops the NEWLINE and nothing else, so this must stay allowed.
+  // 歸位字元不是換行，bash 也不把「反斜線接 CR」當接續（od 實測引數是 / e t <CR> c）。
+  // 修復只丟換行、不丟別的，所以這一列必須維持放行。
+  'rm -rf /et\\\rc',
   // The same misreading, running the other way. A continuation line was parsed
   // as a fresh command, so its first word became the executable; when that word
   // is an expansion the executable is unknowable, the command is assumed to be
@@ -1030,47 +1036,56 @@ let resolutionChecks = 0;
   fs.rmSync(box, { recursive: true, force: true });
 }
 
-// An inode number identifies an object only WITHIN a device, so the identity
-// comparison above has to carry both halves. Dropping the device half is a
-// refusal in the wrong direction: a link on a second volume that happens to be
-// numbered like a declared entry would be refused with no override, on a hook
-// that gates every agent command.
-// Two objects with equal inode numbers on different devices cannot be made to
-// order -- inode numbers are not ours to choose -- so this is the one property
-// here that no fixture can produce. It is driven through a stat shim instead:
-// the hook runs as its own process with fs.lstatSync patched to answer for ONE
-// path with a borrowed inode and a device that is one higher. Correct code sees
-// two devices and allows; code that compares inodes alone refuses. That is the
-// same technique test-better-rm.sh uses on the CLI side (make_xdev_stat_shim),
-// applied to the guard that has no PATH to shim.
-// inode 只在同一個 device 內唯一，所以身分比對必須帶著 dev 那一半。少了它是往「誤擋」
-// 的方向錯：第二顆卷宗上編號恰好相同的連結會被無條件拒絕。可是「不同 device、相同
-// inode」的兩個物件造不出來（inode 編號不是我們能指定的），所以這一項改用 stat shim
-// 驅動：hook 跑在自己的行程裡，fs.lstatSync 被替換成對某一條路徑回報「借來的 inode ＋
-// 高一號的 device」。正確的碼看見兩個 device 而放行，只比 inode 的碼則拒絕。
+// The ARITHMETIC of the identity comparison: which fields are read, and at what
+// precision. Three properties live here that no ordinary fixture can produce,
+// because they need inode numbers chosen to order and inode numbers are not ours
+// to choose. They are driven through a stat shim instead -- the hook runs as its
+// own process with fs.lstatSync answering fabricated dev/ino for named paths --
+// which is the technique test-better-rm.sh already uses on the CLI side
+// (make_xdev_stat_shim), applied to the guard that has no PATH to shim.
+// 身分比對的「算術」：讀哪些欄位、用什麼精度。這裡有三個性質是普通 fixture 造不出來
+// 的，因為它們需要指定 inode 編號，而 inode 不是我們能指定的。改用 stat shim 驅動。
+//
+// The control that matters is NOT the declared entry itself: that path is on
+// BETTER_RM_PROTECTED_DIRS, so its refusal comes from the lexical exact match and
+// never reaches the identity rule at all. (Measured: with the identity rule
+// stubbed to return null, a declared-entry assertion still passes -- it proves
+// nothing.) The control below is a SECOND SPELLING of the declared link, reached
+// through an aliased parent, which only the identity rule can refuse.
+// 正對照不能用「宣告項目自己」：那條路徑在清單上，拒絕來自字面比對，根本走不到身分
+// 規則（實測：把身分規則整個 stub 成 null，那條斷言照樣通過，等於什麼都沒證明）。
+// 下面用的是「經別名父目錄碰到同一條宣告連結」，只有身分規則能拒絕它。
 let deviceChecks = 0;
 {
   const box = fs.realpathSync(fs.mkdtempSync(`${os.tmpdir()}/better-rm-hook-device-`));
   fs.mkdirSync(`${box}/actual`);
   fs.symlinkSync(`${box}/actual`, `${box}/declared-link`);
   fs.symlinkSync(`${box}/actual`, `${box}/other-link`);
+  fs.symlinkSync(box, `${box}/self`);
+  // A declared entry that is an ordinary FILE, and a second NAME for that same
+  // file. Both are non-links, which is what the pair of isSymbolicLink()
+  // short-circuits exists to keep out of the comparison.
+  // 一個「宣告的普通檔案」與它的第二個名字（hard link）。兩者都不是連結。
+  const declaredFile = `${box}/declared-file`;
+  fs.writeFileSync(declaredFile, 'declared\n');
+  fs.linkSync(declaredFile, `${box}/hardlink-file`);
 
-  const shim = `${box}/borrow-inode.js`;
+  const shim = `${box}/fabricate-identity.js`;
   fs.writeFileSync(shim, `
     const fs = require('fs');
     const real = fs.lstatSync;
-    const BORROWER = ${JSON.stringify(`${box}/other-link`)};
-    const LENDER = ${JSON.stringify(`${box}/declared-link`)};
+    // path -> { dev, ino } as DECIMAL STRINGS, so the same fixture drives both the
+    // BigInt and the Number reading of the same numbers.
+    const OVERRIDES = JSON.parse(process.env.IDENTITY_OVERRIDES || '{}');
     fs.lstatSync = function (target, options) {
       const stats = real.call(fs, target, options);
-      if (String(target) !== BORROWER) return stats;
-      const lender = real.call(fs, LENDER, options);
-      // The borrower keeps its own everything except the two fields the identity
-      // rule reads: it takes the lender's inode and sits on the next device.
+      const override = OVERRIDES[String(target)];
+      if (!override) return stats;
+      const cast = (text) => (options && options.bigint ? BigInt(text) : Number(text));
       return new Proxy(stats, {
         get(object, key) {
-          if (key === 'ino') return lender.ino;
-          if (key === 'dev') return typeof lender.dev === 'bigint' ? lender.dev + 1n : lender.dev + 1;
+          if (key === 'ino' && override.ino !== undefined) return cast(override.ino);
+          if (key === 'dev' && override.dev !== undefined) return cast(override.dev);
           const value = object[key];
           return typeof value === 'function' ? value.bind(object) : value;
         },
@@ -1078,7 +1093,7 @@ let deviceChecks = 0;
     };
   `);
 
-  const shimmedVerdict = (spelling) => {
+  const shimmedVerdict = (spelling, overrides = {}) => {
     const child = spawnSync('node', ['-r', shim, `${__dirname}/hooks/protect-important-paths.js`], {
       input: JSON.stringify({
         hook_event_name: 'PreToolUse',
@@ -1087,23 +1102,85 @@ let deviceChecks = 0;
         cwd: box,
       }),
       encoding: 'utf8',
-      env: { ...process.env, HOME: `${box}/home`, BETTER_RM_PROTECTED_DIRS: `${box}/declared-link` },
+      env: {
+        ...process.env,
+        HOME: `${box}/home`,
+        BETTER_RM_PROTECTED_DIRS: [`${box}/declared-link`, declaredFile].join(':'),
+        IDENTITY_OVERRIDES: JSON.stringify(overrides),
+      },
     });
     assert.equal(child.status, 0, `the shimmed hook must answer, not crash: ${child.stderr}`);
     return /"permissionDecision":"deny"/.test(child.stdout || '') ? 'DENY' : 'ALLOW';
   };
+  const shimDenies = (spelling, overrides, why) => {
+    assert.equal(shimmedVerdict(spelling, overrides), 'DENY', why);
+    deviceChecks += 1;
+  };
+  const shimAllows = (spelling, overrides, why) => {
+    assert.equal(shimmedVerdict(spelling, overrides), 'ALLOW', why);
+    deviceChecks += 1;
+  };
 
-  // Positive control first: with the shim in place the declared entry itself is
-  // still refused, so an ALLOW below means the device was compared and not that
-  // the shim broke the rule outright.
-  // 先立正對照：shim 在的情況下宣告的那一條仍然被拒絕，這樣底下的 ALLOW 才代表
-  // 「device 有被比對」，而不是 shim 把整條規則弄壞了。
-  assert.equal(shimmedVerdict(`${box}/declared-link`), 'DENY',
-    'the declared entry is still refused while the shim is loaded');
-  deviceChecks += 1;
-  assert.equal(shimmedVerdict(`${box}/other-link`), 'ALLOW',
-    'a link on another device with the same inode number is not the declared entry');
-  deviceChecks += 1;
+  // The real control: reached only through the identity rule, with the shim
+  // loaded and doing nothing, so everything below runs in a process where that
+  // rule is known to work.
+  shimDenies(`${box}/self/declared-link`, {},
+    'the control: a second spelling of the declared link is refused, so the identity rule fires here');
+  // And the shim can drive that same verdict, so an ALLOW below is the comparison
+  // rejecting the fabricated numbers rather than the shim breaking the rule.
+  const real = fs.lstatSync(`${box}/declared-link`, { bigint: true });
+  shimDenies(`${box}/other-link`, {
+    [`${box}/other-link`]: { dev: real.dev.toString(), ino: real.ino.toString() },
+  }, 'a link fabricated to carry the declared entry dev AND ino is refused');
+
+  // DEVICE. An inode identifies an object only within a device. Comparing inodes
+  // alone refuses a link on a second volume that happens to be numbered like a
+  // declared entry -- an over-refusal with no override, on a gate that runs on
+  // every agent command.
+  // dev。inode 只在同一個 device 內唯一；少了 dev 這一半，第二顆卷宗上編號恰好相同的
+  // 連結會被無條件拒絕。
+  shimAllows(`${box}/other-link`, {
+    [`${box}/other-link`]: { dev: (real.dev + 1n).toString(), ino: real.ino.toString() },
+  }, 'a link on another device with the same inode number is not the declared entry');
+
+  // PRECISION. Node reads st_ino as a double unless asked for BigInt, and an APFS
+  // inode is routinely past 2^53 (measured on this machine: /etc is ino
+  // 1152921500312571429 and /sbin/fsck_exfat is 1152921500312571449 -- DIFFERENT
+  // objects that become the SAME double). The two numbers below are fabricated
+  // rather than borrowed from the volume so the row means the same thing on a
+  // filesystem with small inodes: 2^54+1 and 2^54+2 are distinct integers and one
+  // double, because the gap between doubles at 2^54 is 4.
+  // 精度。Node 預設把 st_ino 讀成 double，而 APFS 的 inode 動輒超過 2^53（實測 /etc 與
+  // /sbin/fsck_exfat 是不同物件卻是同一個 double）。這裡的兩個數字是造出來的，不是從這
+  // 顆卷宗借的，所以在 inode 很小的檔案系統上也測到同一件事：2^54+1 與 2^54+2 是兩個
+  // 相異整數、同一個 double。
+  const nearCollision = {
+    [`${box}/declared-link`]: { ino: (2n ** 54n + 1n).toString() },
+    [`${box}/other-link`]: { ino: (2n ** 54n + 2n).toString() },
+  };
+  shimAllows(`${box}/other-link`, nearCollision,
+    'two inode numbers that differ as integers and collide as doubles are two objects');
+  // Control for that row: hand the ARGUMENT the lender's fabricated number too.
+  // Now the two are equal at both precisions and the rule refuses, so the ALLOW
+  // above is the numbers differing and not the fabrication disabling the rule.
+  // 上一列的對照：把「引數」也覆寫成 lender 那個造出來的號碼。兩者在兩種精度下都相等、
+  // 規則因此拒絕，證明上一列的 ALLOW 是「兩個號碼不同」而不是「造假把規則弄壞了」。
+  shimDenies(`${box}/self/declared-link`, {
+    ...nearCollision,
+    [`${box}/self/declared-link`]: { ino: (2n ** 54n + 1n).toString() },
+  }, 'the same fabrication refuses when the two numbers really are equal');
+
+  // The two isSymbolicLink() short-circuits are individually removable without
+  // changing a verdict, and TOGETHER they are what confines this rule to links.
+  // Remove both and a second NAME for a declared ordinary file -- a hard link,
+  // which shares dev and ino with it -- is refused, even though unlinking that
+  // name leaves the declared file exactly where it was.
+  // 兩個 isSymbolicLink 短路各自拿掉都不會改變判定，但兩個一起拿掉，就會讓「宣告過的
+  // 普通檔案的第二個名字」（hard link，與它同 dev 同 ino）被拒絕——而刪掉那個名字根本
+  // 不會動到宣告的那個檔案。
+  shimDenies(declaredFile, {}, 'the declared file itself is refused');
+  shimAllows(`${box}/hardlink-file`, {},
+    'a second name for a declared ordinary file is not that entry: unlinking it leaves the file');
 
   fs.rmSync(box, { recursive: true, force: true });
 }

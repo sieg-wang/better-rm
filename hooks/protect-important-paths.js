@@ -525,10 +525,16 @@ function protectedReason(target, cwd, home, extraDirs = []) {
 // filesystem. So ask the filesystem the same way here -- is this argument that
 // entry? -- rather than folding the string, which would be a guess about the
 // volume and wrong on a case-sensitive one.
-// It cannot widen the class it protects: the answer is yes only when the
-// argument IS a declared entry, so the ~/applink shortcut this rule exists to
-// keep deletable stays deletable, and so does every other link that merely
-// points at something declared.
+// What it widens, exactly, measured rather than claimed: dev:ino names an
+// INODE while rm unlinks a NAME, so a second name for a declared entry -- a hard
+// link to the link itself -- is refused too, even though unlinking it leaves the
+// declared entry in place. Reaching that shape takes linkat(2) with
+// AT_SYMLINK_FOLLOW cleared (macOS `ln` refuses it; GNU `ln` does it by default),
+// and it is an over-refusal in the safe direction, so it is accepted and stated
+// here rather than worked around. Nothing else moves: every link that merely
+// POINTS AT something declared stays deletable -- the ~/applink shortcut this
+// rule exists to protect, and, measured across all 64,253 symlinks on this
+// machine's sealed system volume, exactly the three declared ones match.
 // 引數自己就是一條連結時，剩下的唯一問題。解析在那裡停住是刻意的（刪連結碰不到它指向
 // 的東西），於是只剩「拼寫」在判它——但拼寫是字串，清單上的項目是一個物件。這台 Mac 上
 // /etc、/var、/home 都是連結：/ETC 與 /etc 是同一條連結（實測同 dev:ino），卻只有小寫
@@ -553,16 +559,22 @@ function declaredLink(value, cwd, home, extraDirs) {
     // agent command, and an exception here denies every Bash call on the machine.
     return null;
   }
-  // A COST short-circuit, not a rule: deleting it cannot change a verdict, and
-  // no test here goes red for it (measured -- the whole suite stays green with
-  // this line removed). An inode is unique within its device, so an argument
-  // that is not a link can never carry the same dev:ino as an entry that is one;
-  // the loop below would simply run and find nothing. What it saves is the loop
-  // itself, on every ordinary target that reaches this far -- one lstat instead
-  // of twenty-six, on a gate that runs on every agent command.
-  // 這是成本短路，不是規則：拿掉它判定不會變，套件也不會紅（實測）。inode 在同一個
-  // device 內唯一，非連結的引數不可能與是連結的清單項目同 dev:ino。它省下的是底下那圈
-  // 迴圈——每一個走到這裡的普通目標，一次 lstat 而不是二十六次。
+  // This line and the one on the declared side are removable ONE AT A TIME
+  // without changing a verdict -- an inode is unique within its device, so an
+  // argument that is not a link cannot carry the same dev:ino as an entry that is
+  // one -- and each on its own buys only speed: one lstat instead of twenty-six
+  // on every ordinary target that reaches this far.
+  // TOGETHER they are the rule. Remove both and the comparison escapes symlinks
+  // entirely: a second NAME for a declared ordinary file (a hard link, which does
+  // share its dev and ino) is refused, though unlinking that name leaves the
+  // declared file exactly where it was. That pair is pinned by the hard-link row
+  // in test-hooks.js, which is why deleting either line alone still leaves the
+  // suite green and deleting both does not.
+  // 這一行與宣告端那一行，「單獨拿掉任一行」都不會改變判定（inode 在同一 device 內唯一，
+  // 非連結不可能與連結同 dev:ino），各自只買到速度。但「兩行一起拿掉」就是規則本身：
+  // 比對會脫離 symlink 的範圍，宣告過的普通檔案的第二個名字（hard link，同 dev 同 ino）
+  // 會被拒絕，而刪掉那個名字根本不會動到那個檔案。這一對由 test-hooks.js 的 hard link
+  // 那一列釘住。
   if (!argument.isSymbolicLink()) return null;
   for (const entry of [...SYSTEM_DIRS, home, ...extraDirs]) {
     const spelling = path.resolve(entry);

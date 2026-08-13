@@ -4164,6 +4164,97 @@ else
     test_fail "第二種拼寫未被保護或誤擋（連結存在=$([ -L "$identity_declared" ] && echo yes || echo no)；刪其他連結 exit=${identity_other_allowed}；訊息=${identity_e2e}）"
 fi
 
+test_item "身分比對必須帶著 device 那一半，不能只比 inode"
+# inode 只在同一個 device 內唯一。少了 dev 這一半，第二顆卷宗上編號恰好相同的連結會被
+# 無條件拒絕。「不同 device、相同 inode」的兩個物件造不出來（inode 編號不是我們能指定
+# 的），所以改用 stat shim 驅動——與這支套件既有的 make_xdev_stat_shim 同一招。
+# shim 會把「借方」那條路徑改成問「出借方」，再把 device 加一；因此它會照著 better-rm
+# 當下要求的格式回答：格式若被改成只有 %i，shim 就沒有 device 可加，兩邊變成相等而被
+# 拒絕——這正是這一項要抓的退化。
+# An inode identifies an object only within a device. Dropping the device half
+# refuses a link on a second volume that happens to be numbered like a declared
+# entry. Two objects with equal inode numbers on different devices cannot be made
+# to order, so this runs through a stat shim, the same technique
+# make_xdev_stat_shim already uses here. The shim answers for the BORROWER by
+# asking about the LENDER and bumping the device, and it honours whatever format
+# better-rm asked for -- so a format reduced to just %i has no device to bump, the
+# two sides become equal, and the refusal this test forbids appears.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+identity_home="$TEST_WORK_DIR/identity-home"
+mkdir -p "$identity_home" identity/actual
+ln -s "$TEST_WORK_DIR/identity/actual" "$TEST_WORK_DIR/identity/declared-link"
+ln -s "$TEST_WORK_DIR/identity/actual" "$TEST_WORK_DIR/identity/other-link"
+identity_declared="$TEST_WORK_DIR/identity/declared-link"
+identity_borrower="$TEST_WORK_DIR/identity/other-link"
+identity_shim_bin="$TEST_WORK_DIR/identity-shim-bin"
+mkdir -p "$identity_shim_bin"
+cat > "$identity_shim_bin/stat" <<'EOF'
+#!/bin/sh
+# 先擋自己：BETTER_RM_REAL_STAT 若解析回這支 shim，exec 會變成無限自我取代（單一行程
+# 永遠不結束，看起來像整套測試卡住）。實測踩過一次，所以這裡失敗要大聲。
+# Refuse to be our own delegate: if BETTER_RM_REAL_STAT resolves back to this
+# script, the exec below replaces the process with itself forever -- one process,
+# no output, the whole suite apparently hung. Measured once; fail loudly instead.
+case "$BETTER_RM_REAL_STAT" in
+  ''|*identity-shim-bin/stat)
+    printf 'identity stat shim: BETTER_RM_REAL_STAT is missing or points at the shim: %s\n' \
+        "$BETTER_RM_REAL_STAT" >&2
+    exit 70
+    ;;
+esac
+if [ "$#" -eq 3 ] && [ "$3" = "$BETTER_RM_BORROWER" ]; then
+    out=$("$BETTER_RM_REAL_STAT" "$1" "$2" "$BETTER_RM_LENDER") || exit $?
+    if [ "${BETTER_RM_DEV_BUMP:-1}" = 1 ]; then
+        case "$out" in
+          *:*) out="$(( ${out%%:*} + 1 )):${out#*:}" ;;
+        esac
+    fi
+    printf '%s\n' "$out"
+    exit 0
+fi
+exec "$BETTER_RM_REAL_STAT" "$@"
+EOF
+chmod +x "$identity_shim_bin/stat"
+# 在 PATH 被改掉之前先解析出真正的 stat。放進同一個命令前綴裡會太晚：那一串賦值是左到右
+# 生效的，$(command -v stat) 會在新 PATH 之下解析，於是「真 stat」指回 shim 自己。
+# Resolve the real stat BEFORE the PATH prefix exists. Doing it inside the same
+# assignment list is too late: those assignments take effect left to right, so
+# $(command -v stat) would resolve under the shimmed PATH and name the shim.
+identity_real_stat="$(command -v stat)"
+identity_shimmed_says_yes() {
+    # $1 = path to judge, $2 = 1 to bump the device, 0 to answer verbatim
+    PATH="$identity_shim_bin:$PATH" \
+    BETTER_RM_REAL_STAT="$identity_real_stat" \
+    BETTER_RM_BORROWER="$identity_borrower" \
+    BETTER_RM_LENDER="$identity_declared" \
+    BETTER_RM_DEV_BUMP="$2" \
+    HOME="$identity_home" BETTER_RM_PROTECTED_DIRS="$identity_declared" bash -c '
+        eval "$(sed -n "/^PROTECTED_DIRS=(/,/^)/p;/^PROTECTED_PATTERNS=(/,/^)/p" "$1")"
+        eval "$(sed -n "/^normalize_path()/,/^}/p;/^is_protected()/,/^}/p" "$1")"
+        if [ "$(type -t is_protected)" != function ] ||
+           [ "${#PROTECTED_DIRS[@]}" -eq 0 ]; then
+            exit 99
+        fi
+        is_protected "$2"
+    ' better-rm-is-protected "$BETTER_RM" "$1"
+}
+identity_dev_problem=""
+# 正對照：shim 照原樣回答（不加一）時，借方與出借方同 dev 同 ino，必須被拒絕——證明
+# 這條路徑真的走到身分比對，下面那個 ALLOW 才有意義。
+# Positive control: answering verbatim makes the two identical, so the refusal
+# proves the comparison runs at all and the ALLOW below means the device differed.
+identity_shimmed_says_yes "$identity_borrower" 0 ||
+    identity_dev_problem="$identity_dev_problem 對照未被拒絕(同dev同ino)"
+if identity_shimmed_says_yes "$identity_borrower" 1; then
+    identity_dev_problem="$identity_dev_problem 另一個device上同inode的連結被誤擋"
+fi
+if [ -z "$identity_dev_problem" ]; then
+    test_pass "device 那一半有被比對：同 inode 但不同 device 的連結未被誤擋"
+else
+    test_fail "device 半邊未被比對:${identity_dev_problem}"
+fi
+
 test_item "\$HOME 被拒絕且內容完好（端到端）"
 # 上一項證明清單被認定為受保護，這一項證明那個判斷真的攔在 move_to_trash 前面。
 # HOME 指向 sandbox，所以就算保護整個壞掉，被搬走的也只是 sandbox。
