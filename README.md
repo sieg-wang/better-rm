@@ -340,6 +340,10 @@ export BETTER_RM_PROTECTED_DIRS="$HOME/work/secrets:$HOME/vault"
 - `/Volumes` 與其第一層掛載根目錄 - 掛載磁碟（外接碟、Time Machine、網路共享，例如 `/Volumes/Backup`）
 - `/cores` - 核心傾印檔目錄
 - `/private` - `/etc`、`/tmp`、`/var` 的實體位置
+- `/private/etc`、`/private/var` - macOS 的 `/etc` 與 `/var` 是指向這兩個目錄的 symlink
+  （`readlink -f` 實測），資料真正放在這裡。比對是精確比對，所以保護 `/etc` 而不保護
+  `/private/etc`，等於保護了一個名字、沒保護那份資料。`/private/tmp` 刻意不在清單上——
+  那是暫存工作的地方。
 
 ### 使用者目錄
 
