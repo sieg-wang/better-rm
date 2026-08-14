@@ -465,6 +465,30 @@ export BETTER_RM_PROTECTED_DIRS="/srv/data:/workspace/secrets"
 hooks 執行時需要 `node` 可用。Codex 還會要求使用者透過 `/hooks` 審閱並信任
 專案 hook；其他代理也可能依各自的安全設定要求確認。
 
+### `find` 什麼時候被當成刪除工具
+
+絕大多數的 `find` 只是在讀，全部當成刪除工具會擋掉列檔案，所以 hook 只在 `find`
+**真的會刪**的時候才判它走過的路徑：出現 `-delete`，或 `-exec`／`-execdir`／`-ok`／
+`-okdir` 要跑的命令是 `rm`／`rmdir`。要跑的命令會先拆掉外殼再比對，所以
+`-exec sudo rm`、`-exec nice rm`、`-exec env SAFE=1 command rm` 與 `-exec rm` 判定相同。
+`-exec` 命令自己的操作對象也會被判（`find . -exec rm -rf /etc \;` 每找到一個檔案就對
+`/etc` 跑一次 `rm`），而外殼自己的選項值不會（`sudo -u root` 裡的 `root` 不是刪除目標）。
+
+**`\;` 是子句終止符，不是命令結束。** 收掉 `-exec` 子句的 `;` 必須躲開 shell，所以寫成
+`\;` 或 `';'`；三種拼寫斷詞後長得一模一樣，但只有**裸的** `;` 會結束命令。hook 靠斷詞器
+留下的旗標分辨，因此 `find /etc -exec cat {} \; -delete` 會被拒絕（實測真的 BSD `find`
+會把整棵樹刪光），而 `find . -exec ls {} ; -delete` 裡的裸 `;` 照舊結束命令，後面那一段
+各自判斷。只有 `;` 與 `+` 會終止子句（POSIX），所以跳脫或加引號的 `|`、`&`、`(`
+不會——`find /etc -exec cat {} '|' -delete` 實測回 `no terminating ";" or "+"`、exit 1、
+什麼都沒刪，因此不擋。
+
+**已知仍然放行的形狀**（列出來，而不是留給你踩到；每一種在先前的版本也一樣放行）：
+`-exec` 後面接 shell carrier（`find . -exec sh -c 'rm -rf /etc' \;`，以及 `bash`、`zsh`、
+`sudo sh` 的拼寫）、經 `xargs` 到達的 `rm`、命令字要展開後才知道的
+（`-exec $CMD -rf /etc`、`"$CMD"`、反引號），以及巢狀的
+`find … -exec find … -exec rm`。這些在命令位置上寫同樣的字會被擋，`-exec` 後面不會：
+兩邊共用的是「外殼清單」，不是整套判定。
+
 ### 自動安裝 Coding Agent hooks / Automatic Coding Agent hook installation
 
 `install-hooks.sh` 目前已支援下列 Agent：`claude`、`codex`、`cursor`、`copilot`、`antigravity`、`qoder`、`pi`、`opencode`、`grok`。

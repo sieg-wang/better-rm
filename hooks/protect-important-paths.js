@@ -168,9 +168,23 @@ function shellWords(command) {
   let quote = '';
   let escaped = false;
 
-  function pushWord(value) {
+  // Whether the word at this index was written as an unquoted shell OPERATOR
+  // rather than as text that happens to spell one. `;`, `\;` and `';'` all
+  // tokenize to the same one-character word, and only the first of the three
+  // ends a command -- the other two are find's -exec clause terminator, which is
+  // an ordinary operand as far as the shell is concerned. Without this flag the
+  // find scan had to guess, guessed "shell separator", and stopped; every find
+  // operator after a `\;` was then invisible to every rule in this file.
+  // 這個字是不是「未加引號的 shell 運算子」，而不是剛好拼成運算子的文字。`;`、`\;`、`';'`
+  // 斷出來是同一個單字元字，但只有第一個會結束命令，另外兩個是 find 的 -exec 子句終止符
+  // ——對 shell 而言只是普通操作元。沒有這個旗標，find 的掃描只能猜，而它猜「shell 分隔
+  // 符」就停下來，於是 `\;` 後面的每一個 find 運算子對本檔案的所有規則都是隱形的。
+  const operatorTokens = [];
+
+  function pushWord(value, writtenAsOperator = false) {
     words.push(value);
     dynamicExpansions.push(wordHasDynamicExpansion);
+    operatorTokens.push(writtenAsOperator);
     wordHasDynamicExpansion = false;
   }
 
@@ -306,11 +320,11 @@ function shellWords(command) {
         });
       }
       pendingHeredocs.length = 0;
-      pushWord('\n');
+      pushWord('\n', true);
       index = Math.min(position, input.length) - 1;
     } else if (';&|()<>\n'.includes(char)) {
       if (word) pushWord(word), word = '';
-      pushWord(char);
+      pushWord(char, true);
     } else if (/\s/.test(char)) {
       if (word) pushWord(word), word = '';
     } else {
@@ -321,6 +335,7 @@ function shellWords(command) {
   if (escaped) word += '\\';
   if (word) pushWord(word);
   Object.defineProperty(words, 'dynamicExpansions', { value: dynamicExpansions });
+  Object.defineProperty(words, 'operatorTokens', { value: operatorTokens });
   Object.defineProperty(words, 'heredocs', { value: heredocs });
   return words;
 }
@@ -1000,6 +1015,13 @@ function declaredLink(value, cwd, home, extraDirs) {
 function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
   const words = shellWords(command);
   const dynamicExpansions = words.dynamicExpansions || [];
+  // Which words were written as unquoted shell operators. Only the find branch
+  // consults it, and only for `;`: everywhere else a separator-shaped word is
+  // treated as a separator exactly as before, which keeps this change to the one
+  // question that needed answering.
+  // 哪些字是「未加引號的 shell 運算子」。只有 find 那一支會問，而且只問 `;`：其他地方對長得
+  // 像分隔符的字照舊當分隔符，這個改動就只回答需要回答的那一個問題。
+  const operatorTokens = words.operatorTokens || [];
   const targets = [];
   const separators = new Set([';', '&', '|', '(', ')', '<', '>', '\n']);
   // Redirections (`<`, `>`) stay within a simple command; they are not command
@@ -1493,7 +1515,28 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
         i += 1;
       }
       const execOperands = [];
-      for (; i < words.length && !terminators.has(words[i]); i += 1) {
+      for (; i < words.length; i += 1) {
+        if (terminators.has(words[i])) {
+          // The `;` that closes an -exec clause has to be hidden from the shell,
+          // so it is written `\;` or `';'` -- and the tokenizer turns all three
+          // spellings into the same one-character word. Only the bare one ends
+          // the command; the escaped and quoted ones end the CLAUSE and the find
+          // keeps going. Reading them all as "the command ends here" made every
+          // find operator after the first clause invisible, and the natural
+          // spelling of the shape is the one that deletes:
+          //   find /etc -exec cat {} \; -delete
+          // measured DENY nowhere and a real BSD find emptying the tree (4 files
+          // -> 0). It needed no wrapper and no trick, and it was allowed at every
+          // revision in this round until here, including against `/`, `~`, `.git`
+          // and BETTER_RM_PROTECTED_DIRS.
+          // 收掉 -exec 子句的那個 `;` 必須躲開 shell，所以要寫成 `\;` 或 `';'`——而斷詞器把
+          // 三種拼寫都變成同一個單字元字。只有裸的那個會結束命令；跳脫與加引號的那兩個結束
+          // 的是「子句」，find 還會繼續。把三者都當成「命令到此為止」，會讓第一個子句之後
+          // 的每一個 find 運算子都變成隱形，而這個形狀最自然的拼寫正好就會刪東西（實測真的
+          // BSD find 把整棵樹清空，4 個檔案變 0）。
+          if (words[i] !== ';' || operatorTokens[i]) break;
+          continue;
+        }
         if (words[i] === '-delete') deletes = true;
         // The word after -exec is the command find runs, and it can wear the
         // same wrapper layers any other command can. Comparing that one word

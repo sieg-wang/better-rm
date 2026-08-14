@@ -385,6 +385,34 @@ the trash volume (same on `main`, unchanged here).
 
 ### Disclosed, not fixed
 
+- **The `-exec` branch shares the wrapper list with command position, not the
+  decision.** Both call `resolveExecutable`, so `-exec sudo rm`, `-exec nice rm`
+  and `-exec env SAFE=1 command rm` are all read as rm. Command position has
+  three further rules the find branch does not: it fails closed on a command word
+  that only exists after expansion, it fails closed on operands that arrive via
+  `xargs`, and it descends into shell carriers. So `find . -exec sh -c 'rm -rf
+  /etc' \;` (and the `bash`/`zsh`/`sudo sh` spellings), `-exec $CMD -rf /etc`,
+  an rm reached through `xargs`, and a nested `find … -exec find … -exec rm` are
+  allowed, while the same words written directly are refused. Every one of them
+  is allowed at the previous release too; none is a regression. Folding the
+  remaining three rules in is a real change with its own over-refusal surface,
+  not a one-line addition, which is why it is disclosed rather than done.
+- **A `;` is only find's clause terminator when it was NOT written as a shell
+  operator.** `;`, `\;` and `';'` tokenize to the same one-character word, so the
+  tokenizer records which spelling produced it and the find scan asks. That flag
+  is consulted for `;` and for nothing else: only `;` and `+` terminate an
+  `-exec` clause (POSIX), so an escaped or quoted `|`, `&` or `(` still ends the
+  read. Measured, real BSD find answers `no terminating ";" or "+"` and removes
+  nothing for those, so the narrower rule is the accurate one — but it means the
+  flag exists for exactly one character, and anyone widening it should expect
+  over-refusals rather than new coverage.
+- **`+` cannot be added to `terminators`, however obvious it looks.** It ends an
+  `-exec` clause exactly as `;` does, so putting it in the set is the natural
+  simplification — and it stops the clause skip without ending the find loop, so
+  the wrapper scan is re-entered once per clause and the quadratic returns:
+  measured 40,561 ms at 20,000 clauses, eight times the hook's own 5 s timeout,
+  which means no verdict at all. The `+` question is handled where the blind step
+  is instead, in `resolveExecutable`'s `timeout` branch.
 - **The `HASH` column describes the object as it was when it was hashed, not
   necessarily what is in the trash.** `move_to_trash` hashes the source, then
   reserves a name, re-verifies the source's `device:inode`, and moves. The inode

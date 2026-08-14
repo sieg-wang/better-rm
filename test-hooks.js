@@ -318,6 +318,37 @@ const blocked = [
   'find ~ -exec timeout -s {} + ! -delete',
   'find /workspace/secrets -exec timeout -s {} + ! -delete',
   '$(find /etc -exec timeout -s {} + ! -delete)',
+  // The `;` that closes an -exec clause must be hidden from the shell, so it is
+  // written `\;` or `';'` -- and all three spellings tokenize to the same
+  // one-character word. Only the BARE one ends the command. Reading them all as
+  // "the command ends here" made every find operator after the first clause
+  // invisible to every rule in this file, and the natural spelling of the shape
+  // is the one that deletes: measured in a sandbox, real BSD find ran
+  // `find victim -exec cat {} \; -delete` and took the tree from 4 files to 0.
+  // No wrapper and no trick, and it was allowed at every revision of this round
+  // until the tokenizer started saying which `;` was written as an operator.
+  // The backslash must be REAL: '\;' in a JS string collapses to ';', which is a
+  // bare separator and a command find refuses to run at all (no terminator), so
+  // that spelling passes with the bug live. Hence '\\;' in every row here.
+  // 收掉 -exec 子句的 `;` 必須躲開 shell，所以寫成 `\;` 或 `';'`——三種拼寫斷出來是同一個
+  // 字，但只有裸的那個會結束命令。把三者都當成「命令到此為止」，會讓第一個子句之後的每一個
+  // find 運算子對本檔案所有規則隱形，而這個形狀最自然的拼寫正好會刪東西（sandbox 實測真的
+  // BSD find 把 4 個檔案刪成 0）。反斜線必須是真的：JS 字串裡的 '\;' 會塌成 ';'，那是裸分隔
+  // 符、find 根本不會執行，bug 還在也照樣通過，所以這裡每一列都寫 '\\;'。
+  'find /etc -exec cat {} \\; -delete',
+  'find / -exec cat {} \\; -delete',
+  'find ~ -exec ls {} \\; -delete',
+  'find .git -exec cat {} \\; -delete',
+  'find /workspace/secrets -exec cat {} \\; -delete',
+  "find /etc -exec cat {} ';' -delete",
+  'find /etc -exec cat {} ";" -delete',
+  'find . -exec ls {} \\; -exec rm -rf /etc \\;',
+  'find . -exec ls {} \\; -exec sudo rm -rf /usr \\;',
+  'find /usr -exec cat {} \\; -name x -delete',
+  'find /etc -exec cat {} \\; -o -delete',
+  "bash -c 'find /etc -exec cat {} \\; -delete'",
+  'find /etc -exec sudo \\; -delete',
+  'find /etc -exec cat {} \\; -exec cat {} \\; -delete',
   // A heredoc body executed by a shell that is NOT the heredoc's own command.
   // All measured to run the rm, all refused before this round, all allowed after
   // it until the command-position check landed.
@@ -492,6 +523,33 @@ const allowed = [
   'find . -exec timeout 30 pytest {} \\;',
   'find . -exec timeout -k 5 10 ls {} +',
   'find build -exec timeout 5 rm -f {} +',
+  // Reading an escaped `;` as a clause terminator must not turn ordinary
+  // multi-clause finds into deleters of protected paths -- these keep working,
+  // and a BARE `;` still ends the command, so what follows it is judged on its
+  // own (`-delete` alone is not a find at all).
+  // 把跳脫的 `;` 讀成子句終止符，不能把普通的多子句 find 變成刪保護路徑的工具；裸的 `;`
+  // 照舊結束命令，後面那一段各自判斷。
+  'find . -exec cat {} \\; -delete',
+  'find build -exec cat {} \\; -delete',
+  'find . -exec grep -l TODO {} \\; -print',
+  'find . -exec chmod 644 {} \\; -exec chown me {} \\;',
+  'find dist -exec rm -f {} \\; -delete',
+  'find . -exec ls {} ; -delete',
+  // Only `;` and `+` terminate an -exec clause -- that is POSIX, not a local
+  // quirk. So the "written as an operator" question is asked about `;` ALONE,
+  // and an escaped or quoted `|`, `&`, `(` or newline still ends the read here.
+  // Asking it about every terminator instead is the one mutation the rows above
+  // cannot kill, and it is an over-refusal: measured, real BSD find answers
+  //   find: -exec: no terminating ";" or "+"
+  // exits 1 and removes nothing, with the files still there afterwards. These
+  // rows are what make that a decision rather than an accident.
+  // 只有 `;` 與 `+` 會終止 -exec 子句（這是 POSIX，不是本機怪癖），所以「是不是寫成運算子」
+  // 只對 `;` 問；跳脫或加引號的 `|`、`&`、`(`、換行照舊結束這裡的讀取。對每一個終止符都問
+  // 是上面那些列殺不掉的唯一突變，而且是誤擋：實測真的 BSD find 直接報
+  // 「no terminating ";" or "+"」、exit 1、什麼都沒刪。
+  "find /etc -exec cat {} '|' -delete",
+  "find /etc -exec cat {} '&' -delete",
+  "find /usr -exec cat {} '(' -delete",
   // xargs that does not reach rm is ordinary.
   'echo hi | xargs -n1 echo',
   'find . -name "*.o" | xargs grep -l main',
