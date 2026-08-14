@@ -1860,6 +1860,99 @@ let findClauseTimingChecks = 0;
   }
 }
 
+// A gate that runs out of time is a gate that did not answer: Claude Code's
+// PreToolUse hook timeout produces NO decision and does not block the call, so a
+// command that outruns the timeout runs unjudged. The per-target cost is bounded
+// but the NUMBER of targets is the caller's to choose, and each target costs up
+// to three filesystem calls -- twenty-six when it is a symlink. Measured against
+// a `/etc` that really is removed: 60,000 relative symlink operands took
+// 6,215 ms at d3aed08 in 300 KB of command text, past the live 5,000 ms timeout.
+// 逾時的閘門等於沒有回答：Claude Code 的 PreToolUse hook 逾時不產生任何裁決、也不會擋下呼
+// 叫，所以跑贏逾時的命令會不受判定地執行。單一目標成本有上限，但目標「數量」由呼叫端決定，
+// 每個目標最多三次檔案系統呼叫，是 symlink 時二十六次。實測（刪的是真的 /etc）：60,000 個
+// 相對 symlink 操作元在 d3aed08 要 6,215 ms，命令本文只有 300 KB，超過 live 的 5,000 ms。
+let targetLimitChecks = 0;
+{
+  const box = fs.realpathSync(fs.mkdtempSync(`${os.tmpdir()}/better-rm-hook-limit-`));
+  fs.mkdirSync(`${box}/actual`);
+  fs.symlinkSync(`${box}/actual`, `${box}/link`);
+  const time = (command, cwd = '/workspace/project') => {
+    const started = process.hrtime.bigint();
+    const result = evaluate(claude(command, cwd), env)?.hookSpecificOutput;
+    return {
+      verdict: result?.permissionDecision,
+      reason: result?.permissionDecisionReason || '',
+      ms: Number(process.hrtime.bigint() - started) / 1e6,
+    };
+  };
+  const operands = (count, word) => Array.from({ length: count }, (_, k) => (
+    word.includes('#') ? word.replace('#', String(k)) : word
+  )).join(' ');
+
+  // A budget is not a count: many CHEAP targets are still judged to the end and
+  // allowed. 20,000 of them cost about 340 ms here, and a count cap set anywhere
+  // near a safe time would have refused every one of these commands.
+  // 時間預算不是數量上限：很多「便宜」的目標照樣判到最後並放行。這裡 20,000 個約 340 ms，而
+  // 任何設在安全時間附近的數量上限都會把這種命令整條擋掉。
+  const manyCheap = time(`rm -f ${operands(20000, '/workspace/project/pad-#')}`);
+  assert.notEqual(
+    manyCheap.verdict, 'deny',
+    `20,000 ordinary targets are judged, not refused (${manyCheap.ms}ms)`,
+  );
+  targetLimitChecks += 1;
+
+  // The shape that outran the live timeout, with the operands that cost the
+  // most: every one is a symlink, which is the only target that makes the
+  // declared-entry comparison run. Measured without this bound: 6,215 ms at
+  // d3aed08 for the relative spelling, past the live 5,000 ms timeout, and a
+  // timed-out hook does not block the command. The assertion budget is generous
+  // on purpose -- this row is not measuring speed, it is measuring that the gate
+  // ANSWERS AT ALL.
+  // 跑贏 live 逾時的那個形狀，用最貴的操作元：每一個都是 symlink，那是唯一會觸發宣告項目比
+  // 對的目標。沒有這個界限時實測：d3aed08 的相對拼法 6,215 ms，超過 live 的 5,000 ms 逾時，
+  // 而逾時的 hook 不會擋下命令。斷言的上限刻意放寬——這一列量的不是快慢，是「閘門到底有沒有
+  // 回答」。
+  const symlinkFlood = time(`rm -rf ${operands(120000, `${box}/link`)} /etc`);
+  assert.equal(symlinkFlood.verdict, 'deny', '120,000 symlink targets followed by /etc is refused');
+  assert.ok(
+    symlinkFlood.ms < 3500,
+    `120,000 symlink targets answered in ${symlinkFlood.ms}ms, and the live hook timeout is 5,000ms`,
+  );
+  // ...and the refusal says which one it is: the gate stopped reading, it did not
+  // find a protected directory and it did not fail to resolve a variable. It
+  // names how many of how many it judged, so the message can be checked against
+  // the command.
+  // ……而且訊息要說清楚是哪一種：閘門停止讀取，不是找到受保護目錄、也不是變數解不開。訊息要
+  // 寫出「判了幾個、總共幾個」，才能拿命令對照。
+  assert.ok(
+    /120001/.test(symlinkFlood.reason),
+    `the refusal names the total target count: ${symlinkFlood.reason.slice(0, 160)}`,
+  );
+  assert.ok(
+    /judged \d+ of them within 2000ms/.test(symlinkFlood.reason),
+    'the refusal says how many targets it judged and inside what budget',
+  );
+  assert.ok(
+    !/Refused to remove protected directory/.test(symlinkFlood.reason),
+    'the out-of-time refusal does not claim a protected directory',
+  );
+  targetLimitChecks += 5;
+
+  // A protected path found BEFORE the budget ran out still wins the message: the
+  // out-of-time answer is what is left when nothing more useful was read.
+  // 預算用完之前找到的受保護路徑仍然決定訊息：「時間用完」是沒讀到更有用的東西時才會出現的
+  // 答案。
+  const protectedFirst = time(`rm -rf /etc ${operands(120000, `${box}/link`)}`);
+  assert.equal(protectedFirst.verdict, 'deny', 'a protected path in front of a flood is still refused');
+  assert.ok(
+    /Refused to remove protected directory/.test(protectedFirst.reason),
+    'a protected path read before the budget ran out keeps the protected-directory wording',
+  );
+  targetLimitChecks += 2;
+
+  fs.rmSync(box, { recursive: true, force: true });
+}
+
 let deviceChecks = 0;
 {
   const box = fs.realpathSync(fs.mkdtempSync(`${os.tmpdir()}/better-rm-hook-device-`));
@@ -2109,7 +2202,7 @@ async function runOpenCodePluginChecks() {
 // 否則「沒跑到」會看起來是綠的。
 process.exitCode = 1;
 runOpenCodePluginChecks().then((pluginChecks) => {
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + findClauseTimingChecks + variableResolutionChecks + pluginChecks}`);
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + findClauseTimingChecks + variableResolutionChecks + targetLimitChecks + pluginChecks}`);
   process.exitCode = 0;
 }).catch((error) => {
   console.error(error && error.stack ? error.stack : error);

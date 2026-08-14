@@ -435,6 +435,23 @@ the trash volume (same on `main`, unchanged here).
   refused with "protected directory: /". The refusal is right; the wording has
   the same defect the variable case had and was left alone this round only
   because it is a different mechanism with its own rows.
+- **The gate stops judging after 2,000 ms and refuses what it did not read.**
+  Per-target cost is bounded but the NUMBER of targets is the caller's, and a
+  symlink target costs twenty-six `lstat` calls because that is when
+  `declaredLink()` compares it against every declared entry. Measured against a
+  `/etc` that really is removed: `rm -rf <60,000 relative symlink operands> /etc`
+  took 6,215 ms at `d3aed08` in 300 KB of command text, and a 30 MB spelling of
+  the same shape never answered at all — past the live 5,000 ms hook timeout,
+  which produces NO decision and does not block the call. That is older than
+  variable resolution: judging every operand is what this gate has always done.
+  A time budget rather than a target count, because per-target cost spans two
+  orders of magnitude: a 5,000-target cap was tried first and refused
+  `find . -exec rm …x6000` (6,001 targets, 118 ms, deletes nothing, pinned as
+  ordinary by the suite). What the budget does NOT cover, stated rather than left
+  to be found: the tokenizing pass runs before the first check, at roughly 40 ms
+  per megabyte of command text, so a command large enough to outrun the timeout
+  on parsing alone is not stopped here. Measured after: the 30 MB shape answers
+  in 3.7 s.
 - **A `;` is only find's clause terminator when it was NOT written as a shell
   operator.** `;`, `\;` and `';'` tokenize to the same one-character word, so the
   tokenizer records which spelling produced it and the find scan asks. That flag

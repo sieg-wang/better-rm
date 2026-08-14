@@ -1881,6 +1881,64 @@ function extractInput(payload) {
 // 這是「算不出來」的拒絕，不能借用受保護目錄那套措辭：命令並沒有寫到受保護目錄，把 `/` 當
 // 成引數報出來，只會讓人去找一個他從來沒寫過的 `/`。要指名解不開的那個操作元、直說答案是
 // 未知而不是危險，並給出繞法：`cd` 過去、用相對路徑寫，那裡沒有展開，會被逐字判定。
+// How long this gate will spend judging targets before it refuses instead of
+// answering. A single target costs a bounded amount of work, but the NUMBER of
+// targets is the caller's to choose, and each one costs up to three filesystem
+// calls -- twenty-six when the target is a symlink, because that is when
+// declaredLink() has to compare it against every declared entry.
+// Measured on this machine, all against a `/etc` that really is removed, and all
+// against the live 5,000 ms hook timeout (a PreToolUse hook that times out makes
+// NO decision and does not block the call, so a slow gate is an absent one):
+//   rm -rf <60,000 relative symlink operands> /etc   6,215 ms at d3aed08, 300 KB
+//   rm -rf <60,000 "$PWD"/link operands> /etc        4,386 ms here,      720 KB
+//   rm -rf <260,000 "$HOME"/pad-N operands> /etc     4,584 ms here,      4.8 MB
+// The first of those is older than this budget and older than variable
+// resolution: judging every operand is what this gate has always done, and the
+// number of operands was never bounded. Resolution did not open that door, it
+// only made the variable spelling as expensive as the literal one always was.
+// A TIME budget rather than a target COUNT, because the cost per target spans
+// two orders of magnitude and a count cannot tell the two apart: measured, a
+// count cap of 5,000 refused `find . -exec rm ...x6000` -- 6,001 targets, 118 ms,
+// a command that deletes nothing and that this suite pins as ordinary -- while
+// letting through shapes that cost far more. The budget refuses only what really
+// cannot be judged in time, and it adapts to a machine slower than this one.
+// What it does NOT cover, stated rather than left to be found: the tokenizing
+// pass that produces the targets runs before the first check, at roughly 40 ms
+// per megabyte of command text (measured, 316 ms for 4.8 MB), so a command large
+// enough to outrun the timeout on parsing alone is not stopped here.
+// 這個閘門在「改成拒絕」之前，最多花多少時間判定目標。單一目標的成本有上限，但目標「數量」
+// 由呼叫端決定，而每個目標最多三次檔案系統呼叫——是 symlink 時二十六次，因為那時 declaredLink
+// 必須拿它跟每一個宣告項目比對。上面三列都是實測、刪的都是真的 /etc；live hook 逾時是
+// 5,000 ms，而逾時的 PreToolUse hook 不做任何裁決、也不會擋下呼叫，所以「慢」等於「不存在」。
+// 第一列比這個預算、也比變數解析更老：逐一判定每個操作元一直是這個閘門的做法，數量從來沒有
+// 上限。用「時間」而不是「數量」，是因為每個目標的成本差兩個數量級，數量分不出來：實測 5,000
+// 的數量上限會擋掉 `find . -exec rm …x6000`（6,001 個目標、118 ms、什麼都不刪，而且本測試
+// 套件把它釘為普通命令），卻放過成本高得多的形狀。時間預算只擋真的判不完的東西，而且在比這
+// 台更慢的機器上會自動調整。它「不」涵蓋的部分明講：產生目標的斷詞在第一次檢查之前就跑完，
+// 成本約每 MB 40 ms（實測 4.8 MB 為 316 ms），所以光靠斷詞就跑贏逾時的巨大命令，這裡擋不住。
+const JUDGING_BUDGET_MS = 2000;
+
+// The refusal for a command this gate ran out of time on. It is not a
+// protected-directory refusal and it is not an unresolved-variable one: the
+// operands may all be ordinary, and the gate is saying it stopped reading.
+// Saying so is the whole point -- the alternative is running out of time, which
+// on a PreToolUse hook is not a refusal at all.
+// 閘門「時間用完」時的拒絕。它既不是受保護目錄、也不是解不開的變數：那些操作元可能全都很普
+// 通，閘門只是說「我停止讀了」。說出來正是重點——另一條路是超時，而超時在 PreToolUse hook 上
+// 根本不算拒絕。
+function unjudgeableDenial(judgedCount, totalCount, isCopilot, isAntigravity, isCursor, isGrok) {
+  const zh = `拒絕刪除：這條命令有 ${totalCount} 個刪除目標，這道閘門在 ${JUDGING_BUDGET_MS}ms 內`
+    + `只判定了 ${judgedCount} 個，其餘沒有讀到。逾時的 PreToolUse hook 不會做出任何裁決，`
+    + `也就不會擋下命令，所以這裡選擇拒絕而不是來不及回答。`
+    + `繞法：拆成多條命令，或改成刪除它們的上層目錄。`;
+  const en = `Refused to remove: this command has ${totalCount} deletion targets and this gate`
+    + ` judged ${judgedCount} of them within ${JUDGING_BUDGET_MS}ms; the rest went unread.`
+    + ` A PreToolUse hook that times out makes no decision and does not block the command,`
+    + ` so this refuses rather than answering too late.`
+    + ` Workaround: split it into several commands, or remove their parent directory instead.`;
+  return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
+}
+
 function unknownDenial(operand, isCopilot, isAntigravity, isCursor, isGrok) {
   const zh = `拒絕刪除：無法在執行前確定 '${operand}' 會展開成哪一條路徑，因此不予放行`
     + `（這不是說它是受保護的目錄，是說這道閘門不知道它是什麼）。`
@@ -1958,11 +2016,32 @@ function evaluate(payload, env = process.env) {
   // 刻意分兩輪。一條命令可能同時寫了真正受保護的路徑，又帶著這個閘門解不開的變數；對使用者
   // 更有用的是前者，所以由它決定訊息。兩者都會拒絕，順序只決定使用者看到什麼。
   const targets = commandTargets(command, 0, false, expansionEnv);
-  for (const target of targets) {
+  const deadline = Date.now() + JUDGING_BUDGET_MS;
+  let judged = 0;
+  for (; judged < targets.length; judged += 1) {
+    // The clock is read once every 64 targets: often enough to stop inside the
+    // budget (64 of the most expensive target measured is about 5 ms), rarely
+    // enough that reading it is not itself a cost worth measuring.
+    // 每 64 個目標讀一次時鐘：夠密，能停在預算之內（最貴的目標 64 個約 5 ms）；也夠疏，讀
+    // 時鐘本身不構成成本。
+    if ((judged & 63) === 0 && Date.now() > deadline) break;
+    const target = targets[judged];
     if (target.startsWith(UNRESOLVED_TARGET)) continue;
     const reason = protectedReason(target, cwd, home, extraDirs);
     if (reason) return denial(reason, isCopilot, isAntigravity, isCursor, isGrok);
   }
+  // Out of time with targets left. A protected path found BEFORE the budget ran
+  // out still wins the message, because that is the useful thing to be told;
+  // everything after it is unread, and unread is refused.
+  // 時間用完而目標還有剩。預算用完之前找到的受保護路徑仍然決定訊息（那才是有用的資訊），之後
+  // 的都沒有讀到，而沒有讀到就是拒絕。
+  if (judged < targets.length) {
+    return unjudgeableDenial(judged, targets.length, isCopilot, isAntigravity, isCursor, isGrok);
+  }
+  // Reached only when every target was judged: the branch above returns
+  // otherwise, so there is no "unjudged" target left for this scan to reach.
+  // 只有在每個目標都判完時才會走到這裡：否則上面那個分支已經回傳了，這個掃描不可能碰到沒判
+  // 過的目標。
   for (const target of targets) {
     if (!target.startsWith(UNRESOLVED_TARGET)) continue;
     return unknownDenial(
