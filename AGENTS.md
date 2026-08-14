@@ -277,10 +277,18 @@ the unrelated directory comes back under the destination's name. This is the sam
 window every ordinary `rm` through this tool already has; `--restore` is no longer
 worse than the tool's own baseline.
 
-**Not a promise:** when `rename` *can* replace the destination atomically (both
-sides are non-directories), the kernel unlinks the old destination and it is gone,
-exactly as `mv -f` would leave it. Only the shapes that need clearing get the
-trash treatment.
+**Now a promise, and it used to read as the opposite here:** the publish `rename`
+is always `-n` and never replaces anything. Consent names the object that occupied
+the destination when the restore began, and that object has already been set aside
+before the publish runs, so the destination is empty by construction. Anything
+occupying it at publish time therefore arrived *after* the set-aside and was never
+consented to: the publish fails, the unwind runs, and both objects survive. The
+`-f` this paragraph used to describe had exactly one remaining subject — that
+successor — and destroyed it with no trash entry and no backup (measured, exit 0).
+
+The two paragraphs above this one predate `60c2efa` and describe a narrower
+clearing rule than the code has had since: every occupant is set aside now, not
+only the shapes `rename` could not replace.
 
 Exit contract, because "partially successful" must not read as success:
 `0` = restored and nothing unintended was touched — a destination that was
