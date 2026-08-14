@@ -1296,8 +1296,33 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
             ? 2
             : 1;
         }
-        // timeout's first non-option operand is the duration.
-        if (i < words.length && !separators.has(words[i])) i += 1;
+        // timeout's first non-option operand is the duration. This is the one
+        // step in this function that consumes a word WITHOUT looking at it, so
+        // it is the one that can swallow a `+` -- which ends a find -exec clause
+        // exactly as `;` does, and is not a separator, so nothing downstream
+        // notices. Measured, all DENY before the -exec branch began skipping
+        // consumed clauses and ALLOW after, and this one really deletes: in a
+        // sandbox `find /etc -exec timeout -s {} + ! -delete` emptied the tree on
+        // both BSD find and bfs (timeout dies on the signal name, `-delete` runs
+        // anyway). It defeats the whole file, not this branch: the same shape
+        // inside `$(…)`, `bash -c`, `eval` and a heredoc was allowed too.
+        // A duration is never `+` -- timeout's operand is unsigned -- so
+        // declining to eat one costs nothing: `timeout 30 pytest` and
+        // `timeout -k 5 10 ls` are unchanged.
+        // The fix belongs HERE and not in the -exec clause skip: `+` cannot join
+        // `terminators`, because that stops the jump without ending the find
+        // loop, so the wrapper scan is re-entered once per clause and the
+        // quadratic comes straight back (measured 40,561ms at N=20,000, eight
+        // times the hook's own 5s timeout).
+        // timeout 的第一個非選項操作元是逾時值。這是本函式裡唯一「不看內容就吃掉一個字」的
+        // 步驟，也就是唯一可能把 `+` 吞掉的地方——而 `+` 與 `;` 一樣會結束 find 的 -exec
+        // 子句，又不是 separator，後面沒有人會發現。實測這一種真的會刪：sandbox 裡
+        // `find /etc -exec timeout -s {} + ! -delete` 在 BSD find 與 bfs 上都把整棵樹清空。
+        // 逾時值不可能是 `+`（它是無號的），所以不吃它零成本。
+        // 修在這裡而不是修在子句跳躍那邊：`+` 不能加進 terminators，那樣只會擋住跳躍卻沒有
+        // 結束 find 迴圈，外殼掃描就會每個子句重進一次，平方級立刻回來（實測 N=20,000 時
+        // 40,561ms，是 hook 自己 5 秒逾時的八倍）。
+        if (i < words.length && !separators.has(words[i]) && words[i] !== '+') i += 1;
         executable = '';
         continue;
       }

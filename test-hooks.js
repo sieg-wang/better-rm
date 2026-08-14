@@ -292,6 +292,32 @@ const blocked = [
   'find . -exec time -o \n rm -rf /etc',
   'find . -exec exec -a ; rm -rf /etc',
   'find . -exec xargs -n ) rm -rf /etc',
+  // `+` ends an -exec clause exactly as `;` does, and it is not a separator, so
+  // the clause skip cannot be clamped to it -- see the timeout branch, where
+  // this is fixed, for why putting `+` in `terminators` brings the quadratic
+  // straight back. timeout is the only wrapper that consumes a word without
+  // looking at it (the duration), so it is the only one that can eat a `+`.
+  // Measured in a sandbox on both BSD find and bfs, this really deletes: timeout
+  // dies on the signal name and `-delete` runs anyway, emptying the tree.
+  // The `{}` before `+` is load-bearing TWICE: find only honours `+` as a
+  // terminator there, and it is what leaves the duration step facing the `+`.
+  // Give -s a value (`-exec timeout -s TERM {} + ! -delete`) and the row passes
+  // with the bug live -- the same "safe spelling" trap as the rows above.
+  // `+` 與 `;` 一樣會結束 -exec 子句，但它不是 separator，所以子句跳躍不能夾限到它（理由
+  // 寫在 timeout 分支：把 `+` 放進 terminators 會讓平方級立刻回來）。timeout 是唯一「不看
+  // 內容就吃掉一個字」的外殼，也就是唯一吃得掉 `+` 的。實測 BSD find 與 bfs 上都真的把整棵
+  // 樹刪光。`{}` 放在 `+` 前面有兩個作用：find 只在那個位置認 `+`，而且它讓逾時值那一步正
+  // 好面對 `+`；給 -s 一個值就會退回「安全拼寫」，bug 還在也照樣通過。
+  'find /etc -exec timeout -s {} + ! -delete',
+  'find /etc -exec timeout -k {} + ! -delete',
+  'find /etc -exec timeout --signal {} + nohup -delete',
+  'find /etc -exec timeout -s {} + ! ! -delete',
+  'find . -exec timeout -k {} + timeout -exec rm -rf /etc \\;',
+  "bash -c 'find /etc -exec timeout -s {} + ! -delete'",
+  'find / -exec timeout -s {} + ! -delete',
+  'find ~ -exec timeout -s {} + ! -delete',
+  'find /workspace/secrets -exec timeout -s {} + ! -delete',
+  '$(find /etc -exec timeout -s {} + ! -delete)',
   // A heredoc body executed by a shell that is NOT the heredoc's own command.
   // All measured to run the rm, all refused before this round, all allowed after
   // it until the command-position check landed.
@@ -459,6 +485,13 @@ const allowed = [
   // 外殼後面什麼都沒有，不能被讀成「不可知的命令」。
   'find . -exec sudo \\;',
   'find . -exec env {} \\;',
+  // Declining to eat a `+` as timeout's duration must not stop it eating a real
+  // one: these are the ordinary spellings that the blocked `+` rows would break
+  // if the guard were written as "timeout never consumes an operand".
+  // 不吃 `+` 當逾時值，不能連真的逾時值也不吃：以下是普通拼寫。
+  'find . -exec timeout 30 pytest {} \\;',
+  'find . -exec timeout -k 5 10 ls {} +',
+  'find build -exec timeout 5 rm -f {} +',
   // xargs that does not reach rm is ordinary.
   'echo hi | xargs -n1 echo',
   'find . -name "*.o" | xargs grep -l main',
