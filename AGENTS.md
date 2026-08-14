@@ -422,10 +422,16 @@ decision is pinned by allow rows in the suite: adding `~/Library` turns them red
   runs, against the cwd of the tool call, so `cd ~ && rm -rf .ssh` is allowed —
   the gate sees the relative operand `.ssh` resolved against the tool call's cwd.
   This is not specific to the home-relative entries and is not new: `cd / && rm
-  -rf etc` has the same shape, and the workaround the unresolved-variable refusal
-  RECOMMENDS (`cd <dir> && rm -rf <relative path>`) is that shape by construction.
-  Closing it needs the gate to model `cd`, which is the thing it deliberately
-  does not do for `$PWD` either.
+  -rf etc` has the same shape. Closing it needs the gate to model `cd`, which is
+  the thing it deliberately does not do for `$PWD` either — so it stays open, and
+  the reason it is listed here rather than left implicit is that until this
+  round the unresolved-variable refusal RECOMMENDED that exact shape
+  (`cd <dir> && rm -rf <relative path>`), which made the gate the thing teaching
+  the way past itself. The message now asks for a literal absolute path instead,
+  and a suite row pins both halves of that: `rm -rf ~/.ssh` is refused while
+  `cd ~ && rm -rf .ssh` from another cwd reaches no verdict at all. Note what
+  "no verdict" means on a PreToolUse hook — not a warning, not a prompt: the
+  call is not blocked and real `/bin/rm` runs with no trash copy.
 - **The `-exec` branch shares the wrapper list with command position, not the
   decision.** Both call `resolveExecutable`, so `-exec sudo rm`, `-exec nice rm`
   and `-exec env SAFE=1 command rm` are all read as rm. Command position has
@@ -433,11 +439,19 @@ decision is pinned by allow rows in the suite: adding `~/Library` turns them red
   that only exists after expansion, it fails closed on operands that arrive via
   `xargs`, and it descends into shell carriers. So `find . -exec sh -c 'rm -rf
   /etc' \;` (and the `bash`/`zsh`/`sudo sh` spellings), `-exec $CMD -rf /etc`,
-  an rm reached through `xargs`, and a nested `find … -exec find … -exec rm` are
-  allowed, while the same words written directly are refused. Every one of them
-  is allowed at the previous release too; none is a regression. Folding the
-  remaining three rules in is a real change with its own over-refusal surface,
-  not a one-line addition, which is why it is disclosed rather than done.
+  and a nested `find … -exec find … -exec rm` are allowed, while the same words
+  written directly are refused. Every one of them is allowed at the previous
+  release too; none is a regression. Folding the remaining three rules in is a
+  real change with its own over-refusal surface, not a one-line addition, which
+  is why it is disclosed rather than done.
+  The `xargs` rule is the exception to the sentence above and used to be listed
+  as though it were not. Measured: `find . -exec xargs rm -rf /etc \;` is
+  REFUSED, because the find branch still collects the literal operand `/etc`,
+  and so are the `-exec sudo xargs rm -rf /etc` and `-exec xargs -0 rm -rf /etc`
+  spellings. What the find branch does not do is fail closed on the operands
+  `xargs` completes from stdin, so `find . -exec xargs rm -rf \;` is allowed
+  while `… | xargs rm -rf` is refused. That is the whole of the gap — narrower
+  than "an rm reached through `xargs`", and it names no protected path.
 - **A variable resolved by the hook is resolved in the HOOK's environment, not
   the command's.** `$HOME`, `$PWD` and `$TMPDIR` are substituted and the result
   is judged by the ordinary rules; everything else stays unknown and is refused.
@@ -470,12 +484,24 @@ decision is pinned by allow rows in the suite: adding `~/Library` turns them red
   spelling are interchangeable only in TARGET position — which is where 120,000
   generated commands were diffed against their substituted forms to confirm it,
   finding no case where the variable spelling was the weaker of the two.
-- **Two `/` targets still report the protected-directory wording even though the
-  command never named `/`.** An rm whose operands arrive on stdin through
-  `xargs`, and a command nested past the recursion cap, both push `/` and are
-  refused with "protected directory: /". The refusal is right; the wording has
-  the same defect the variable case had and was left alone this round only
-  because it is a different mechanism with its own rows.
+- **The everyday `find … | xargs rm -f` idiom is refused, and the refusal tells
+  the user their target was `/`.** An rm whose operands arrive on stdin through
+  `xargs`, and a command nested past the recursion cap, both push `/`, so
+  `find . -name '*.log' | xargs rm -f` and `find . -print0 | xargs -0 rm -f` come
+  back as `Refused to remove protected directory: /` — a path the command never
+  named, with no workaround line at all. Refusing IS the intended verdict here:
+  a pre-execution gate cannot read stdin, so the pipeline's real targets are
+  unknowable and that is the same unknowable as `rm -rf "$DIR"`. What is wrong
+  is everything else about the answer. It borrows the protected-directory
+  wording — the exact false claim the variable case was fixed for — and it is
+  the one refusal in this hook that leaves the reader with no next step, on a
+  shape people type by hand every day. It stays open this round because the fix
+  is not a wording change: `/` is pushed as a TARGET and the message is chosen
+  downstream from the target, so routing it to an `unknownDenial`-shaped message
+  naming "operands arriving on stdin" means threading a sentinel through the
+  target pipeline, past the ordering rule that a protected path wins the message
+  and past the judging budget. `REFUSAL_WORDING` in the suite already accepts
+  the alternative shape, so the tests are not what is blocking it.
 - **The gate stops judging after 2,000 ms and refuses what it did not read.**
   Per-target cost is bounded but the NUMBER of targets is the caller's, and a
   symlink target costs one `lstat` per declared entry — twenty-eight now that

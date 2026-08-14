@@ -1996,15 +1996,33 @@ function unjudgeableDenial(judgedCount, totalCount, isCopilot, isAntigravity, is
   return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
 }
 
+// The refusal for an operand this gate could not work out. The way through it
+// offers has to be a shape the gate still JUDGES. The one this message used to
+// carry -- `cd <dir> && rm -rf <relative path>` -- is the opposite: the verdict
+// is made from command text against the tool call's cwd and nothing threads a
+// `cd` through it, so measured from any cwd but the home directory,
+// `cd ~ && rm -rf .ssh` produces no decision at all and /bin/rm runs with no
+// trash copy. That shape walks past every declared entry, not just this one, so
+// a refusal recommending it was the gate teaching its own bypass. A literal
+// absolute path is judged by the ordinary rules, which is the whole reason to
+// ask for one.
+// 這是「算不出來」時的拒絕。它給的下一步必須是這道閘門仍然會判定的形狀。原本那句
+// （`cd <目錄> && rm -rf <相對路徑>`）正好相反：判定是拿命令文字對著呼叫端的 cwd 做的，沒有
+// 任何地方把 `cd` 串進去，所以實測在家目錄以外的任何 cwd 下，`cd ~ && rm -rf .ssh` 根本不
+// 產生裁決，/bin/rm 就直接跑了，連垃圾桶副本都沒有。那個形狀打穿的是每一個宣告項目，不只
+// 這一個，所以推薦它的拒絕訊息等於閘門自己教人繞過自己。字面的絕對路徑會照一般規則判定，
+// 這正是要求它的理由。
 function unknownDenial(operand, isCopilot, isAntigravity, isCursor, isGrok) {
   const zh = `拒絕刪除：無法在執行前確定 '${operand}' 會展開成哪一條路徑，因此不予放行`
     + `（這不是說它是受保護的目錄，是說這道閘門不知道它是什麼）。`
     + `目前只會解析 $HOME、$PWD、$TMPDIR。`
-    + `繞法：先 cd 到該目錄，再用不含展開的相對路徑，例如 cd <目錄> && rm -rf <相對路徑>。`;
+    + `繞法：把目標改寫成字面的絕對路徑，例如 rm -rf /home/you/build，它就會照一般規則被判定；`
+    + `若那條路徑要到執行時才存在，就把這個操作放進腳本檔裡執行。`;
   const en = `Refused to remove: cannot determine before execution which path '${operand}' expands to`
     + ` (this does not say it is a protected directory; it says this gate does not know what it is).`
     + ` Only $HOME, $PWD and $TMPDIR are resolved.`
-    + ` Workaround: cd into the directory and name the target relatively, e.g. cd <dir> && rm -rf <relative path>.`;
+    + ` Workaround: spell the target as a literal absolute path, e.g. rm -rf /home/you/build, which is`
+    + ` judged by the ordinary rules; if the path only exists at run time, put the operation in a script file.`;
   return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
 }
 

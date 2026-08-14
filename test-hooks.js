@@ -199,6 +199,19 @@ const blocked = [
   'xargs -0 rm -rf',
   'find /tmp -print0 | xargs -0 -n 50 rm -rf',
   'xargs rm -rf /var',
+  // ...and the `-exec` spelling of the same thing, because the disclosure list
+  // used to say the -exec branch let "an rm reached through xargs" through.
+  // It does not, when there is a literal operand to see: the find branch reads
+  // past the xargs wrapper like any other and collects `/etc`. What it really
+  // lets through is narrower -- the operands xargs would complete from stdin,
+  // which name no path -- and that row lives in `allowed`, one gap wide.
+  // ……以及同一件事的 `-exec` 拼法。揭露清單原本寫的是 -exec 分支會放行「透過 xargs 碰到的
+  // rm」；只要有字面操作元就不會：find 分支照樣讀穿 xargs 這層外殼，把 `/etc` 收進來。它真正
+  // 放行的窄得多——只有 xargs 會從 stdin 補上的那些操作元，而那個拼法一個路徑都沒寫，列在
+  // `allowed` 裡，剛好一個破口寬。
+  'find . -exec xargs rm -rf /etc \\;',
+  'find . -exec sudo xargs rm -rf /etc \\;',
+  'find . -exec xargs -0 rm -rf /etc \\;',
   // find deletes by itself, and the paths it walks are right there in the words.
   // find 自己就會刪，而它要走的路徑就寫在指令裡。
   'find /etc -delete',
@@ -638,6 +651,17 @@ const allowed = [
   // xargs that does not reach rm is ordinary.
   'echo hi | xargs -n1 echo',
   'find . -name "*.o" | xargs grep -l main',
+  // The whole of the -exec/xargs gap, pinned as the ALLOW it is: an rm whose
+  // operands would arrive on stdin, reached through -exec. Command position
+  // fails closed on that shape (`xargs rm -rf` is in `blocked` above); the find
+  // branch does not. It is allowed at the previous release too and names no
+  // path, so it is disclosed rather than closed -- and written here so the
+  // disclosure cannot drift from the behaviour without a red row.
+  // -exec 與 xargs 之間的破口，全部就是這一列，照它的實情釘成 ALLOW：操作元會從 stdin 進來
+  // 的 rm，經由 -exec 抵達。命令位置對這個形狀是 fail-closed 的（上面 blocked 裡的
+  // `xargs rm -rf`），find 分支不是。它在上一版一樣被放行、而且一個路徑都沒寫，所以是揭露而
+  // 不是修掉——寫在這裡，揭露文字才不會在沒有紅列的情況下與行為脫節。
+  'find . -exec xargs rm -rf \\;',
   // The other half of the glob question, and the half that was refusing ordinary
   // work: `*`, `?` and `[...]` do not match a LEADING DOT in bash, so none of
   // these can select a .git. They were all refused before, on a rule that turned
@@ -1770,7 +1794,10 @@ let variableResolutionChecks = 0;
     !/:\s*\/\s/.test(unknown) && !/：\/\s/.test(unknown),
     'an unknown target is not reported as the path /',
   );
-  assert.ok(unknown.includes('cd '), 'the message carries the cd workaround');
+  assert.ok(
+    unknown.includes('literal absolute path'),
+    'the message carries the way through',
+  );
   assert.ok(unknown.includes('$HOME'), 'the message says which variables are resolved');
   variableResolutionChecks += 6;
   // ...while a genuinely protected path keeps the protected-directory wording,
@@ -1796,14 +1823,46 @@ let variableResolutionChecks = 0;
   // 繞法必須在兩種語言裡都留著，理由與指名操作元相同：讀者只看得到其中一半，而沒有下一步的
   // 拒絕訊息等於把人卡在原地。
   assert.ok(
-    /cd <dir> && rm -rf <relative path>/.test(unknown),
-    'the English half carries the cd workaround spelled out',
+    /spell the target as a literal absolute path/.test(unknown),
+    'the English half carries the way through spelled out',
   );
   assert.ok(
-    /cd <目錄> && rm -rf <相對路徑>/.test(unknown),
-    'the Chinese half carries the cd workaround spelled out',
+    /把目標改寫成字面的絕對路徑/.test(unknown),
+    'the Chinese half carries the way through spelled out',
   );
   variableResolutionChecks += 2;
+  // The way through must be a shape this gate still JUDGES, and `cd` is not one.
+  // This row measures that first, so the assertion below is not a preference
+  // about wording: from a cwd that is not the home directory, `cd ~ && rm -rf
+  // .ssh` reaches NO decision, and a PreToolUse hook that makes no decision does
+  // not block the call -- /bin/rm runs, with no trash copy. The message used to
+  // recommend exactly that shape, which walks past every declared entry rather
+  // than just this one. The row is an ALLOW on purpose: it is the disclosed hole
+  // that makes the recommendation wrong, and if the gate ever learns to model
+  // `cd`, this is the row that says so.
+  // 給出的下一步必須是這道閘門仍然會判定的形狀，而 `cd` 不是。這一列先量出這件事，下面那句
+  // 斷言才不是「用字偏好」：在家目錄以外的 cwd 下，`cd ~ && rm -rf .ssh` 根本到不了任何裁決，
+  // 而不做裁決的 PreToolUse hook 不會擋下呼叫——/bin/rm 就跑了，連垃圾桶副本都沒有。這句訊息
+  // 原本推薦的正是這個形狀，而它打穿的是每一個宣告項目，不只這一個。這一列刻意寫成 ALLOW：
+  // 它就是讓那個推薦站不住腳的已揭露破口，哪天閘門真的會模擬 `cd` 了，也是這一列先說話。
+  // Its control comes first: the SAME target written absolutely is refused.
+  // Without that row the ALLOW below would also pass if `~/.ssh` had simply
+  // fallen off the protected list, and it would then be measuring nothing.
+  // 對照組寫在前面：同一個目標寫成絕對路徑是被拒絕的。少了那一列，下面那個 ALLOW 在 `~/.ssh`
+  // 根本掉出保護清單時一樣會過，那就什麼都沒量到。
+  assert.equal(
+    decisionFor('rm -rf ~/.ssh'), 'deny',
+    'the target itself is protected, so the row below is about cd and not about the entry',
+  );
+  assert.equal(
+    decisionFor('cd ~ && rm -rf .ssh'), undefined,
+    'the cd shape reaches no verdict at all, which is why it must not be recommended',
+  );
+  assert.ok(
+    !/\bcd\b/.test(unknown),
+    'the refusal does not recommend cd, a shape this gate does not judge',
+  );
+  variableResolutionChecks += 3;
 
   // A VALUE with whitespace in it is not one path. Unquoted, the shell splits it
   // and rm gets several operands; substituting it whole would compare a string
