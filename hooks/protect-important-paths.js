@@ -1530,13 +1530,40 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
               );
             }
           }
-          // Land ON the clause end rather than past it, so a `;` or `|` that
-          // ended it is still seen by this loop's own terminator test. Skipping
-          // over one would swallow the command after it -- `find . -exec sudo … ;
-          // rm -rf /etc` would stop being read as an rm at all.
-          // 停在子句結尾那個字上，而不是越過它，`;`、`|` 才會被本迴圈的終止判斷看到；越過去
-          // 會把後面那條命令一起吞掉，`… ; rm -rf /etc` 就再也不會被當成 rm 讀。
-          if (clauseEnd - 1 > i) i = clauseEnd - 1;
+          // Never jump over a terminator. resolveExecutable stops AT a separator
+          // when it reads one as a word, but its option-with-value branches step
+          // two words at a time without looking, so an option written with its
+          // value MISSING eats the separator as that value and reports a clause
+          // end on the far side of it. Landing there would resume the find scan
+          // past the end of the find, and the command after the separator would
+          // never be parsed by anything -- every rule in this file, not just this
+          // branch. Measured, all DENY before this round and ALLOW with the
+          // unclamped jump, all real commands the shell splits and runs:
+          //   find . -exec timeout -k ; rm -rf /       find . -exec sudo -u ; find /etc -delete
+          //   find . -exec nice -n | bash -c 'rm -rf /etc'
+          // 34 option spellings across sudo/env/nice/timeout/time/exec/xargs can
+          // do it, and `timeout` is the worst because it eats a second word as
+          // the duration -- a bare `rm -rf /etc` behind it was allowed too.
+          // So the jump is clamped to the first terminator in the span. That
+          // keeps it linear: the clamp scan and the loop each visit a word once.
+          // 絕不跳過終止符。resolveExecutable 讀到「當成字的分隔符」時會停，但它那些「選項
+          // 帶值」的分支是不看內容就 i += 2，於是一個「值被省略」的選項會把分隔符當成值吃
+          // 掉，回報的子句結尾落在分隔符的另一邊。停在那裡等於讓 find 的掃描越過 find 本身
+          // 的結尾，分隔符後面那條命令就再也沒有人解析——失效的是整個檔案的每一條規則，不只
+          // 這一支。實測上面三條在這一輪之前全是 DENY、不夾限就全變 ALLOW，而且都是 shell
+          // 會拆開並執行的真命令；34 種選項拼寫做得到，其中 timeout 最糟（它還多吃一個字當
+          // 逾時值，連裸的 `rm -rf /etc` 都會被放行）。夾限到區間內第一個終止符即可，而且
+          // 仍是線性的：夾限掃描與主迴圈各只走過每個字一次。
+          let clauseStop = clauseEnd;
+          for (let k = i + 1; k < clauseStop && k < words.length; k += 1) {
+            if (terminators.has(words[k])) { clauseStop = k; break; }
+          }
+          // `- 1` because this loop's own header increments before it re-tests:
+          // landing ON the terminator is what lets the test see it. Without it
+          // the clamp is a no-op, which is how the first attempt at this failed.
+          // `- 1` 是因為本迴圈的標頭會先加一才重測：要「停在終止符上」才看得到它。少了它這
+          // 個夾限就是空操作——第一次寫的時候就是這樣，什麼都沒修到。
+          if (clauseStop - 1 > i) i = clauseStop - 1;
         }
       }
       if (deletes) {

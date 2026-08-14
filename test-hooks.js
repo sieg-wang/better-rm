@@ -265,6 +265,33 @@ const blocked = [
   // 外殼自己的選項操作元不是 rm 的目標，但還是得先走過外殼才讀得到真正的命令。
   'find . -exec sudo -u root rm -rf /etc \\;',
   'find . -exec /bin/sudo /bin/rm -rf /etc \\;',
+  // An option whose VALUE IS MISSING eats the clause-ending separator as that
+  // value, so the unwrapper reports a clause end on the far side of the find.
+  // Resuming there let the whole command after the separator go unparsed -- not
+  // just by this branch, by every rule in the file. All of these are commands
+  // the shell splits and runs, all were refused before the -exec branch started
+  // skipping consumed clauses, and all were allowed for the length of one commit.
+  // The value must stay OMITTED: `sudo -u root ls` consumes `root` and never
+  // reaches the separator, which is the safe spelling that made the first guard
+  // for this pass while the bug was live.
+  // `timeout` is the worst of them, not the mildest -- it eats a second word as
+  // the duration, so even a bare rm behind it went unread.
+  // 「值被省略」的選項會把結束子句的分隔符當成值吃掉，於是回報的子句結尾落在 find 結尾的
+  // 另一邊，從那裡續掃會讓分隔符後面整條命令沒有任何規則看得到。以下都是 shell 會拆開執行
+  // 的真命令。值必須省略：`sudo -u root ls` 會把 root 吃掉、根本碰不到分隔符，那正是 bug
+  // 還在時照樣通過的「安全拼寫」。timeout 最糟（它還多吃一個字當逾時值）。
+  'find . -exec timeout -k ; rm -rf /etc',
+  'find . -exec timeout -k ; rm -rf /',
+  'find . -exec timeout -s ; rm -rf /System',
+  'find . -exec sudo -u ; find /etc -delete',
+  'find . -exec sudo -g ; rm -rf /usr',
+  "find . -exec sudo --prompt ; eval \"rm -rf /etc\"",
+  "find . -exec nice -n | bash -c 'rm -rf /etc'",
+  'find . -exec env -u & rm -rf /etc',
+  'find . -exec env --chdir ; rm -rf .git',
+  'find . -exec time -o \n rm -rf /etc',
+  'find . -exec exec -a ; rm -rf /etc',
+  'find . -exec xargs -n ) rm -rf /etc',
   // A heredoc body executed by a shell that is NOT the heredoc's own command.
   // All measured to run the rm, all refused before this round, all allowed after
   // it until the command-position check landed.
@@ -1340,15 +1367,17 @@ let globTimingChecks = 0;
 //       the same 210 s at b66f502, from the operand scan running to end-of-words
 //       once per -exec when no `+` or `;` ever closes a clause
 // Each row is timed with a WRAPPER that eats '-'-prefixed words (sudo, env,
-// xargs), because that is what makes the re-scan swallow the next -exec; a
-// wrapper that stops at its first operand (timeout) never triggered it and would
-// not fail even with the bug present.
+// xargs), because that is what makes the re-scan swallow the next -exec. A
+// wrapper that stops at its first operand does not reproduce THIS one -- which
+// says nothing about its safety in general: `timeout` is inert here and is the
+// worst offender in the separator-swallow rows above.
 // 帶很多 -exec 子句的 find 也必須在有界時間內回答，理由同上：live hook 在 settings.json
 // 裡的逾時是 5,000 ms，逾時的閘門等於沒有回答——但這一種靠「填充料」就能觸發，對攻擊者
 // 零成本，而且壓住的是整個檔案的每一條規則，不只 find 這一支。實測兩個各自獨立的平方級，
 // 兩列跑的都是 `rm -rf /etc`；第二列在 b66f502 就有，比第一列更老。
 // 每一列都要用「會吃掉 '-' 開頭字」的外殼（sudo、env、xargs），因為那才會讓重掃把下一個
-// -exec 一起吞掉；停在第一個操作元的 timeout 觸發不了，就算 bug 還在也不會紅。
+// -exec 一起吞掉；停在第一個操作元的外殼重現不了「這一個」，但那不代表它安全——timeout
+// 在這裡是惰性的，在上面「吞掉分隔符」那一組裡卻是最糟的一個。
 let findClauseTimingChecks = 0;
 {
   const time = (command) => {
