@@ -397,6 +397,44 @@ the trash volume (same on `main`, unchanged here).
   is allowed at the previous release too; none is a regression. Folding the
   remaining three rules in is a real change with its own over-refusal surface,
   not a one-line addition, which is why it is disclosed rather than done.
+- **A variable resolved by the hook is resolved in the HOOK's environment, not
+  the command's.** `$HOME`, `$PWD` and `$TMPDIR` are substituted and the result
+  is judged by the ordinary rules; everything else stays unknown and is refused.
+  Resolution stops for a name the command could change first — an `NAME=`
+  assignment anywhere in the text (including the prefix form `HOME=/ rm …`),
+  `unset`/`export`/`declare`/`typeset`, and for `$PWD` any `cd`/`pushd`/`popd` —
+  and the check is a text scan, so it will occasionally stop resolving for a
+  mention that is not an assignment. That direction is deliberate: the fallback
+  is a refusal, which is what shipped before. The residual it cannot cover is a
+  value that differs between the hook's environment and the command's at
+  execution time through some other mechanism; the verdict is then made on the
+  hook's value. Low probability, real, and disclosed rather than silent.
+  `$HOME` deliberately does NOT fall back to `os.homedir()` the way the
+  protected-path check does: that fallback answers "where is home", while
+  resolution must answer "what will `$HOME` expand to", and a shell with an empty
+  HOME expands `$HOME/build` to `/build`.
+  A value carrying whitespace is not resolved at all, because unquoted it is not
+  one path: the shell splits it and rm gets several operands, so substituting it
+  whole compares a string no argument will ever equal. Measured with
+  `TMPDIR='/tmp/x /etc'`, `rm -rf $TMPDIR` removes /etc while the joined word is
+  an ordinary unprotected path. The guard cannot see the quoting from where it
+  runs, so it assumes the split reading and refuses. The cost is a home directory
+  or a TMPDIR with a space in it: on such a machine every `$HOME` command goes
+  back to being refused as unknown.
+- **A variable is resolved in a TARGET, never in a command word.** An executable
+  that only exists after expansion is still assumed to be rm and its operands
+  scanned, exactly as before, so `eval ${HOME} /System` is refused although the
+  literal `eval /Users/you /System` is not. That is the safe direction and it is
+  older than resolution, but it means the variable spelling and the literal
+  spelling are interchangeable only in TARGET position — which is where 120,000
+  generated commands were diffed against their substituted forms to confirm it,
+  finding no case where the variable spelling was the weaker of the two.
+- **Two `/` targets still report the protected-directory wording even though the
+  command never named `/`.** An rm whose operands arrive on stdin through
+  `xargs`, and a command nested past the recursion cap, both push `/` and are
+  refused with "protected directory: /". The refusal is right; the wording has
+  the same defect the variable case had and was left alone this round only
+  because it is a different mechanism with its own rows.
 - **A `;` is only find's clause terminator when it was NOT written as a shell
   operator.** `;`, `\;` and `';'` tokenize to the same one-character word, so the
   tokenizer records which spelling produced it and the find scan asks. That flag

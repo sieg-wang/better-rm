@@ -5,9 +5,31 @@
 'use strict';
 
 const assert = require('assert');
-const { MOUNT_PARENTS, SYSTEM_DIRS, evaluate } = require('./hooks/protect-important-paths');
+const { MOUNT_PARENTS, SYSTEM_DIRS, commandTargets, evaluate } = require('./hooks/protect-important-paths');
 
-const env = { HOME: '/home/tester', BETTER_RM_PROTECTED_DIRS: '/workspace/secrets' };
+// TMPDIR is here because the hook resolves it: it is one of the three variables
+// on the allowlist, and without a value in this env the `$TMPDIR` rows below
+// would pass for the wrong reason (unresolvable, therefore refused) instead of
+// exercising resolution at all.
+// TMPDIR 放在這裡是因為 hook 會解析它：它是允許解析的三個變數之一，這個 env 少了它，下面
+// 那些 `$TMPDIR` 的列會因為「解不開所以拒絕」而通過，根本沒有測到解析。
+const env = {
+  HOME: '/home/tester',
+  TMPDIR: '/tmp/scratch',
+  BETTER_RM_PROTECTED_DIRS: '/workspace/secrets',
+};
+
+// Both refusals this hook can produce, and nothing else. A target it worked out
+// and found protected reads "Refused to remove protected directory: <path>"; a
+// target it could NOT work out reads "Refused to remove: cannot determine ...".
+// The blocked list holds both kinds, so the shared assertion is "it is one of
+// these two refusals" -- the difference between them is pinned separately, by
+// name, in the variable-resolution block, because a loose pattern here would let
+// the honest message quietly revert to the false one.
+// 這個 hook 只會產生這兩種拒絕。算得出來且受保護的一種，與算不出來的一種。blocked 清單兩種
+// 都有，所以共用的斷言是「是這兩種之一」；兩者的差別另外在變數解析那一段逐項指名比對，因為
+// 這裡放寬之後，誠實的訊息若悄悄變回原本那句不實陳述，這裡是看不出來的。
+const REFUSAL_WORDING = /Refused to remove(?: protected directory:|: cannot determine)/;
 
 function claude(command, cwd = '/workspace/project') {
   return { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd };
@@ -349,6 +371,44 @@ const blocked = [
   "bash -c 'find /etc -exec cat {} \\; -delete'",
   'find /etc -exec sudo \\; -delete',
   'find /etc -exec cat {} \\; -exec cat {} \\; -delete',
+  // $HOME, $PWD and $TMPDIR are resolved and then judged by the ORDINARY rules,
+  // so the variable spelling gets the same answer as the path it expands to --
+  // which for these is a refusal. Everything NOT on that three-name allowlist
+  // stays unknown and is still refused, and these rows are what stop the
+  // allowlist quietly growing.
+  // Whole-name matching is load-bearing: $HOMEBREW_PREFIX is not $HOME, and a
+  // prefix match would silently rewrite an unrelated variable into the home
+  // directory. Anything but a bare name inside `${ }` is a shell operation this
+  // gate does not model, so it stays unknown too.
+  // $HOME、$PWD、$TMPDIR 會先解析、再走一般規則，所以變數拼法與它展開成的路徑得到同一個
+  // 答案——這幾列的答案是拒絕。不在那三個名字裡的一律維持未知、照舊拒絕，這些列就是防止
+  // 白名單日後悄悄變長的東西。比對完整名稱很重要：$HOMEBREW_PREFIX 不是 $HOME，前綴比對
+  // 會把不相干的變數改寫成家目錄。`${ }` 裡不是裸名稱的一律當成沒有建模的 shell 運算。
+  'rm -rf "$HOME/.git"',
+  'rm -rf "$PWD/.git"',
+  'rm -rf "$HOME/../.."',
+  'rm -rf "$TMPDIR/../../etc"',
+  'rm -rf "$HOMEBREW_PREFIX/lib"',
+  'rm -rf "${HOME:-/tmp}/x"',
+  'rm -rf "$BUILD_DIR"',
+  'rm -rf "${WORK}/cache"',
+  'rm -f /tmp/x.$$',
+  'rm -rf "$1"',
+  'rm -rf "$@"',
+  'rm -rf $(pwd)',
+  // A command that MOVES the directory before the rm runs makes $PWD something
+  // this gate cannot know, so it stops resolving it. The call's cwd is where the
+  // command starts, not where the rm happens.
+  // 命令在 rm 之前把目錄換掉，$PWD 就不是這個閘門知道的東西了，於是停止解析它。呼叫的 cwd
+  // 是命令開始的地方，不是 rm 發生的地方。
+  'cd /etc && rm -rf "$PWD"',
+  'cd /etc; rm -rf "$PWD"',
+  'pushd /etc && rm -rf "$PWD"',
+  'cd "$HOME" && rm -rf "$PWD"',
+  // ...and the same for a variable rewritten by name rather than by assignment.
+  // ……以及用名字（而非賦值）改寫變數的情形。
+  'unset HOME; rm -rf "$HOME/build"',
+  'export HOME=/; rm -rf "$HOME/etc"',
   // A heredoc body executed by a shell that is NOT the heredoc's own command.
   // All measured to run the rm, all refused before this round, all allowed after
   // it until the command-position check landed.
@@ -550,6 +610,31 @@ const allowed = [
   "find /etc -exec cat {} '|' -delete",
   "find /etc -exec cat {} '&' -delete",
   "find /usr -exec cat {} '(' -delete",
+  // The everyday commands the fold-to-'/' rule used to refuse. A variable in a
+  // target is not by itself a reason to refuse: for these three names the gate
+  // knows the value, so it resolves and then asks the ordinary question, and the
+  // answer is the same one the literal path gets. Measured before this change,
+  // all of these were denied with "protected directory: /" -- a path none of
+  // them names.
+  // 這些就是原本被「折成 /」擋掉的日常命令。目標裡有變數本身不是拒絕的理由：這三個名字的值
+  // 閘門知道，於是解析後照舊問一般的問題，答案與字面路徑得到的一模一樣。改動之前實測全部
+  // 被以「受保護的目錄：/」拒絕，而它們沒有一條寫了 `/`。
+  'rm -rf "$HOME/projects/foo/build"',
+  'rm -rf $HOME/projects/foo/build',
+  'rm -rf "${HOME}/projects/foo/build"',
+  'rm -rf "$PWD/dist"',
+  'rm -rf "$PWD/node_modules"',
+  'rm -rf "$TMPDIR/mything"',
+  'rm -rf "$TMPDIR"/build',
+  // `${HOME}` followed by more text is still a plain name in braces, so it
+  // resolves -- and $HOME+'x' is a sibling of the home directory, not the home
+  // directory. It is `${HOME:-/tmp}` that is a shell operation this gate does
+  // not model, and that one is refused above.
+  // `${HOME}` 後面接別的字仍然是「大括號裡的裸名稱」，照樣解析，而 $HOME+'x' 是家目錄的
+  // 兄弟目錄、不是家目錄本身。真正沒有建模的是 `${HOME:-/tmp}`，上面那一組會拒絕它。
+  'rm -rf "${HOME}x"',
+  'rm -rf "$HOME/projects/foo/build" "$PWD/dist"',
+  'find "$HOME/projects/foo/build" -delete',
   // xargs that does not reach rm is ordinary.
   'echo hi | xargs -n1 echo',
   'find . -name "*.o" | xargs grep -l main',
@@ -837,7 +922,7 @@ for (const command of allowed) {
 
 const copilotResult = evaluate(copilot('rm -rf .git'), env);
 assert.equal(copilotResult.permissionDecision, 'deny');
-assert.match(copilotResult.permissionDecisionReason, /Refused to remove protected directory/);
+assert.match(copilotResult.permissionDecisionReason, REFUSAL_WORDING);
 
 // Antigravity tests
 function antigravity(command, cwd = '/workspace/project') {
@@ -858,7 +943,7 @@ function antigravity(command, cwd = '/workspace/project') {
 for (const command of blocked) {
   const result = evaluate(antigravity(command), env);
   assert.equal(result.allow_tool, false, command);
-  assert.match(result.deny_reason, /Refused to remove protected directory/, command);
+  assert.match(result.deny_reason, REFUSAL_WORDING, command);
 }
 
 for (const command of allowed) {
@@ -868,7 +953,7 @@ for (const command of allowed) {
 // Pi coding agent tests
 const piResult = evaluate({ tool_input: { command: 'rm -rf .git' }, cwd: '/workspace/project' }, env);
 assert.equal(piResult?.hookSpecificOutput?.permissionDecision, 'deny');
-assert.match(piResult?.hookSpecificOutput?.permissionDecisionReason, /Refused to remove protected directory/);
+assert.match(piResult?.hookSpecificOutput?.permissionDecisionReason, REFUSAL_WORDING);
 
 // Cursor tests
 function cursor(command, cwd = '/workspace/project') {
@@ -882,7 +967,7 @@ function cursor(command, cwd = '/workspace/project') {
 for (const command of blocked) {
   const result = evaluate(cursor(command), env);
   assert.equal(result.permission, 'deny', command);
-  assert.match(result.user_message, /Refused to remove protected directory/, command);
+  assert.match(result.user_message, REFUSAL_WORDING, command);
 }
 
 for (const command of allowed) {
@@ -906,7 +991,7 @@ function grok(command, cwd = '/workspace/project') {
 for (const command of blocked) {
   const result = evaluate(grok(command), env);
   assert.equal(result.decision, 'deny', command);
-  assert.match(result.reason, /Refused to remove protected directory/, command);
+  assert.match(result.reason, REFUSAL_WORDING, command);
 }
 
 for (const command of allowed) {
@@ -992,8 +1077,8 @@ const documentedDenials = [
   '"$(which docker)" run -v $(pwd):/work img ls',  // double quotes do not exempt
   '$(brew --prefix)/bin/rg "$PATTERN" src/',
   '$(which git) -C $(pwd) status',                 // separated from its option
-  '$(which cat) $HOME/.zshrc',
   '$(which echo) $USER',
+  '$(which echo) "$LOGFILE"',            // not on the resolution allowlist
   '$(which echo) /etc',                            // operand need not be dynamic
   '$(which echo) ~',                               // bare ~ IS the protected home
   '`which git` status',                            // backtick with whitespace
@@ -1005,6 +1090,8 @@ const documentedAllowances = [
   '$(which make) -j$(nproc) all',                  // adjacent to its option
   '$(which git) -C$(pwd) status',
   "$(which cat) '$HOME/.zshrc'",                   // single quotes are literal
+  '$(which cat) $HOME/.zshrc',                     // $HOME is resolved, and it is
+                                                   // not the home directory itself
   '$(which cat) ~/.zshrc',
   '`pwd` status',                                  // backtick without whitespace
   'cd $(git rev-parse --show-toplevel)',
@@ -1469,6 +1556,265 @@ let globTimingChecks = 0;
 // 每一列都要用「會吃掉 '-' 開頭字」的外殼（sudo、env、xargs），因為那才會讓重掃把下一個
 // -exec 一起吞掉；停在第一個操作元的外殼重現不了「這一個」，但那不代表它安全——timeout
 // 在這裡是惰性的，在上面「吞掉分隔符」那一組裡卻是最糟的一個。
+// Resolving a variable is only safe while the VALUE is safe to build a path out
+// of, and the refusal for one this gate cannot resolve has to say so honestly.
+// 只有在「值本身可以拿來組路徑」時，解析變數才是安全的；而對解不開的變數，拒絕訊息必須誠實。
+let variableResolutionChecks = 0;
+{
+  // The hook's own SOURCE must contain no NUL byte. install-hooks.sh verifies a
+  // candidate by handing the file's text to `node -e` as an argv entry, and
+  // spawn(2) rejects an argument containing a NUL -- so one literal NUL in this
+  // file makes the OpenCode runtime hook unverifiable, and the installer then
+  // publishes its fail-closed replacement and refuses EVERY tool call. That is
+  // exactly what happened while the unresolved-target sentinel was written as a
+  // raw byte instead of an escape. The installer suite caught it, but only after
+  // running a full install; this row says the reason in one line.
+  // hook 的原始碼本身不能有 NUL。install-hooks.sh 驗證候選檔的方式是把檔案本文當成
+  // `node -e` 的一個 argv 傳進去，而 spawn(2) 拒絕含 NUL 的引數——所以這個檔案裡只要有一個
+  // 真的 NUL，OpenCode runtime hook 就驗不過，安裝程式會改發 fail-closed 替代品，於是每一次
+  // 工具呼叫都被拒。sentinel 寫成原始位元組而不是跳脫序列時就是這樣。
+  const hookSource = fs.readFileSync(`${__dirname}/hooks/protect-important-paths.js`);
+  assert.equal(
+    hookSource.indexOf(0), -1,
+    'the hook source must not contain a NUL byte: install-hooks.sh passes it to `node -e` as an argument',
+  );
+  variableResolutionChecks += 1;
+
+  const decisionFor = (command, overrides) => evaluate(
+    claude(command), { ...env, ...overrides },
+  )?.hookSpecificOutput?.permissionDecision;
+  const reasonFor = (command, overrides) => evaluate(
+    claude(command), { ...env, ...overrides },
+  )?.hookSpecificOutput?.permissionDecisionReason || '';
+
+  // An EMPTY value must not be substituted. `$HOME/build` with HOME='' is
+  // `/build` -- a different path, one level under the root, and far more
+  // dangerous than the one the user meant. Same for a RELATIVE value: it would
+  // silently reinterpret an absolute-looking target.
+  // 空值絕不能代入：HOME 是空字串時 `$HOME/build` 會變成 `/build`，那是完全不同、而且危險
+  // 得多的一條路徑。相對值同理。
+  for (const bad of ['', '   ', 'relative/dir', '.', '~']) {
+    assert.equal(
+      decisionFor('rm -rf "$HOME/build"', { HOME: bad }), 'deny',
+      `an unusable HOME (${JSON.stringify(bad)}) must not be substituted`,
+    );
+    variableResolutionChecks += 1;
+  }
+  // ...and the same command with a usable value is ordinary, so the rows above
+  // are refusing for the VALUE and not because the shape is refused anyway.
+  // ……同一條命令在值可用時是普通命令，證明上面那幾列拒絕的是「值」，不是這個形狀本來就被拒。
+  assert.notEqual(
+    decisionFor('rm -rf "$HOME/build"', { HOME: '/home/other' }), 'deny',
+    'a usable HOME resolves and the ordinary rules allow an ordinary subdirectory',
+  );
+  variableResolutionChecks += 1;
+  // TMPDIR is read from the environment given to the hook, and PWD is the tool
+  // call's own cwd rather than anything in the environment -- that is the
+  // directory the command will actually run in.
+  // TMPDIR 讀 hook 拿到的環境；PWD 取的是這次工具呼叫自己的 cwd，那才是命令真正執行的目錄。
+  assert.equal(
+    decisionFor('rm -rf "$TMPDIR"', { TMPDIR: '/home/tester' }), 'deny',
+    'TMPDIR is read from the environment, so a TMPDIR that IS the home directory is refused',
+  );
+  assert.equal(
+    evaluate(claude('rm -rf "$PWD"', '/home/tester'), env)
+      ?.hookSpecificOutput?.permissionDecision,
+    'deny',
+    'PWD is the call cwd, so $PWD in the home directory is refused',
+  );
+  variableResolutionChecks += 2;
+
+  // The message for an unresolvable operand must not claim a protected
+  // directory, must not claim the target is `/` (the command never wrote one),
+  // must name the operand, and must carry the way through. "Refused to remove
+  // protected directory: /" was all four of those wrong at once.
+  // 解不開時的訊息不能宣稱受保護目錄、不能宣稱目標是 `/`（命令根本沒寫）、要指名那個操作元、
+  // 並附上繞法。原本那句四件事全錯。
+  const unknown = reasonFor('rm -rf "$BUILD_DIR"');
+  // Named in BOTH halves. The message is bilingual and a reader sees one of
+  // them; naming the operand in only one is the same defect for whoever reads
+  // the other, and it is what a single `includes` cannot tell.
+  // 兩種語言都要指名。訊息是雙語的，讀者只會看其中一半；只在一半裡指名，對讀另一半的人來說
+  // 就是同一個缺陷，而單一個 includes 分辨不出來。
+  assert.equal(
+    unknown.split('$BUILD_DIR').length - 1, 2,
+    'the unresolvable operand is named in both halves of the message',
+  );
+  // The message may SAY the words "protected directory" -- it says the target is
+  // not one -- so what must be absent is the protected-directory REFUSAL
+  // wording, which is the sentence that made the false claim.
+  // 訊息裡可以出現「受保護的目錄」這幾個字（它正是在說「這不是」），必須不存在的是那句「受保護
+  // 目錄」的拒絕措辭，因為做出不實陳述的是那一句。
+  assert.ok(
+    !/Refused to remove protected directory/.test(unknown),
+    'an unknown target does not borrow the protected-directory refusal wording',
+  );
+  assert.ok(
+    !/拒絕刪除受保護的目錄/.test(unknown),
+    'the same, in the Chinese half of the message',
+  );
+  assert.ok(
+    !/:\s*\/\s/.test(unknown) && !/：\/\s/.test(unknown),
+    'an unknown target is not reported as the path /',
+  );
+  assert.ok(unknown.includes('cd '), 'the message carries the cd workaround');
+  assert.ok(unknown.includes('$HOME'), 'the message says which variables are resolved');
+  variableResolutionChecks += 6;
+  // ...while a genuinely protected path keeps the protected-directory wording,
+  // so the two refusals stay distinguishable.
+  // ……真正受保護的路徑照舊用受保護目錄的措辭，兩種拒絕才分得開。
+  const protectedReasonText = reasonFor('rm -rf /etc');
+  assert.ok(
+    /protected directory/i.test(protectedReasonText),
+    'a genuinely protected path still says so',
+  );
+  variableResolutionChecks += 1;
+  // A command naming BOTH a protected path and an unresolvable variable reports
+  // the protected path: that is the more useful thing to be told.
+  // 同時寫了受保護路徑與解不開的變數時，報前者，那對使用者更有用。
+  assert.ok(
+    /protected directory/i.test(reasonFor('rm -rf "$BUILD_DIR" /etc')),
+    'a protected path wins the message over an unknown one',
+  );
+  variableResolutionChecks += 1;
+  // The workaround has to survive in BOTH halves for the same reason the operand
+  // name does: a reader sees one language, and a message without the way through
+  // leaves them with a refusal and no next step.
+  // 繞法必須在兩種語言裡都留著，理由與指名操作元相同：讀者只看得到其中一半，而沒有下一步的
+  // 拒絕訊息等於把人卡在原地。
+  assert.ok(
+    /cd <dir> && rm -rf <relative path>/.test(unknown),
+    'the English half carries the cd workaround spelled out',
+  );
+  assert.ok(
+    /cd <目錄> && rm -rf <相對路徑>/.test(unknown),
+    'the Chinese half carries the cd workaround spelled out',
+  );
+  variableResolutionChecks += 2;
+
+  // A VALUE with whitespace in it is not one path. Unquoted, the shell splits it
+  // and rm gets several operands; substituting it whole would compare a string
+  // no argument will ever equal. Measured: with this value, `rm -rf $TMPDIR`
+  // really removes /etc, and the resolved single word is an ordinary path.
+  // 值裡有空白就不是一條路徑：沒加引號時 shell 會切開它，rm 拿到的是好幾個操作元。實測這個
+  // 值下 `rm -rf $TMPDIR` 真的會刪掉 /etc，而解出來的單一字是普通路徑。
+  for (const carrier of ['rm -rf $TMPDIR', 'rm -rf "$TMPDIR"', 'rm -rf "$TMPDIR/x"']) {
+    assert.equal(
+      decisionFor(carrier, { TMPDIR: '/tmp/x /etc' }), 'deny',
+      `a value carrying whitespace is not resolved: ${carrier}`,
+    );
+    variableResolutionChecks += 1;
+  }
+  for (const whitespace of ['\n', '\t']) {
+    assert.equal(
+      decisionFor('rm -rf $TMPDIR', { TMPDIR: `/tmp/x${whitespace}/etc` }), 'deny',
+      'a value carrying any IFS whitespace is not resolved',
+    );
+    variableResolutionChecks += 1;
+  }
+  // ...and the refusal for one of those is the UNKNOWN one, not the protected
+  // one: the gate declined to work the value out, it did not decide the value is
+  // dangerous. If this ever reads as a protected-directory refusal, resolution
+  // happened and the split reading was judged as a single path.
+  // ……而且那是「未知」的拒絕，不是「受保護」的拒絕：閘門是放棄計算，不是判定它危險。這裡若
+  // 變成受保護目錄的措辭，就代表解析真的發生了，切開後的讀法被當成單一路徑判掉了。
+  assert.ok(
+    !/Refused to remove protected directory/
+      .test(reasonFor('rm -rf $TMPDIR', { TMPDIR: '/tmp/x /etc' })),
+    'a whitespace-carrying value is refused as unknown, not as a protected path',
+  );
+  variableResolutionChecks += 1;
+
+  // An unterminated `${` resolves NOTHING. Without the closing-brace test the
+  // inner slice runs to the end of the word minus one character, so `${HOMEX`
+  // yields the name HOME, substitutes it and leaves a path that looks ordinary
+  // -- allowed, from a word the shell would refuse to parse at all.
+  // 沒有右大括號就什麼都不解析。少了這個判斷，裡層切片會取到「整個字少最後一個字元」，於是
+  // `${HOMEX` 會得到名字 HOME、代進去、留下一條看起來很普通的路徑而被放行，而這個字 shell
+  // 根本無法解析。
+  // `${PWDX` is the row that can FAIL: `${HOMEX` would substitute the home
+  // directory and leave `{HOMEX` behind, and a brace makes the result a glob
+  // whose parent is the home directory -- refused by a different rule, so it
+  // cannot tell whether this one works. The cwd is not protected, so the same
+  // shape built from $PWD is refused only if the closing brace is really
+  // required.
+  // 會「紅」的是 `${PWDX` 這一列：`${HOMEX` 代入後留下 `{HOMEX`，大括號讓結果變成樣式，而它
+  // 的父目錄正好是家目錄，會被另一條規則擋下來，於是分辨不出這道判斷有沒有生效。cwd 不是受
+  // 保護路徑，所以同樣形狀用 $PWD 寫，只有在「右大括號真的必要」時才會被拒絕。
+  for (const command of [
+    'rm -rf "${PWDX"', 'rm -rf "${HOMEX"', 'rm -rf "${HOME"', 'rm -rf "${HOME/build"',
+  ]) {
+    assert.equal(decisionFor(command), 'deny', `an unterminated \${ is not resolved: ${command}`);
+    variableResolutionChecks += 1;
+  }
+
+  // A name that is not on the allowlist is not resolved EVEN WHEN it has a
+  // perfectly usable absolute value in the environment. This is the row that
+  // makes the allowlist load-bearing: without it, adding a fourth variable to
+  // resolvableEnvironment() would change nothing that any test can see.
+  // 不在白名單上的名字，即使環境裡有一個完全可用的絕對路徑值，也不會被解析。這一列就是讓白
+  // 名單真的有作用的東西：少了它，在 resolvableEnvironment 多塞第四個變數，沒有任何測試看
+  // 得出來。
+  for (const name of ['LOGFILE', 'BUILD_DIR', 'WORK', 'PATH', 'SHELL']) {
+    const reason = reasonFor(`rm -rf "$${name}"`, { [name]: '/etc' });
+    assert.ok(
+      !/Refused to remove protected directory/.test(reason) && /cannot determine/.test(reason),
+      `$${name} is not on the allowlist, so it stays unknown even with a value: ${reason.slice(0, 80)}`,
+    );
+    variableResolutionChecks += 1;
+  }
+
+  // A name that exists on Object.prototype is not a value. `$toString` reads a
+  // FUNCTION off the plain object the environment is built in, and `$__proto__`
+  // reads the prototype itself; both must stay unknown rather than being
+  // stringified into a path.
+  // Object.prototype 上的名字不是「值」：`$toString` 從那個普通物件上讀到的是函式，
+  // `$__proto__` 讀到的是原型本身，兩者都必須維持未知，不能被字串化成一條路徑。
+  for (const command of ['rm -rf "$toString"', 'rm -rf "$__proto__"', 'rm -rf "${constructor}"']) {
+    assert.equal(decisionFor(command), 'deny', `a prototype name is not a value: ${command}`);
+    variableResolutionChecks += 1;
+  }
+
+  // Resolution reaches every place a target is read, not only rm's own operand
+  // list: a shell carrier's script and a find -exec's operands are judged by the
+  // same function and must get the same answer as the same words written
+  // directly. Written as ALLOW rows on purpose -- the refusal is what the old
+  // behaviour produced, so a row that expects a refusal cannot tell the two
+  // apart.
+  // 解析要抵達每一個「讀取目標」的地方，不只 rm 自己的操作元：shell carrier 裡的腳本、
+  // find -exec 的操作元，都走同一個函式，答案必須與直接寫出來的同一批字相同。刻意寫成 ALLOW：
+  // 舊行為產生的就是拒絕，期望拒絕的列分不出兩者。
+  for (const command of [
+    'bash -c \'rm -rf "$HOME/build"\'',
+    'sh -c \'rm -rf "$TMPDIR/build"\'',
+    'find . -exec rm -rf "$HOME/build" \\;',
+    'find "$TMPDIR/build" -delete',
+    'eval rm -rf "$HOME/build"',
+  ]) {
+    assert.notEqual(
+      decisionFor(command), 'deny',
+      `resolution must reach this target too: ${command}`,
+    );
+    variableResolutionChecks += 1;
+  }
+
+  // commandTargets() is exported, and a caller that does not pass an environment
+  // must get the fail-closed answer rather than an exception. An exception here
+  // is not a refusal: on the live gate it exits non-zero and the tool call runs
+  // unjudged.
+  // commandTargets 是對外匯出的，沒有傳環境進來的呼叫端必須拿到 fail-closed 的答案，而不是
+  // 例外。這裡的例外不是拒絕：在 live 閘門上它會非零結束，工具呼叫反而不受判定地跑掉。
+  for (const command of ['rm -rf "$HOME"', 'rm -rf "$HOME/build"', 'find "$HOME" -delete']) {
+    const targets = commandTargets(command);
+    assert.ok(Array.isArray(targets), `commandTargets must not throw without an env: ${command}`);
+    assert.ok(
+      targets.every((target) => !/^\/home\/tester/.test(target)),
+      `commandTargets without an env resolves nothing: ${command}`,
+    );
+    variableResolutionChecks += 2;
+  }
+}
+
 let findClauseTimingChecks = 0;
 {
   const time = (command) => {
@@ -1708,7 +2054,7 @@ async function runOpenCodePluginChecks() {
     assert.ok(thrown, `the OpenCode plugin must refuse: ${command}`);
     assert.match(
       thrown.message,
-      /Refused to remove protected directory/,
+      REFUSAL_WORDING,
       `the OpenCode refusal must name the reason: ${command}`
     );
     pluginChecks += 1;
@@ -1763,7 +2109,7 @@ async function runOpenCodePluginChecks() {
 // 否則「沒跑到」會看起來是綠的。
 process.exitCode = 1;
 runOpenCodePluginChecks().then((pluginChecks) => {
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + findClauseTimingChecks + pluginChecks}`);
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + findClauseTimingChecks + variableResolutionChecks + pluginChecks}`);
   process.exitCode = 0;
 }).catch((error) => {
   console.error(error && error.stack ? error.stack : error);

@@ -559,6 +559,199 @@ function hasUnresolvedTargetExpansion(isDynamic) {
   return Boolean(isDynamic);
 }
 
+// A target this gate could not work out. It is still a refusal -- nothing about
+// failing closed changes -- but the MESSAGE has to say "unknown", not "/".
+// Saying `/` was factually false: the command never named `/`, the gate simply
+// folded an unknown to the worst case and then reported the worst case as if it
+// were the argument. A message that describes something the user did not write
+// is the same class of defect as a doc that describes behaviour the code does
+// not have, and this round has now found several of those.
+// NUL cannot occur in a pathname, so this prefix cannot collide with one.
+// 這個閘門算不出來的目標。照舊是拒絕（fail closed 完全沒變），但訊息必須說「不知道」而不是
+// 「/」。說 `/` 是不實陳述：命令根本沒有寫 `/`，只是閘門把未知折成最壞情況、又把最壞情況
+// 當成使用者寫的引數報出來。訊息描述使用者沒寫的東西，與文件描述程式沒有的行為是同一類缺
+// 陷。路徑不可能含 NUL，所以這個前綴不會撞到真路徑。
+// Written as an ESCAPE, never as a raw byte. install-hooks.sh verifies a
+// candidate hook by handing the file's own text to `node -e` as an argv
+// entry, and spawn(2) rejects an argument containing a NUL: a literal NUL in
+// this file made the OpenCode runtime hook unverifiable, so the installer
+// published its fail-closed replacement and refused every tool call. Caught by
+// the installer suite, which is the only one that executes the file that way.
+// 寫成跳脫序列，絕不寫成原始位元組。install-hooks.sh 驗證候選 hook 的方式是把檔案本文當成
+// `node -e` 的一個 argv 傳進去，而 spawn(2) 拒絕含 NUL 的引數：檔案裡真的放一個 NUL
+// 會讓 OpenCode runtime hook 驗不過，安裝程式於是發布 fail-closed 替代品，拒掉每一次工具呼叫。
+const UNRESOLVED_TARGET = '\u0000unresolved:';
+
+// The only variables this gate will resolve. Everything else stays unknown and
+// is refused, which is the decided policy: a short allowlist buys back the
+// commands people actually type without pretending the gate can predict a shell.
+// PWD is taken from the tool call's own cwd rather than from the hook process's
+// environment, because that is the directory the command will actually run in.
+// 這個閘門唯一會解析的變數。其餘一律維持未知並拒絕，這是既定政策：一份短清單換回大家真的
+// 會打的那些命令，同時不假裝閘門能預測 shell。PWD 取的是這次工具呼叫自己的 cwd，因為那才是
+// 命令真正會執行的目錄。
+const RESOLVABLE_VARIABLES = ['HOME', 'PWD', 'TMPDIR'];
+
+// Substitute the allowlisted variables and report whether anything expansion
+// shaped is left. Returns null when the word cannot be fully resolved, which
+// keeps the old fail-closed answer for every shape this does not understand:
+// `$(…)`, backticks, `$$`, `$1`, `$@`, `${VAR:-default}`, and any name not on
+// the list. Matching is on the WHOLE name, so $HOMEBREW_PREFIX is not $HOME.
+// 代入清單上的變數，並回報是否還剩下任何「長得像展開」的東西。不能完全解析就回 null，於是
+// 這個函式看不懂的每一種形狀都維持原本的 fail-closed 答案。比對的是完整名稱，所以
+// $HOMEBREW_PREFIX 不是 $HOME。
+// Three of the guards below are REDUNDANT TODAY and are kept deliberately, the
+// same way declaredLink() keeps its pair: `$(`, the `${ }` name shape and the
+// allowlist membership test can each be deleted on their own without moving a
+// single verdict -- `(` never matches the name pattern, an inner that is not a
+// bare name is never a name on the list, and a name off the list has no value in
+// expansionEnv, which the type test below already refuses. Each states a
+// distinct policy in the code, and every one of them fails CLOSED, so a future
+// edit that widens one of them still meets the next. Measured: mutating any one
+// of the three leaves the whole suite green, which is why this paragraph exists
+// instead of a test that cannot be written.
+// RESOLVABLE_VARIABLES drifts in ONE DIRECTION ONLY, and the direction is the
+// safe one. Removing a name from it stops that variable resolving (measured: the
+// suite goes red), while ADDING one changes nothing at all, because
+// resolvableEnvironment() builds the environment object with three names spelled
+// out and a name with no value there is refused below. A name has to appear in
+// BOTH places to be resolved, so a half-finished edit refuses rather than
+// resolves. That is also why this list cannot be trusted as the answer to "what
+// does this gate resolve": resolvableEnvironment() is.
+// 底下有三道防線「今天是多餘的」，但刻意保留，與 declaredLink 保留它那一對的理由相同：
+// `$(`、`${ }` 的名稱形狀、白名單成員檢查，任何一道單獨拿掉都不會改變任何一個判定。三者各自
+// 在程式碼裡陳述一條不同的政策，而且全都是 fail closed，所以日後有人放寬其中一道，還會撞上
+// 下一道。實測：單獨突變其中任何一道，整套測試都不會轉紅——所以寫成這段註解，而不是一個寫
+// 不出來的測試。
+// RESOLVABLE_VARIABLES 只會往一個方向漂移，而那是安全的方向：從清單裡「拿掉」名字，那個變數
+// 就不再解析（實測會讓測試轉紅）；「加上」名字則完全沒有作用，因為 resolvableEnvironment 是
+// 把三個名字逐一寫出來建出環境物件的，沒有值的名字在下面會被拒。名字必須同時出現在兩個地方
+// 才會被解析，所以改到一半的編輯結果是「拒絕」而不是「解析」。也因此，要回答「這個閘門到底
+// 解析什麼」，該看的是 resolvableEnvironment，不是這份清單。
+function resolveKnownExpansions(word, expansionEnv) {
+  if (!expansionEnv) return null;
+  const text = String(word);
+  let out = '';
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === '`') return null;
+    if (char !== '$') { out += char; continue; }
+    const rest = text.slice(index + 1);
+    if (rest.startsWith('(')) return null;
+    let name = null;
+    let consumed = 0;
+    if (rest.startsWith('{')) {
+      const close = rest.indexOf('}');
+      if (close === -1) return null;
+      const inner = rest.slice(1, close);
+      // Anything but a bare name (`:-`, `#`, `%`, `[`, nested `$`) is a shell
+      // operation this gate does not model.
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(inner)) return null;
+      name = inner;
+      consumed = close + 1;
+    } else {
+      const match = /^[A-Za-z_][A-Za-z0-9_]*/.exec(rest);
+      // `$$`, `$1`, `$@`, `$*`, `$?`, `$-`, a trailing bare `$`: all unknown.
+      if (!match) return null;
+      name = match[0];
+      consumed = match[0].length;
+    }
+    if (!RESOLVABLE_VARIABLES.includes(name)) return null;
+    const value = expansionEnv[name];
+    // An empty or relative value is not something to build a path out of: an
+    // empty HOME would turn `$HOME/build` into `/build`, which is a different
+    // and far more dangerous path than the one the user meant. Both are the one
+    // test -- '' is not an absolute path -- and the type test in front of it is
+    // not decoration: path.isAbsolute(undefined) THROWS, and a throw here is a
+    // hook that exits non-zero on every command.
+    // 空值或相對值不能拿來組路徑：HOME 是空的時候 `$HOME/build` 會變成 `/build`，那是一條
+    // 與使用者本意完全不同、而且危險得多的路徑。兩者是同一個判斷（空字串不是絕對路徑）；前面
+    // 的型別判斷也不是裝飾：path.isAbsolute(undefined) 會丟例外，而這裡一丟例外，整個 hook
+    // 就會在每一條命令上非零結束。
+    if (typeof value !== 'string' || !path.isAbsolute(value)) return null;
+    // A value carrying whitespace is not one path. Unquoted, the shell SPLITS it
+    // and hands rm several operands, so substituting it whole would judge a
+    // string that no argument will ever equal: measured with TMPDIR='/tmp/x /etc',
+    // `rm -rf $TMPDIR` removes /etc while the resolved single word '/tmp/x /etc'
+    // is an ordinary unprotected path -- allowed, and it deletes. Quoted, the
+    // value really is one operand, but this gate cannot see the quoting from
+    // here, so the split reading is the one it has to assume. Refusing to
+    // resolve puts the operand back where it was before this file resolved
+    // anything: unknown, and refused.
+    // 值裡有空白就不是「一條路徑」。沒加引號時 shell 會把它切開、交給 rm 好幾個操作元，整段代
+    // 入等於在比對一個永遠不會等於任何一個引數的字串：實測 TMPDIR='/tmp/x /etc' 時
+    // `rm -rf $TMPDIR` 會刪掉 /etc，而解出來的單一字 '/tmp/x /etc' 是普通的未受保護路徑，
+    // 放行、而且真的刪。加了引號時它確實是一個操作元，但這裡看不到引號，只能假設會被切開。
+    // 不解析就是把這個操作元放回這個檔案開始解析之前的位置：未知，而且拒絕。
+    if (/\s/.test(value)) return null;
+    out += value;
+    index += consumed;
+  }
+  return out;
+}
+
+// The one place a target word becomes a target. A word with no expansion is
+// itself; a word whose expansions all resolve is the resolved path, judged by
+// the ORDINARY protected-path rules afterwards (so `rm -rf "$HOME"` is still
+// refused and `rm -rf "$HOME/projects/x/build"` is not); anything else is
+// unknown and refused.
+// 一個「字」變成「目標」的唯一入口。沒有展開就是它自己；展開全部解得開就用解出來的路徑，
+// 之後照舊走一般的受保護路徑判定；其餘一律未知並拒絕。
+function targetFromWord(word, isDynamic, expansionEnv) {
+  if (!hasUnresolvedTargetExpansion(isDynamic)) return word;
+  const resolved = resolveKnownExpansions(word, expansionEnv);
+  return resolved === null ? UNRESOLVED_TARGET + word : resolved;
+}
+
+// The value a variable has in THIS process is only the value the command will
+// see if nothing in the command changes it first -- and a command can:
+//   HOME=/ rm -rf "$HOME/etc"          the shell sets HOME for that command
+//   cd /etc && rm -rf "$PWD"           PWD is whatever cd left behind
+//   HOME=/ bash -c 'rm -rf "$HOME"'    the assignment is OUTSIDE the nested word
+//                                      list, so a per-word check inside misses it
+// The first of those was already a row in the suite before any of this, and it
+// is what caught the first version of this resolution: taking the hook's own
+// HOME made `HOME=/ rm -rf "$HOME/etc"` read as an ordinary subdirectory of the
+// home directory while the command really removes /etc.
+// So the question is asked of the WHOLE command text, once, before parsing. Text
+// matching is crude and will occasionally disable resolution for a mention that
+// is not an assignment (`echo "HOME=/x"`) -- and that is the right direction to
+// be crude in, because the fallback is exactly the behaviour that shipped
+// before: the operand stays unknown and is refused.
+// 這個行程裡的變數值，只有在「命令本身不會先改掉它」時才等於命令看到的值，而命令改得掉。
+// 上面第一種在這一切之前就已經是測試的一列，也正是它抓到這套解析的第一版：拿 hook 自己的
+// HOME 去解，`HOME=/ rm -rf "$HOME/etc"` 會被讀成家目錄底下的普通子目錄，而它真正刪的是
+// /etc。所以這個問題是對「整段命令文字」問一次、在解析之前問。文字比對很粗，偶爾會因為一
+// 段不是賦值的文字而關掉解析——而這正是應該粗的方向，因為退路就是先前出貨的行為：操作元維
+// 持未知並被拒絕。
+// NOTE the HOME argument is `env.HOME` as given, NOT the `env.HOME ||
+// os.homedir()` the protected-path check uses. Those answer different questions.
+// The protected-path check asks "which directory is this machine's home", and
+// os.homedir() is a fine answer. Resolution asks "what will `$HOME` expand to
+// when this command runs", and there os.homedir() is a GUESS: a shell with HOME
+// empty expands `$HOME/build` to `/build`, one level under the root, and
+// substituting the real home would call that ordinary. An absent or empty HOME
+// therefore resolves nothing and the operand stays unknown -- the behaviour that
+// shipped before.
+// 注意 HOME 這個引數是「原樣的 env.HOME」，不是受保護路徑判定用的 `env.HOME || os.homedir()`。
+// 兩者回答的是不同問題：前者問「這台機器的家目錄是哪個」，os.homedir() 是好答案；解析問的是
+// 「這條命令執行時 `$HOME` 會展開成什麼」，那裡 os.homedir() 只是猜測——HOME 是空的 shell 會
+// 把 `$HOME/build` 展開成 `/build`，代進真正的家目錄反而會把它當成普通路徑。
+function resolvableEnvironment(command, home, cwd, env) {
+  const text = String(command || '');
+  const mentionsAssignment = (name) => new RegExp(`(?:^|[^A-Za-z0-9_])${name}=`).test(text);
+  // `unset`/`export`/`declare`/`typeset` can rewrite any of them without an
+  // `=` in front of the name, and a directory change moves PWD.
+  // unset/export/declare/typeset 不必在名字前面帶 `=` 就能改掉它們，而換目錄會移動 PWD。
+  const rewritesAnything = /(?:^|[^A-Za-z0-9_-])(?:unset|export|declare|typeset)(?:[^A-Za-z0-9_-]|$)/.test(text);
+  const changesDirectory = /(?:^|[^A-Za-z0-9_-])(?:cd|chdir|pushd|popd)(?:[^A-Za-z0-9_-]|$)/.test(text);
+  const resolved = {};
+  if (!rewritesAnything && !mentionsAssignment('HOME')) resolved.HOME = home;
+  if (!rewritesAnything && !mentionsAssignment('TMPDIR')) resolved.TMPDIR = env.TMPDIR;
+  if (!rewritesAnything && !mentionsAssignment('PWD') && !changesDirectory) resolved.PWD = cwd;
+  return resolved;
+}
+
 // A glob is a QUESTION ABOUT PATHS, and this file used to answer only one small
 // part of it: "can the basename select a .git?", by building a regular
 // expression. That was wrong in three ways at once, all measured.
@@ -1012,7 +1205,7 @@ function declaredLink(value, cwd, home, extraDirs) {
   return null;
 }
 
-function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
+function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, expansionEnv = null) {
   const words = shellWords(command);
   const dynamicExpansions = words.dynamicExpansions || [];
   // Which words were written as unquoted shell operators. Only the find branch
@@ -1110,7 +1303,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
   if (carrierPresent) {
     for (const entry of bodies) {
       if (depth >= 8) targets.push('/');
-      else targets.push(...commandTargets(entry.body, depth + 1, true));
+      else targets.push(...commandTargets(entry.body, depth + 1, true, expansionEnv));
     }
   }
 
@@ -1119,7 +1312,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
     if (depth >= 8) targets.push('/');
     else {
       for (const nested of substitutions) {
-        targets.push(...commandTargets(nested, depth + 1, carrierPresent));
+        targets.push(...commandTargets(nested, depth + 1, carrierPresent, expansionEnv));
       }
     }
   }
@@ -1192,27 +1385,27 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
           } else if (option === '-S' || option === '--split-string') {
             const splitString = words[i + 1] || '';
             if (depth >= 8) targets.push('/');
-            else if (splitString) targets.push(...commandTargets(splitString, depth + 1));
+            else if (splitString) targets.push(...commandTargets(splitString, depth + 1, false, expansionEnv));
             i += 2;
           } else if (option.startsWith('--split-string=')) {
             const splitString = option.slice('--split-string='.length);
             if (depth >= 8) targets.push('/');
-            else if (splitString) targets.push(...commandTargets(splitString, depth + 1));
+            else if (splitString) targets.push(...commandTargets(splitString, depth + 1, false, expansionEnv));
             i += 1;
           } else if (option.startsWith('-S') && option.length > 2) {
             const splitString = option.slice(2);
             if (depth >= 8) targets.push('/');
-            else targets.push(...commandTargets(splitString, depth + 1));
+            else targets.push(...commandTargets(splitString, depth + 1, false, expansionEnv));
             i += 1;
           } else if (/^-[iv]*S.+/.test(option)) {
             const splitString = option.replace(/^-[iv]*S/, '');
             if (depth >= 8) targets.push('/');
-            else targets.push(...commandTargets(splitString, depth + 1));
+            else targets.push(...commandTargets(splitString, depth + 1, false, expansionEnv));
             i += 1;
           } else if (/^-[iv]*S$/.test(option)) {
             const splitString = words[i + 1] || '';
             if (depth >= 8) targets.push('/');
-            else if (splitString) targets.push(...commandTargets(splitString, depth + 1));
+            else if (splitString) targets.push(...commandTargets(splitString, depth + 1, false, expansionEnv));
             i += 2;
           } else if (/^-[iv]*[uPCa]$/.test(option)) {
             i += 2;
@@ -1423,11 +1616,11 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
         // be parsed as a command as well as compared as a path.
         if (unresolvedExecutable && /\s/.test(candidate)) {
           if (depth >= 8) targets.push('/');
-          else targets.push(...commandTargets(candidate, depth + 1));
+          else targets.push(...commandTargets(candidate, depth + 1, false, expansionEnv));
         }
         if (!candidate.startsWith('-') || candidate === '-') {
           targets.push(
-            hasUnresolvedTargetExpansion(dynamicExpansions[i]) ? '/' : candidate
+            targetFromWord(candidate, dynamicExpansions[i], expansionEnv)
           );
         }
       }
@@ -1471,7 +1664,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
         // Bound adversarial recursion, but fail closed rather than letting a
         // deeply nested shell carrier bypass the protected-directory hook.
         if (depth >= 8) targets.push('/');
-        else targets.push(...commandTargets(nestedCommand, depth + 1));
+        else targets.push(...commandTargets(nestedCommand, depth + 1, false, expansionEnv));
       }
       while (i < words.length && !separators.has(words[i])) i += 1;
     } else if (executable === 'find') {
@@ -1503,7 +1696,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
         // 展開後才知道的 root 與 rm 的操作元一樣不可知：`find $DIR -delete` 與
         // `find "$DIR" -delete` 實測都會刪。rm 那邊早就把這種形狀折成 '/'，find 這邊卻推
         // 原字，同一種不可知得到兩種答案。
-        const asRoot = (index) => (hasUnresolvedTargetExpansion(dynamicExpansions[index]) ? '/' : words[index]);
+        const asRoot = (index) => targetFromWord(words[index], dynamicExpansions[index], expansionEnv);
         if (words[i] === '-f') {
           if (i + 1 < words.length && !terminators.has(words[i + 1])) searchRoots.push(asRoot(i + 1));
           i += 2;
@@ -1594,7 +1787,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
             ) {
               if (words[clauseEnd] === '{}' || words[clauseEnd].startsWith('-')) continue;
               execOperands.push(
-                hasUnresolvedTargetExpansion(dynamicExpansions[clauseEnd]) ? '/' : words[clauseEnd],
+                targetFromWord(words[clauseEnd], dynamicExpansions[clauseEnd], expansionEnv),
               );
             }
           }
@@ -1647,7 +1840,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
       }
       if (nestedCommand.length > 0) {
         if (depth >= 8) targets.push('/');
-        else targets.push(...commandTargets(nestedCommand.join(' '), depth + 1));
+        else targets.push(...commandTargets(nestedCommand.join(' '), depth + 1, false, expansionEnv));
       }
     } else {
       while (i < words.length && !separators.has(words[i])) i += 1;
@@ -1678,8 +1871,37 @@ function extractInput(payload) {
   };
 }
 
+// The refusal for a target this gate could not work out. It must NOT borrow the
+// protected-directory wording: the command did not name a protected directory,
+// and reporting `/` as the argument sent people looking for a `/` they never
+// wrote. Name the operand that could not be resolved, say plainly that the
+// answer is unknown rather than dangerous, and give the way through -- `cd` to
+// the directory and name the target relatively, which contains no expansion and
+// is judged literally.
+// 這是「算不出來」的拒絕，不能借用受保護目錄那套措辭：命令並沒有寫到受保護目錄，把 `/` 當
+// 成引數報出來，只會讓人去找一個他從來沒寫過的 `/`。要指名解不開的那個操作元、直說答案是
+// 未知而不是危險，並給出繞法：`cd` 過去、用相對路徑寫，那裡沒有展開，會被逐字判定。
+function unknownDenial(operand, isCopilot, isAntigravity, isCursor, isGrok) {
+  const zh = `拒絕刪除：無法在執行前確定 '${operand}' 會展開成哪一條路徑，因此不予放行`
+    + `（這不是說它是受保護的目錄，是說這道閘門不知道它是什麼）。`
+    + `目前只會解析 $HOME、$PWD、$TMPDIR。`
+    + `繞法：先 cd 到該目錄，再用不含展開的相對路徑，例如 cd <目錄> && rm -rf <相對路徑>。`;
+  const en = `Refused to remove: cannot determine before execution which path '${operand}' expands to`
+    + ` (this does not say it is a protected directory; it says this gate does not know what it is).`
+    + ` Only $HOME, $PWD and $TMPDIR are resolved.`
+    + ` Workaround: cd into the directory and name the target relatively, e.g. cd <dir> && rm -rf <relative path>.`;
+  return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
+}
+
 function denial(reason, isCopilot, isAntigravity, isCursor, isGrok) {
   const message = `拒絕刪除受保護的目錄：${reason} / Refused to remove protected directory: ${reason}`;
+  return denialShape(message, isCopilot, isAntigravity, isCursor, isGrok);
+}
+
+// Every agent's own deny shape, in one place, so a new refusal reason cannot
+// accidentally support fewer agents than the old one.
+// 各家 agent 的拒絕格式集中在一處，新的拒絕理由才不會比舊的少支援幾家。
+function denialShape(message, isCopilot, isAntigravity, isCursor, isGrok) {
   if (isGrok) {
     return {
       decision: 'deny',
@@ -1722,9 +1944,30 @@ function evaluate(payload, env = process.env) {
   const extraDirs = (env.BETTER_RM_PROTECTED_DIRS || '')
     .split(path.delimiter).filter(Boolean).map((item) => path.resolve(cwd, item));
 
-  for (const target of commandTargets(command)) {
+  // The values the allowlisted variables really have for THIS call. HOME is the
+  // one the rest of this file already trusts; PWD is the tool call's own cwd,
+  // which is where the command will run, not the hook process's directory.
+  // 這次呼叫裡那幾個允許解析的變數真正的值。HOME 與本檔案其他地方用的是同一個；PWD 取這次
+  // 工具呼叫自己的 cwd，那才是命令會執行的地方，而不是 hook 行程的目錄。
+  const expansionEnv = resolvableEnvironment(command, env.HOME, cwd, env);
+
+  // Two passes on purpose. A command can name a genuinely protected path AND
+  // carry a variable this gate cannot resolve; the protected path is the more
+  // useful thing to be told about, so it wins the message. Both refuse either
+  // way -- the order decides what the user reads, not whether it is denied.
+  // 刻意分兩輪。一條命令可能同時寫了真正受保護的路徑，又帶著這個閘門解不開的變數；對使用者
+  // 更有用的是前者，所以由它決定訊息。兩者都會拒絕，順序只決定使用者看到什麼。
+  const targets = commandTargets(command, 0, false, expansionEnv);
+  for (const target of targets) {
+    if (target.startsWith(UNRESOLVED_TARGET)) continue;
     const reason = protectedReason(target, cwd, home, extraDirs);
     if (reason) return denial(reason, isCopilot, isAntigravity, isCursor, isGrok);
+  }
+  for (const target of targets) {
+    if (!target.startsWith(UNRESOLVED_TARGET)) continue;
+    return unknownDenial(
+      target.slice(UNRESOLVED_TARGET.length), isCopilot, isAntigravity, isCursor, isGrok,
+    );
   }
 
   if (isGrok) return { decision: 'allow' };
