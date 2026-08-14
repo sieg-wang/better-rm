@@ -1558,6 +1558,78 @@ else
     test_fail "publish 前的競態覆蓋了新目錄、吞掉垃圾桶項目或留下 staging (status=$publish_status)"
 fi
 
+test_item "還原：已授權覆蓋時，讓位之後才出現的後繼者不在授權範圍內"
+# 上一個測試走的是 dest_existed=0 的路（從來沒有授權）。這一個走的是相反那條：目的地
+# 起初就在、使用者也同意覆蓋了，而那個被同意的東西已經讓位進垃圾桶。同意的對象是「還原
+# 開始時佔著目的地的那一個物件」，不是「那條路徑」——讓位之後才被放上來的是另一個物件，
+# 沒有人同意覆蓋它。
+# 舊寫法把同意 latch 成 clobber_policy=-f 一路帶到 publish，於是 -f 唯一還能作用的對象
+# 就只剩下這種後繼者：實測 exit 0、後繼者被 rename 原子地解除連結，垃圾桶裡沒有它、也
+# 沒有備份。這一列就是那個差別——它必須 fail closed，兩邊的東西都要還在。
+# The previous test takes the dest_existed=0 route, where nothing was ever
+# authorized. This one takes the opposite route: the destination WAS there at the
+# start and the user did consent to overwriting it, and that consented object has
+# already been set aside into the trash. The consent names the object that
+# occupied the destination when the restore began, not the path -- whatever is put
+# there after the set-aside is a different object and nobody consented to it.
+# The old shape latched the consent into clobber_policy=-f all the way to the
+# publish, which left the successor as the only thing -f could still act on:
+# measured exit 0 with the successor atomically unlinked by the rename, no trash
+# entry, no backup. This row is that difference; it has to fail closed with both
+# objects still present.
+# shim 只看檔案系統狀態（目的地何時變空），不看 better-rm 的任何內部命名或 mv 序數。
+# The shim keys only on filesystem state (when the destination becomes free),
+# never on better-rm's internal naming or on an mv ordinal.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+successor_bin="$TEST_WORK_DIR/restore-successor-bin"
+mkdir -p "$successor_bin"
+cat > "$successor_bin/mv" <<'EOF'
+#!/bin/sh
+if [ ! -e "$BETTER_RM_SUCC_MARKER" ] &&
+   [ ! -e "$BETTER_RM_SUCC_DEST" ] && [ ! -L "$BETTER_RM_SUCC_DEST" ]; then
+    printf '%s\n' "SUCCESSOR" > "$BETTER_RM_SUCC_DEST"
+    : > "$BETTER_RM_SUCC_MARKER"
+fi
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$successor_bin/mv"
+
+printf '%s\n' "TRASHED CONTENT" > successor_target.txt
+"$BETTER_RM" successor_target.txt
+successor_trash_item=$(find "$TEST_TRASH_DIR" -type f -name 'successor_target.txt__*' | head -1)
+# 目的地在還原開始時就存在，-f 就是使用者對「它」的覆蓋同意。
+# The destination exists when the restore begins and -f is the user's consent to
+# overwrite THAT object.
+printf '%s\n' "ORIGINAL DESTINATION" > successor_target.txt
+successor_status=0
+BETTER_RM_SUCC_MARKER="$TEST_WORK_DIR/successor-marker" \
+BETTER_RM_SUCC_DEST="$TEST_WORK_DIR/successor_target.txt" \
+BETTER_RM_REAL_MV="$(command -v mv)" \
+PATH="$successor_bin:$PATH" \
+    "$BETTER_RM" -f --restore successor_target.txt >/dev/null 2>&1 ||
+    successor_status=$?
+successor_staging=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'successor_target.txt.better-rm-restore-*' -print -quit 2>/dev/null)
+# 讓位的舊目的地必須還在垃圾桶裡（可用 rm --restore 取回），被還原的項目也必須放回去，
+# 所以垃圾桶裡是兩筆，而不是一筆。
+# The displaced old destination must still be in the trash (recoverable with
+# rm --restore) and the item being restored must have been put back, so the trash
+# holds two entries, not one.
+successor_trash_count=$(find "$TEST_TRASH_DIR" -type f -name 'successor_target.txt__*' | wc -l | tr -d ' ')
+
+if [ "$successor_status" -eq 1 ] && \
+   [ -f successor_target.txt ] && [ ! -L successor_target.txt ] && \
+   [ "$(cat successor_target.txt 2>/dev/null)" = "SUCCESSOR" ] && \
+   [ -e "$TEST_WORK_DIR/successor-marker" ] && \
+   [ -n "$successor_trash_item" ] && [ -f "$successor_trash_item" ] && \
+   [ "$(cat "$successor_trash_item")" = "TRASHED CONTENT" ] && \
+   [ "$successor_trash_count" -eq 2 ] && \
+   [ -z "$successor_staging" ]; then
+    test_pass "讓位後才出現的後繼者未被授權覆蓋掉，舊目的地與垃圾桶項目都還取得回來"
+else
+    test_fail "已授權的還原銷毀了讓位後才出現的後繼者 (status=$successor_status, trash=$successor_trash_count)"
+fi
+
 test_item "還原：已授權覆蓋真目錄時完成還原，舊目錄進垃圾桶且可再還原"
 # 覆蓋等於刪除。使用者同意的是「換掉」，不是「銷毀」：舊目的地必須用工具自己的垃圾桶
 # 機制保存，結束碼維持 0，且不得在使用者的資料夾留下暫存殘骸。

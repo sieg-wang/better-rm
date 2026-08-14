@@ -1400,15 +1400,6 @@ restore_file() {
     # staging <-> destination is always a same-device rename. Only the
     # staging <-> trash leg can cross devices.
     local cross_device=0
-    local clobber_policy="-n"
-    if [ "$dest_existed" = "1" ]; then
-        # 使用者已同意覆蓋（-f 或互動確認）才允許取代既有目的地；否則一律不覆蓋，
-        # 才不會把「還原期間才被建立的檔案」默默蓋掉。
-        # Only replace an existing destination once the user has consented (-f or
-        # the interactive prompt); otherwise never clobber, so a file created at
-        # that path while the restore is running is not silently overwritten.
-        clobber_policy="-f"
-    fi
 
     trash_identity=$(path_identity "$trash_path")
     if [ -z "$trash_identity" ]; then
@@ -1789,12 +1780,33 @@ restore_file() {
         fi
     fi
 
-    # 就位：同一檔案系統內的一次 rename。目的地若是既有檔案或 symlink，核心會原子地
-    # 以新項目取代它並解除舊 inode 的連結，全程沒有任何「依路徑刪除」。
-    # Put it in place with a single same-filesystem rename. If the destination is
-    # an existing file or symlink the kernel replaces it atomically and unlinks
-    # the old inode as part of the same call — no delete-by-path anywhere.
-    if ! move_exact "$clobber_policy" "$incoming" "$dest_path" 2>/dev/null ||
+    # 就位：同一檔案系統內的一次 rename，而且一律 -n，絕不覆蓋。
+    # 使用者同意覆蓋的是「還原開始時佔著目的地的那一個東西」，而那個東西已經在上面讓完
+    # 位了——走到這裡時目的地照理是空的。所以此刻若還有東西佔著，它必定是讓位之後才被
+    # 放上來的另一個東西，從來沒有人同意覆蓋它。
+    # 舊寫法把那一次同意latch成 clobber_policy=-f 帶到這裡，於是 -f 唯一還能作用的對象
+    # 就只剩下這種後來者：實測 `rm -f --restore victim.txt`，在讓位完成後、publish 之前
+    # 於目的地建立一個新檔案，該檔案被 rename 原子地解除連結，exit 0，垃圾桶裡沒有它、
+    # 也沒有任何備份——正是這支工具存在的理由所要防的那種消失。
+    # -n 讓這種情形 fail closed：publish 失敗、走 unwind，兩邊的東西都還在。
+    # （BSD 的 -n 在目的地已存在時不做事並回傳 0，所以底下的 inode 驗證才是真正的判準。）
+    # Put it in place with a single same-filesystem rename, always -n, never
+    # clobbering. What the user consented to overwrite is the object that occupied
+    # the destination when the restore began, and that object has already been set
+    # aside above -- by the time control reaches here the destination is empty. So
+    # anything occupying it NOW is a different object that arrived after the
+    # set-aside, and nobody ever consented to overwriting it.
+    # The old shape latched that consent into clobber_policy=-f and carried it
+    # here, which left the successor as the only thing -f could still act on.
+    # Measured: `rm -f --restore victim.txt` with a file created at the destination
+    # after the set-aside and before the publish unlinked that file atomically and
+    # exited 0, with no trash entry and no backup -- exactly the disappearance this
+    # tool exists to prevent.
+    # -n makes that case fail closed: the publish fails, the unwind runs, and both
+    # objects still exist.
+    # (BSD's -n does nothing and returns 0 when the target exists, so the inode
+    # check below is what actually decides.)
+    if ! move_exact -n "$incoming" "$dest_path" 2>/dev/null ||
        [ "$(path_identity "$dest_path")" != "$staged_identity" ]; then
         restore_unwind
         if [ "$displaced_trashed" = "1" ]; then
