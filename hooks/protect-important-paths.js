@@ -1474,30 +1474,69 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
         // same wrapper layers any other command can. Comparing that one word
         // against rm/rmdir saw `sudo`, `nice`, `env` -- none of them rm -- and
         // called the find a reader: measured, `find /etc -exec sudo rm -rf {} \;`
-        // was allowed and deletes /etc. resolveExecutable is the same unwrapper
-        // command position uses, so the two can no longer disagree.
+        // was allowed and deletes /etc. It calls resolveExecutable, the same
+        // unwrapper command position uses -- the wrapper LIST is now shared, but
+        // the DECISION is not: command position also fails closed on an
+        // unresolvable command word, on operands arriving via xargs, and it
+        // descends into shell carriers, none of which this branch does. So
+        // `find . -exec sh -c 'rm -rf /etc' \;` and `-exec $CMD -rf /etc` are
+        // still allowed here while the same words in command position are not.
         // -exec 後面那個字是 find 要跑的命令，而它可以戴上任何命令都能戴的外殼。拿那一個字
         // 去比對 rm/rmdir，看到的是 sudo、nice、env，沒有一個是 rm，於是把這個 find 判成
         // 讀取工具：實測 `find /etc -exec sudo rm -rf {} \;` 被放行，而它會刪掉 /etc。
+        // 共用的是「外殼清單」，不是「判定」：命令位置還會對不可知的命令字、xargs 從 stdin
+        // 補上的操作元失效關閉，也會鑽進 shell carrier，這一支都沒有。
         const execCommand = ['-exec', '-execdir', '-ok', '-okdir'].includes(words[i])
           ? resolveExecutable(i + 1)
           : null;
-        if (execCommand && ['rm', 'rmdir'].includes(execCommand.executable)) {
-          deletes = true;
-          // The exec command has operands of its own, and they are not the search
-          // roots: `find . -exec rm -rf /etc \;` runs rm on /etc once per file
-          // found (measured). Judging only the roots read the wrong argument.
-          // exec 那個命令自己也有操作元，而它們不是搜尋起點：`find . -exec rm -rf /etc \;`
-          // 每找到一個檔案就對 /etc 跑一次 rm（實測）。只判 roots 是讀錯了引數。
-          // The operand scan starts after the UNWRAPPED command word, so a
-          // wrapper's own arguments (`sudo -u root`) are not read as rm targets.
-          // 掃描從拆完外殼的那個命令字之後開始，外殼自己的引數不會被當成 rm 的目標。
-          for (let j = execCommand.index + 1; j < words.length && !terminators.has(words[j]) && words[j] !== '+'; j += 1) {
-            if (words[j] === '{}' || words[j].startsWith('-')) continue;
-            execOperands.push(
-              hasUnresolvedTargetExpansion(dynamicExpansions[j]) ? '/' : words[j],
-            );
+        if (execCommand) {
+          // Where this -exec clause ends. Everything from here to that point is
+          // the exec'd command's own argv, which find does not re-read for
+          // operators -- and neither may this loop, or the work is quadratic.
+          // Measured, each row a command that DELETES and a gate that answered
+          // too late or not at all (the live hook's timeout is 5s):
+          //   find . + '-exec sudo '*6000  ->  5,525ms   (this branch, before)
+          //   find . + '-exec rm '*6000    -> 210,178ms  (operand scan, and the
+          //                                   SAME 210s at b66f502 -- older than
+          //                                   the wrapper hole this round fixed)
+          // A hook that times out is a hook that did not answer, and the padding
+          // is inert: it costs the attacker nothing and suppresses every rule in
+          // this file, not just this branch. So each clause is consumed once.
+          // 這個 -exec 子句到哪裡結束。從這裡到那一點都是被執行命令自己的 argv，find 不會
+          // 再把它們當運算子讀，這個迴圈也不可以，否則就是平方級。實測兩列都是「會刪東西、
+          // 而閘門太慢或根本沒答」（live hook 逾時 5 秒），且第二列在 b66f502 就有，比這一
+          // 輪修掉的外殼漏洞更老。逾時的閘門等於沒有閘門，而填充料是惰性的。
+          let clauseEnd = execCommand.index;
+          if (['rm', 'rmdir'].includes(execCommand.executable)) {
+            deletes = true;
+            // The exec command has operands of its own, and they are not the search
+            // roots: `find . -exec rm -rf /etc \;` runs rm on /etc once per file
+            // found (measured). Judging only the roots read the wrong argument.
+            // exec 那個命令自己也有操作元，而它們不是搜尋起點：`find . -exec rm -rf /etc \;`
+            // 每找到一個檔案就對 /etc 跑一次 rm（實測）。只判 roots 是讀錯了引數。
+            // The operand scan starts after the UNWRAPPED command word, so a
+            // wrapper's own arguments (`sudo -u root`) are not read as rm targets.
+            // 掃描從拆完外殼的那個命令字之後開始，外殼自己的引數不會被當成 rm 的目標。
+            for (
+              clauseEnd = execCommand.index + 1;
+              clauseEnd < words.length
+                && !terminators.has(words[clauseEnd])
+                && words[clauseEnd] !== '+';
+              clauseEnd += 1
+            ) {
+              if (words[clauseEnd] === '{}' || words[clauseEnd].startsWith('-')) continue;
+              execOperands.push(
+                hasUnresolvedTargetExpansion(dynamicExpansions[clauseEnd]) ? '/' : words[clauseEnd],
+              );
+            }
           }
+          // Land ON the clause end rather than past it, so a `;` or `|` that
+          // ended it is still seen by this loop's own terminator test. Skipping
+          // over one would swallow the command after it -- `find . -exec sudo … ;
+          // rm -rf /etc` would stop being read as an rm at all.
+          // 停在子句結尾那個字上，而不是越過它，`;`、`|` 才會被本迴圈的終止判斷看到；越過去
+          // 會把後面那條命令一起吞掉，`… ; rm -rf /etc` 就再也不會被當成 rm 讀。
+          if (clauseEnd - 1 > i) i = clauseEnd - 1;
         }
       }
       if (deletes) {

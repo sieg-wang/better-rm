@@ -1327,6 +1327,73 @@ let globTimingChecks = 0;
   globTimingChecks += 4;
 }
 
+// A find with many -exec clauses must be answered in bounded time, for the same
+// reason: the live hook has a 5,000 ms timeout in settings.json and a gate that
+// times out is a gate that did not answer -- except this one is reachable by
+// PADDING, which costs the attacker nothing and suppresses every rule in the
+// file rather than only the find branch. Two separate quadratics were measured
+// on the very command `rm -rf /etc`, both answering far too late:
+//   'find . ' + '-exec sudo '*6000 + '; rm -rf /etc'  ->   5,525 ms, introduced
+//       when the find branch started unwrapping wrappers and re-scanned the
+//       whole word list from every -exec
+//   'find . ' + '-exec rm '*6000                      -> 210,178 ms, OLDER --
+//       the same 210 s at b66f502, from the operand scan running to end-of-words
+//       once per -exec when no `+` or `;` ever closes a clause
+// Each row is timed with a WRAPPER that eats '-'-prefixed words (sudo, env,
+// xargs), because that is what makes the re-scan swallow the next -exec; a
+// wrapper that stops at its first operand (timeout) never triggered it and would
+// not fail even with the bug present.
+// 帶很多 -exec 子句的 find 也必須在有界時間內回答，理由同上：live hook 在 settings.json
+// 裡的逾時是 5,000 ms，逾時的閘門等於沒有回答——但這一種靠「填充料」就能觸發，對攻擊者
+// 零成本，而且壓住的是整個檔案的每一條規則，不只 find 這一支。實測兩個各自獨立的平方級，
+// 兩列跑的都是 `rm -rf /etc`；第二列在 b66f502 就有，比第一列更老。
+// 每一列都要用「會吃掉 '-' 開頭字」的外殼（sudo、env、xargs），因為那才會讓重掃把下一個
+// -exec 一起吞掉；停在第一個操作元的 timeout 觸發不了，就算 bug 還在也不會紅。
+let findClauseTimingChecks = 0;
+{
+  const time = (command) => {
+    const started = process.hrtime.bigint();
+    const verdict = evaluate(claude(command), env)?.hookSpecificOutput?.permissionDecision;
+    return { verdict, ms: Number(process.hrtime.bigint() - started) / 1e6 };
+  };
+  const budgetMs = 1000;
+  for (const wrapper of ['sudo', 'env', 'xargs']) {
+    const padded = time(`find . ${`-exec ${wrapper} `.repeat(6000)}; rm -rf /etc`);
+    assert.equal(
+      padded.verdict, 'deny',
+      `an rm -rf /etc padded with 6000 -exec ${wrapper} clauses is still refused`,
+    );
+    assert.ok(
+      padded.ms < budgetMs,
+      `6000 -exec ${wrapper} clauses took ${padded.ms}ms`,
+    );
+    findClauseTimingChecks += 2;
+  }
+  // The clause that never closes: no `+` and no `;`, so the operand scan has no
+  // stopping point of its own. This is the pre-existing one.
+  // 永遠不收尾的子句：沒有 `+` 也沒有 `;`，操作元掃描自己沒有終點。這一種是既有的。
+  const unclosed = time(`find . ${'-exec rm '.repeat(6000)}`);
+  assert.notEqual(
+    unclosed.verdict, 'deny',
+    'a find whose roots are ordinary stays ordinary however many -exec clauses it has',
+  );
+  assert.ok(unclosed.ms < budgetMs, `6000 unclosed -exec rm clauses took ${unclosed.ms}ms`);
+  findClauseTimingChecks += 2;
+  // Advancing past a consumed clause must land ON the separator that ended it,
+  // never past it: skipping one would swallow the command after it, and the rm
+  // that follows would stop being read as an rm at all.
+  // 跳過已消化的子句時要停在結束它的分隔符「上」，不能越過去：越過去會把後面那條命令一起
+  // 吞掉，後面那個 rm 就再也不會被當成 rm 讀。
+  for (const tail of [';', '|', '&', '\n']) {
+    const swallowed = time(`find . -exec sudo -u root ls {} ${tail} rm -rf /etc`);
+    assert.equal(
+      swallowed.verdict, 'deny',
+      `an rm after a consumed -exec clause ended by '${tail}' is still read`,
+    );
+    findClauseTimingChecks += 1;
+  }
+}
+
 let deviceChecks = 0;
 {
   const box = fs.realpathSync(fs.mkdtempSync(`${os.tmpdir()}/better-rm-hook-device-`));
@@ -1576,7 +1643,7 @@ async function runOpenCodePluginChecks() {
 // 否則「沒跑到」會看起來是綠的。
 process.exitCode = 1;
 runOpenCodePluginChecks().then((pluginChecks) => {
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + pluginChecks}`);
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + findClauseTimingChecks + pluginChecks}`);
   process.exitCode = 0;
 }).catch((error) => {
   console.error(error && error.stack ? error.stack : error);
