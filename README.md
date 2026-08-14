@@ -348,6 +348,33 @@ export BETTER_RM_PROTECTED_DIRS="$HOME/work/secrets:$HOME/vault"
 ### 使用者目錄
 
 - `~` 或 `$HOME` - 你的家目錄（整個目錄）
+- `~/.ssh` - SSH 私鑰、`known_hosts` 與 `config`
+- `~/.claude` - Claude Code 的設定、hooks，以及 `projects/` 底下的對話記錄
+
+這兩項與清單上其他項目**完全相同**的語意：保護的是那個目錄本身，不是它底下的東西。
+`rm -rf ~/.ssh` 被拒絕，`rm -f ~/.ssh/known_hosts.old`、`rm -rf ~/.claude/projects/<session>`
+照舊放行——後者是會長到數 GB、本來就會定期清理的對話記錄。唯一不那麼直觀的地方是萬用
+字元：父目錄受保護的樣式選中的是**整個目錄的內容**，所以 `rm -rf ~/.ssh/*` 與
+`rm -rf ~/.claude/*` 會被拒絕，理由與 `rm -rf /etc/*` 相同；`rm -rf ~/.claude/projects/*`
+的父目錄沒受保護，照舊放行。名字只是「以它開頭」的鄰居不受影響（`~/.claude-backup`、
+`~/.sshfoo`）——比對的是完整路徑元件，不是前綴。
+
+寫法不影響判定：`~/.ssh`、`"$HOME/.ssh"`、`$HOME/.ssh`、`"${HOME}/.ssh"`、`/Users/<you>/.ssh`
+與結尾多一條斜線的 `~/.ssh/` 全部得到同一個答案，包裝與載體（`sudo rm -rf ~/.ssh`、
+`find "$HOME/.ssh" -delete`、`echo ~/.ssh | xargs rm -rf`、`bash -c 'rm -rf ~/.ssh'`）也是。
+在此之前，只有「解不開的變數」這個意外讓 `rm -rf "$HOME/.ssh"` 看起來被擋住（而且拒絕訊息
+報的是一個沒人寫過的 `/`），字面的 `rm -rf ~/.ssh` 一直都是放行的。
+
+**`~/Library` 刻意不在清單上。** 清 `~/Library/Caches/<tool>` 是例行工作，而這份清單保護的
+是目錄本身而非內容——加上去對常見的清快取命令沒有任何幫助，卻會把 `rm -rf ~/Library/*`
+這類清理變成拒絕。在一道沒有豁免管道的守衛上，誤擋是實實在在的成本，而這一項換不到對等
+的收益。`~/Library`、`~/Library/Caches/pip` 照舊可刪，測試套件裡有對應的列釘住這個決定：
+哪天有人把它加進清單，那幾列會轉紅。
+
+同樣要說清楚**沒有**涵蓋的部分：判定是在命令執行前對命令文字做的，所以
+`cd ~ && rm -rf .ssh` 這種先換目錄、再用相對路徑的寫法不會被擋——閘門看到的是相對於本次
+工具呼叫 cwd 的 `.ssh`。這一點對 `/etc` 也一樣（`cd / && rm -rf etc`），不是這兩項特有的，
+也不是本次新增的。
 
 ### 專案目錄
 
@@ -388,9 +415,11 @@ macOS 用 firmlink 把資料卷宗接進根目錄，所以 `/Users/you` 與 `/Sy
   反過來，bind mount、hardlink 目錄之類「同一顆 inode、兩種拼寫」不在這條規則涵蓋範圍內。
 
 清單其餘各項以完全相同的路徑比對，保護的是那個目錄本身而非其內容：`/Applications/Xcode.app`、
-`/Library/Caches/foo` 這類目錄內的項目仍可正常移除。`/private` 同樣只涵蓋 `/private` 本身；
-macOS 的 `/etc`、`/var` 是指向 `/private/etc`、`/private/var` 的符號連結，以實體路徑書寫
-（`rm -rf /private/etc`）不在保護範圍內。
+`/Library/Caches/foo` 這類目錄內的項目仍可正常移除。`/private` 同樣只涵蓋 `/private` 本身，
+而 `/private/etc`、`/private/var` 各自都在清單上（macOS 的 `/etc`、`/var` 就是指向它們的
+符號連結，只保護符號連結那個名字等於沒保護那份資料）。這段先前寫的是「以實體路徑書寫
+（`rm -rf /private/etc`）不在保護範圍內」——那是 b0c5871 之前的狀態，兩個名字加進兩份清單
+之後就不再成立，這裡一併更正。
 
 ## Coding agent hooks
 

@@ -27,6 +27,63 @@ const SYSTEM_DIRS = [
   '/sys', '/usr', '/var',
 ];
 
+// Protected directories that live under the user's HOME, named relative to it
+// because there is no absolute spelling to put in SYSTEM_DIRS: the home
+// directory is a per-machine, per-call value, and this list is joined onto the
+// same `home` the protected-path check already receives (env.HOME, falling back
+// to os.homedir()), so it reuses that one mechanism rather than introducing a
+// second. Kept in step with better-rm's own PROTECTED_DIRS exactly as
+// SYSTEM_DIRS is -- those entries are spelled "$HOME/.ssh" and "$HOME/.claude"
+// there, and the drift guard in test-hooks.js compares the two lists including
+// these.
+// They get precisely what /etc gets and nothing more: the directory ITSELF is
+// refused, everything inside it stays ordinary work. `rm -rf ~/.ssh` is refused;
+// `rm -f ~/.ssh/known_hosts.old` and `rm -rf ~/.claude/projects/<session>` are
+// not. The one place that is not obvious is a glob: a pattern whose parent is a
+// protected directory selects that directory's entire contents, so `rm -rf
+// ~/.ssh/*` is refused for the same reason `rm -rf /etc/*` is.
+// Why these two. ~/.ssh holds private keys and known_hosts: losing it is not a
+// rebuild, it is re-enrolling every host and every forge that trusts the key.
+// ~/.claude holds this machine's agent configuration, hooks and the session
+// transcripts under projects/, and this hook is loaded FROM that configuration.
+// Until now `rm -rf ~/.ssh` was refused only by accident -- an unresolved
+// variable folded to '/' and every spelling was refused for the wrong reason,
+// while the literal `rm -rf ~/.ssh` was allowed all along.
+// Why NOT ~/Library. Clearing a cache under it (~/Library/Caches/<tool>) is
+// routine, and the guard protects a directory rather than its contents, so
+// adding it would buy nothing for the ordinary command and would refuse
+// `rm -rf ~/Library/*`-shaped cleanups. An over-refusal on a gate with no
+// override is a live cost, and this one has no matching benefit.
+// 受保護目錄中位於使用者家目錄底下的那幾項，以「相對家目錄」的形式列出：家目錄是每台機器、
+// 每次呼叫才知道的值，SYSTEM_DIRS 裡沒有可以寫死的絕對拼寫。這份清單會接到受保護路徑判定
+// 本來就收到的那個 home 上，重用既有機制而不是另開一套。與 better-rm 的 PROTECTED_DIRS
+// 保持一致（那邊寫作 "$HOME/.ssh"、"$HOME/.claude"），test-hooks.js 的漂移守衛會比對。
+// 它們拿到的保護與 /etc 完全相同、不多不少：擋的是目錄本身，裡面的東西照舊是日常工作。
+// 唯一不那麼直觀的是萬用字元：父目錄受保護的樣式選中的是該目錄的全部內容，所以
+// `rm -rf ~/.ssh/*` 會被擋，理由與 `rm -rf /etc/*` 相同。
+// 為什麼是這兩個：~/.ssh 是私鑰與 known_hosts，丟了不是重建而是把每一台主機、每一個平台重新
+// 授權一次；~/.claude 是這台機器的 agent 設定、hooks 與 projects/ 底下的對話記錄，而這支
+// hook 本身就是從那份設定載入的。在此之前 `rm -rf ~/.ssh` 只是「碰巧」被擋——解不開的變數被
+// 折成 '/' 而以錯誤的理由拒絕——字面的 `rm -rf ~/.ssh` 一直都是放行的。
+// 為什麼不加 ~/Library：清 ~/Library/Caches/<tool> 是例行工作，而這道守衛保護的是目錄本身
+// 不是內容，加了對常見命令毫無幫助，卻會擋掉 `rm -rf ~/Library/*` 這類清理。在一道沒有豁免
+// 管道的閘門上，誤擋是實實在在的成本，而這一項沒有對等的收益。
+const HOME_DIRS = ['.claude', '.ssh'];
+
+// Every location judged by exact spelling, for one call: the absolute list, the
+// home directory, the home-relative list joined onto it, and whatever the user
+// declared through BETTER_RM_PROTECTED_DIRS. In one function because the exact
+// check and the symlink-identity check must ask about the SAME entries -- they
+// each built this list by hand before, and an entry added to one of them and not
+// the other is protected by spelling but not by identity.
+// 一次呼叫裡所有「以完全比對判定」的位置：絕對清單、家目錄、接到家目錄上的相對清單，加上使用
+// 者透過 BETTER_RM_PROTECTED_DIRS 宣告的項目。寫成一個函式，是因為完全比對與 symlink 身分
+// 比對必須問同一批項目——先前兩處各自手動組出這份清單，只加其中一處就會變成「拼寫受保護、身分
+// 不受保護」。
+function protectedEntries(home, extraDirs) {
+  return [...SYSTEM_DIRS, home, ...HOME_DIRS.map((leaf) => path.join(home, leaf)), ...extraDirs];
+}
+
 // The directories whose first level is a mount root rather than an ordinary
 // directory, as better-rm's own is_protected loops over them.
 // 第一層是掛載根而非普通目錄的父目錄，與 better-rm 的 is_protected 迴圈一致。
@@ -994,7 +1051,7 @@ function protectedSpelling(spelling, home, extraDirs, cwd) {
     normalized = normalized.slice(FIRMLINK_PREFIX.length) || '/';
   }
 
-  const exactDirs = [...SYSTEM_DIRS, home, ...extraDirs].map((item) => path.resolve(item));
+  const exactDirs = protectedEntries(home, extraDirs).map((item) => path.resolve(item));
 
   if (exactDirs.includes(normalized)) return normalized;
 
@@ -1188,7 +1245,7 @@ function declaredLink(value, cwd, home, extraDirs) {
   // 會被拒絕，而刪掉那個名字根本不會動到那個檔案。這一對由 test-hooks.js 的 hard link
   // 那一列釘住。
   if (!argument.isSymbolicLink()) return null;
-  for (const entry of [...SYSTEM_DIRS, home, ...extraDirs]) {
+  for (const entry of protectedEntries(home, extraDirs)) {
     const spelling = path.resolve(entry);
     try {
       const declared = fs.lstatSync(spelling, { bigint: true });
@@ -2019,12 +2076,33 @@ function evaluate(payload, env = process.env) {
   const deadline = Date.now() + JUDGING_BUDGET_MS;
   let judged = 0;
   for (; judged < targets.length; judged += 1) {
-    // The clock is read once every 64 targets: often enough to stop inside the
-    // budget (64 of the most expensive target measured is about 5 ms), rarely
-    // enough that reading it is not itself a cost worth measuring.
-    // 每 64 個目標讀一次時鐘：夠密，能停在預算之內（最貴的目標 64 個約 5 ms）；也夠疏，讀
-    // 時鐘本身不構成成本。
-    if ((judged & 63) === 0 && Date.now() > deadline) break;
+    // The clock is read on EVERY target, so the budget can be overrun by at most
+    // one target rather than by 64 of them.
+    // It was read once every 64 before, on the measurement that 64 of the most
+    // expensive target cost about 5 ms. That figure holds only while a target's
+    // cost is bounded by an ordinary local filesystem, and the gate does not get
+    // to choose the filesystem. Measured here with HOME on this Mac's autofs
+    // /home -- one lstat under it costs 9.7 ms against 0.001 ms under /Users,
+    // because every lookup goes through automountd -- one symlink target costs
+    // 28.8 ms, so a 64-target block is 1,843 ms and the 2,000 ms budget was
+    // overrun to 3,687 ms: 120,000 symlink operands answered in 3,921 ms against
+    // a live 5,000 ms timeout, and a PreToolUse hook that times out makes no
+    // decision and does not block the command. Reading the clock every target
+    // brought the same command to 2,435 ms.
+    // The cost of reading it that often is measured, not assumed: 20,000 cheap
+    // targets took 286 ms with the 64-target mask and 281 ms without it -- one
+    // Date.now() per target is inside the noise, because even the cheapest target
+    // is three orders of magnitude more expensive than reading a clock.
+    // 每一個目標都讀時鐘，於是預算最多只會被超出「一個目標」而不是 64 個。
+    // 先前每 64 個讀一次，依據是「最貴的目標 64 個約 5 ms」——那個數字只在「單一目標的成本被
+    // 一顆普通本機磁碟框住」時成立，而這道閘門無權選擇檔案系統。實測：HOME 落在這台 Mac 的
+    // autofs /home 時，底下一次 lstat 要 9.7 ms（/Users 底下是 0.001 ms，差別在每次查找都要
+    // 經過 automountd），一個 symlink 目標就要 28.8 ms，64 個是 1,843 ms，2,000 ms 的預算被
+    // 撐到 3,687 ms：120,000 個 symlink 操作元耗時 3,921 ms，而 live 逾時是 5,000 ms，逾時的
+    // PreToolUse hook 不做任何裁決、也不會擋下命令。改成每個目標都讀，同一條命令降到 2,435 ms。
+    // 讀這麼頻繁的成本是實測的、不是假設的：20,000 個便宜目標，有 64 的遮罩是 286 ms，沒有是
+    // 281 ms——一個目標讀一次時鐘落在雜訊裡，因為連最便宜的目標都比讀一次時鐘貴三個數量級。
+    if (Date.now() > deadline) break;
     const target = targets[judged];
     if (target.startsWith(UNRESOLVED_TARGET)) continue;
     const reason = protectedReason(target, cwd, home, extraDirs);
@@ -2071,4 +2149,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { MOUNT_PARENTS, SYSTEM_DIRS, commandTargets, evaluate, globCanMatchGit, hasGlob, normalizedTarget, protectedReason, shellWords };
+module.exports = { HOME_DIRS, MOUNT_PARENTS, SYSTEM_DIRS, commandTargets, evaluate, globCanMatchGit, hasGlob, normalizedTarget, protectedReason, shellWords };

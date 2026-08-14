@@ -67,6 +67,30 @@ PROTECTED_DIRS=(
     "/var"
     "$HOME"
     "$HOME/"
+    # 家目錄底下這兩個目錄本身受保護，裡面的東西不受影響（與 /etc 完全同一套語意）：
+    # `rm -rf ~/.ssh` 擋、`rm -f ~/.ssh/known_hosts.old` 放行。唯一不那麼直觀的是萬用
+    # 字元：父目錄受保護的樣式選中的是整個目錄的內容，所以 `rm -rf ~/.ssh/*` 與
+    # `rm -rf /etc/*` 一樣被擋。
+    # ~/.ssh 是私鑰與 known_hosts，丟了不是重建，而是把每一台主機重新授權一次；
+    # ~/.claude 是這台機器的 agent 設定、hooks 與 projects/ 底下的對話記錄，而 agent
+    # 路徑上那道 hook 就是從那份設定載入的。
+    # ~/Library 刻意不加：清 ~/Library/Caches/<tool> 是例行工作，而這裡保護的是目錄本身
+    # 不是內容，加了對常見命令沒有幫助，卻會擋掉 `rm -rf ~/Library/*` 這類清理——在沒有
+    # 豁免管道的守衛上，誤擋是實實在在的成本。
+    # These two get exactly what /etc gets: the directory ITSELF is refused and what is
+    # inside it stays ordinary work -- `rm -rf ~/.ssh` is refused, `rm -f
+    # ~/.ssh/known_hosts.old` is not. ~/.ssh holds the private keys and known_hosts;
+    # losing it is not a rebuild but a re-enrolment of every host that trusts the key.
+    # ~/.claude holds this machine's agent configuration, its hooks and the session
+    # transcripts under projects/ -- and the agent-path hook is loaded from it.
+    # ~/Library is deliberately ABSENT: clearing ~/Library/Caches/<tool> is routine, this
+    # list protects a directory rather than its contents, so adding it would buy nothing
+    # for the ordinary command while refusing `rm -rf ~/Library/*`-shaped cleanups.
+    # 與 hooks/protect-important-paths.js 的 HOME_DIRS 保持一致（漂移守衛會比對兩份清單）。
+    # Kept in step with HOME_DIRS in hooks/protect-important-paths.js; the drift guard in
+    # test-hooks.js compares the two lists and goes red if either gains or loses an entry.
+    "$HOME/.claude"
+    "$HOME/.ssh"
 )
 
 # 受保護的目錄模式清單 (使用萬用字元)

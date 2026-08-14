@@ -5,7 +5,7 @@
 'use strict';
 
 const assert = require('assert');
-const { MOUNT_PARENTS, SYSTEM_DIRS, commandTargets, evaluate } = require('./hooks/protect-important-paths');
+const { HOME_DIRS, MOUNT_PARENTS, SYSTEM_DIRS, commandTargets, evaluate } = require('./hooks/protect-important-paths');
 
 // TMPDIR is here because the hook resolves it: it is one of the three variables
 // on the allowlist, and without a value in this env the `$TMPDIR` rows below
@@ -736,12 +736,33 @@ for (const entry of cliProtectedDirs) {
 // $HOME reaches the hook as protectedReason's `home` argument rather than through
 // SYSTEM_DIRS, so it is added on the hook side of the comparison; trailing slashes
 // are a spelling, not an entry, and better-rm strips them before comparing too.
+// The home-relative entries reach it the same way -- HOME_DIRS holds leaf names
+// and the hook joins them onto that same `home` -- so they are joined here too
+// rather than compared as bare names. Reading that third list back from the
+// module is what keeps this comparison whole: an entry added to better-rm's
+// PROTECTED_DIRS as "$HOME/x" and forgotten in HOME_DIRS, or the reverse, is a
+// path protected on one guard and not on the other, which is the exact drift
+// this assertion exists to catch.
 // $HOME 在 hook 是走 protectedReason 的 home 參數而非 SYSTEM_DIRS；結尾斜線只是寫法。
+// 家目錄相對的那幾項走同一條路（HOME_DIRS 存的是葉名，由 hook 接到同一個 home 上），所以
+// 這裡也接起來再比，而不是拿裸名字去比。把第三份清單一起讀回來，這個比對才是完整的：在
+// better-rm 加了 "$HOME/x" 卻忘了 HOME_DIRS（或反過來），就是一邊保護、一邊不保護。
 const stripTrailingSlash = (item) => item.replace(/(.)\/+$/, '$1');
 const cliProtectedSet = [...new Set(
   cliProtectedDirs.map((item) => stripTrailingSlash(item.replace(/^\$HOME/, env.HOME))),
 )].sort();
-const hookProtectedSet = [...new Set([...SYSTEM_DIRS, env.HOME].map(stripTrailingSlash))].sort();
+assert.ok(
+  Array.isArray(HOME_DIRS) && HOME_DIRS.length > 0,
+  'the hook exported no HOME_DIRS; this comparison would silently drop a whole list',
+);
+for (const leaf of HOME_DIRS) {
+  assert.doesNotMatch(leaf, /\//, `HOME_DIRS holds leaf names joined onto HOME, not paths: ${leaf}`);
+}
+const hookProtectedSet = [...new Set([
+  ...SYSTEM_DIRS,
+  env.HOME,
+  ...HOME_DIRS.map((leaf) => `${env.HOME}/${leaf}`),
+].map(stripTrailingSlash))].sort();
 assert.deepStrictEqual(
   hookProtectedSet,
   cliProtectedSet,
@@ -806,6 +827,98 @@ for (const mountParent of cliMountParents) {
 // The home directory itself, in the spellings a shell can hand over.
 // 家目錄本身的各種寫法。
 blocked.push('rm -rf ~', 'rm -rf $HOME', 'rm -rf /home/tester/');
+
+// The home-relative entries, in every spelling that now REACHES the check.
+// The loop above generates the plain absolute form for each of them out of the
+// extracted list; these are the spellings that only arrive here because the gate
+// resolves $HOME, $PWD and $TMPDIR. Before that resolution landed, `rm -rf
+// "$HOME/.ssh"` was refused for the wrong reason -- the unresolved variable
+// folded to '/' and the refusal named a '/' nobody wrote -- and the literal
+// `rm -rf ~/.ssh` was ALLOWED all along. Resolution did not open that hole; it
+// removed the accident that was covering it, and these rows are what closes it.
+// Each spelling is a separate code path and they cannot stand in for each other:
+// '~' is expanded by expandHome(), '$HOME' and '${HOME}' by
+// resolveKnownExpansions(), and the absolute form by neither.
+// 家目錄底下那幾項的所有拼寫——「現在才會走到這道檢查」的那些。上面的迴圈已經從抽出的清單
+// 生成了各自的絕對形式；這裡列的是因為閘門開始解析 $HOME/$PWD/$TMPDIR 才會抵達的寫法。
+// 在解析之前，`rm -rf "$HOME/.ssh"` 是以錯誤的理由被擋（變數解不開被折成 '/'，拒絕訊息報出
+// 一個沒人寫過的 '/'），而字面的 `rm -rf ~/.ssh` 一直都是放行的。解析沒有開洞，它只是把蓋在
+// 洞上的那個意外拿掉了。每一種拼寫走的是不同的程式路徑，彼此不能互相代表。
+for (const leaf of HOME_DIRS) {
+  blocked.push(
+    `rm -rf ~/${leaf}`,
+    `rm -rf "$HOME/${leaf}"`,
+    `rm -rf $HOME/${leaf}`,
+    `rm -rf "\${HOME}/${leaf}"`,
+    `rm -rf /home/tester/${leaf}`,
+    `rm -rf ~/${leaf}/`,
+    // The wrappers and carriers this file already models. A guard that reads only
+    // the first word protects none of them.
+    // 本檔既有的包裝與載體形狀：只看第一個字的守衛，一個都擋不住。
+    `sudo rm -rf ~/${leaf}`,
+    `find "$HOME/${leaf}" -delete`,
+    `find ~/${leaf} -delete`,
+    `echo ~/${leaf} | xargs rm -rf`,
+    `bash -c 'rm -rf ~/${leaf}'`,
+    // An UNQUOTED heredoc delimiter leaves the body expandable, and a command
+    // substitution in it really runs.
+    // 未加引號的 heredoc 結束標記讓內文照常展開，裡面的命令替換是真的會執行。
+    `cat <<EOT\n$(rm -rf ~/${leaf})\nEOT`,
+    // A pattern whose PARENT is a protected directory selects that directory's
+    // entire contents -- the same rule that refuses `rm -rf /etc/*`.
+    // 父目錄受保護的樣式選中的是整個目錄的內容，與 `rm -rf /etc/*` 同一條規則。
+    `rm -rf ~/${leaf}/*`,
+  );
+  // What is protected is the directory, never what is inside it. These are the
+  // rows that would go red if this policy were ever implemented as a prefix
+  // match, and they are the reason it is not: ~/.ssh/known_hosts.old is an
+  // ordinary file, and ~/.claude/projects is a multi-GB session lake that gets
+  // pruned. A pattern under an UNprotected parent stays ordinary too.
+  // 受保護的是目錄本身，不是裡面的東西。這幾列就是「改成前綴比對」時會轉紅的那些：
+  // ~/.ssh/known_hosts.old 是普通檔案，~/.claude/projects 是會被定期清理的對話記錄。
+  // 父目錄沒受保護的樣式同樣照舊放行。
+  allowed.push(
+    `rm -f ~/${leaf}/inside-item`,
+    `rm -rf "$HOME/${leaf}/inside-item"`,
+    `rm -rf ~/${leaf}/inside-item/deeper`,
+    `rm -rf ~/${leaf}/inside-item/*`,
+    // A component boundary, not a prefix: a sibling merely NAMED like the entry
+    // is a different directory.
+    // 比對的是完整元件而不是前綴：名字只是以它開頭的鄰居是另一個目錄。
+    `rm -rf ~/${leaf}-backup`,
+    `rm -rf ~/${leaf}x`,
+  );
+}
+// The same two paths again, spelled out. Every row above is GENERATED -- from
+// HOME_DIRS here and from better-rm's PROTECTED_DIRS in the loop further up --
+// so an edit that removes an entry from both lists removes the rows that would
+// have caught it and leaves this file green. These two rows cannot shrink with
+// either list, which is the same reason test-better-rm.sh spells its coverage
+// list out instead of reading it back. A transcription is the wrong tool for
+// checking that two lists agree (the drift guard above does that from two
+// independent sources) and the right one for checking that a specific path is
+// still refused.
+// 同樣那兩條路徑，這次逐字寫出來。上面每一列都是「生成」的——這裡讀 HOME_DIRS、上面那圈讀
+// better-rm 的 PROTECTED_DIRS——所以「兩份清單同時刪掉某一項」的編輯，會連帶把本來會抓到它
+// 的那些列一起刪掉，整個檔案照樣是綠的。這兩列不會隨任一份清單縮小，理由與 test-better-rm.sh
+// 把覆蓋清單寫死相同：抄寫不適合用來檢查兩份清單是否一致（那由上面的漂移守衛用兩個獨立來源
+// 負責），適合用來檢查「這一條路徑今天還擋不擋」。
+blocked.push('rm -rf ~/.ssh', 'rm -rf ~/.claude', 'rm -rf "$HOME/.ssh"', 'rm -rf "$HOME/.claude"');
+
+// ~/Library is deliberately NOT protected, and this is where that decision is
+// pinned. Clearing a cache under it is routine work on this machine; adding it to
+// the list would refuse these while buying nothing, because the list protects a
+// directory rather than its contents. If someone adds it later, these rows go red
+// and the decision gets made again on purpose rather than by accident.
+// ~/Library 刻意不受保護，這幾列就是把那個決定釘住的地方：清它底下的快取是這台機器上的例行
+// 工作，而清單保護的是目錄本身不是內容，加了擋掉這些卻換不到任何東西。日後有人加上去，這幾
+// 列會轉紅，於是那個決定必須被重新、刻意地做一次。
+allowed.push(
+  'rm -rf ~/Library',
+  'rm -rf "$HOME/Library"',
+  'rm -rf ~/Library/Caches/something',
+  'rm -rf "$HOME/Library/Caches/pip"',
+);
 
 // macOS firmlinks: /System/Volumes/Data/X and /X are the same object. Measured
 // with stat -f '%d:%i', /Users/<user> and /System/Volumes/Data/Users/<user> share
@@ -2079,6 +2192,31 @@ let deviceChecks = 0;
   shimDenies(declaredFile, {}, 'the declared file itself is refused');
   shimAllows(`${box}/hardlink-file`, {},
     'a second name for a declared ordinary file is not that entry: unlinking it leaves the file');
+
+  // The home-relative entries are on the same list this identity rule reads, not
+  // only on the exact-spelling one. A dotfile manager routinely makes ~/.ssh a
+  // symlink into a repository, and then the exact comparison is all that judges
+  // it -- resolvedTarget() stops at a symlink argument on purpose, because
+  // deleting a link cannot touch what it points at. So a SECOND spelling of that
+  // link (here reached through the `self` link, exactly as the control row above
+  // does for a declared entry) is refused by nothing but this rule asking about
+  // the same entries the exact check does. Build both lists separately and this
+  // path is protected by spelling and not by identity.
+  // 家目錄相對的那幾項也在這條身分規則讀的清單上，不是只在完全比對那一份。dotfile 管理
+  // 工具常把 ~/.ssh 做成指向 repo 的 symlink，這時判它的只剩完全比對——resolvedTarget
+  // 對「引數本身是連結」刻意停手（刪連結碰不到它指向的東西）。於是那條連結的第二種拼寫
+  // （這裡經由 self 連結抵達，與上面那列控制組同一手法）只剩這條規則擋得住。
+  fs.mkdirSync(`${box}/home`);
+  fs.symlinkSync(`${box}/actual`, `${box}/home/.ssh`);
+  fs.symlinkSync(`${box}/actual`, `${box}/home/notes`);
+  shimDenies(`${box}/self/home/.ssh`, {},
+    'a second spelling of a home-relative entry that is itself a symlink IS that entry');
+  // The control that keeps the row above from passing for the wrong reason: what
+  // makes it a refusal is list membership, not "a symlink under the home
+  // directory". An ordinary link beside it stays deletable.
+  // 上一列的對照：擋下它的是「在清單上」而不是「家目錄底下的連結」。旁邊的普通連結照舊可刪。
+  shimAllows(`${box}/self/home/notes`, {},
+    'an ordinary symlink under the home directory is not a declared entry');
 
   fs.rmSync(box, { recursive: true, force: true });
 }

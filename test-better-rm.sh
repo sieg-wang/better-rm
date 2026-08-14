@@ -3639,7 +3639,8 @@ for protected_path in / /Applications /Library /Network /System /System/Volumes 
                       /Users /Volumes \
                       /bin /boot /cores /dev /etc /home /lib /lib64 /mnt /opt \
                       /private /proc /root /sbin /sys /usr /var \
-                      "$protected_home" "$protected_home/"; do
+                      "$protected_home" "$protected_home/" \
+                      "$protected_home/.claude" "$protected_home/.ssh"; do
     is_protected_says_yes "$protected_path" "$protected_home"
     case $? in
         0) ;;
@@ -3658,8 +3659,21 @@ done
 # comparison is ever widened to a prefix match, which would be a worse regression
 # than the missing entries were.
 protected_false_positive=""
+# $HOME/.ssh/known_hosts.old 與 $HOME/.claude/projects/<session> 在這裡：受保護的是
+# 那兩個目錄本身，裡面的東西照舊是日常工作（前者是 ssh 自己會留下的備份檔，後者是使
+# 用者會定期清理的對話記錄）。$HOME/Library 也在這裡，而且是刻意的——它不在清單上，
+# 清它底下的快取是例行工作；哪天有人把它加進 PROTECTED_DIRS，這一列會轉紅。
+# $HOME/.ssh/known_hosts.old and $HOME/.claude/projects/<session> belong here: what is
+# protected is those two directories themselves, while what is inside them stays
+# ordinary work. $HOME/Library is here deliberately too -- it is NOT on the list,
+# clearing caches under it is routine, and the day someone adds it this row goes red.
 for unprotected_path in "$TEST_WORK_DIR/ordinary.txt" /mnt/c/project \
                         /usr/local/share/x "$protected_home/keep" \
+                        "$protected_home/.ssh/known_hosts.old" \
+                        "$protected_home/.claude/projects/session-dir" \
+                        "$protected_home/.claude-backup" \
+                        "$protected_home/Library" \
+                        "$protected_home/Library/Caches/pip" \
                         /Applications/BetterRmProbe.app /Library/Preferences \
                         /Network/Servers /System/Library \
                         /Users/better-rm-probe /cores/core.1 \

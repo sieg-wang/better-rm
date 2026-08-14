@@ -383,8 +383,49 @@ an `ENOSPC` mid-copy whose partial copy `mv` leaves in the trash, which is the
 tool's own pre-existing behaviour for an ordinary `rm` of a file too large for
 the trash volume (same on `main`, unchanged here).
 
+### The protected-path list has a home-relative third part
+
+`hooks/protect-important-paths.js` carries `SYSTEM_DIRS` (absolute) and
+`HOME_DIRS` (leaf names joined onto the same `home` the protected-path check
+already receives), and `better-rm` carries both in one `PROTECTED_DIRS` array
+where the home-relative entries are spelled `"$HOME/.ssh"` and `"$HOME/.claude"`.
+The drift guard in `test-hooks.js` compares all three lists as one set, so an
+entry added on one guard and forgotten on the other goes red.
+
+`~/.ssh` and `~/.claude` get **exactly** what `/etc` gets and nothing more:
+
+- The directory ITSELF is refused. What is inside it is ordinary work —
+  `rm -f ~/.ssh/known_hosts.old` and `rm -rf ~/.claude/projects/<session>` are
+  allowed, and the second one matters, because `~/.claude/projects` is a
+  multi-gigabyte session lake that gets pruned.
+- A pattern whose PARENT is a protected directory selects that directory's whole
+  contents, so `rm -rf ~/.ssh/*` and `rm -rf ~/.claude/*` are refused for the
+  same reason `rm -rf /etc/*` is. `rm -rf ~/.claude/projects/*` has an
+  unprotected parent and stays allowed.
+- Matching is on whole path components, not on a prefix: `~/.claude-backup` and
+  `~/.sshfoo` are untouched.
+- The spelling does not change the answer. `~/.ssh`, `"$HOME/.ssh"`,
+  `$HOME/.ssh`, `"${HOME}/.ssh"`, `/Users/<you>/.ssh` and `~/.ssh/` all reach the
+  same check, as do the wrapper and carrier forms (`sudo rm -rf`, `find … -delete`,
+  `… | xargs rm -rf`, `bash -c '…'`, an unquoted heredoc body).
+
+**`~/Library` is deliberately NOT on the list.** Clearing `~/Library/Caches/<tool>`
+is routine, and the list protects a directory rather than its contents, so adding
+it would buy nothing for the ordinary command while turning `rm -rf ~/Library/*`
+into a refusal. On a gate with no override, an over-refusal is a live cost. The
+decision is pinned by allow rows in the suite: adding `~/Library` turns them red.
+
 ### Disclosed, not fixed
 
+- **A `cd` into the protected directory defeats the check, for these entries and
+  for every other one.** The verdict is made from the command TEXT before it
+  runs, against the cwd of the tool call, so `cd ~ && rm -rf .ssh` is allowed —
+  the gate sees the relative operand `.ssh` resolved against the tool call's cwd.
+  This is not specific to the home-relative entries and is not new: `cd / && rm
+  -rf etc` has the same shape, and the workaround the unresolved-variable refusal
+  RECOMMENDS (`cd <dir> && rm -rf <relative path>`) is that shape by construction.
+  Closing it needs the gate to model `cd`, which is the thing it deliberately
+  does not do for `$PWD` either.
 - **The `-exec` branch shares the wrapper list with command position, not the
   decision.** Both call `resolveExecutable`, so `-exec sudo rm`, `-exec nice rm`
   and `-exec env SAFE=1 command rm` are all read as rm. Command position has
@@ -437,8 +478,18 @@ the trash volume (same on `main`, unchanged here).
   because it is a different mechanism with its own rows.
 - **The gate stops judging after 2,000 ms and refuses what it did not read.**
   Per-target cost is bounded but the NUMBER of targets is the caller's, and a
-  symlink target costs twenty-six `lstat` calls because that is when
-  `declaredLink()` compares it against every declared entry. Measured against a
+  symlink target costs one `lstat` per declared entry — twenty-eight now that
+  `~/.ssh` and `~/.claude` are on the list — because that is when
+  `declaredLink()` compares it against every declared entry. The clock is read on
+  every target rather than every 64th, so the budget can be overrun by one target
+  instead of by 64: per-target cost is NOT bounded by anything this gate chooses,
+  and measured with HOME on this Mac's autofs `/home` (one `lstat` under it costs
+  9.7 ms against 0.001 ms under `/Users`, because every lookup goes through
+  automountd) a symlink target costs 28.8 ms, so a 64-target block was 1,843 ms
+  and the 2,000 ms budget was overrun to 3,687 ms — 120,000 symlink operands
+  answered in 3,921 ms against a live 5,000 ms timeout. Reading the clock every
+  target brought that to 2,435 ms and costs nothing measurable: 20,000 cheap
+  targets took 286 ms with the 64-target mask and 281 ms without it. Measured against a
   `/etc` that really is removed: `rm -rf <60,000 relative symlink operands> /etc`
   took 6,215 ms at `d3aed08` in 300 KB of command text, and a 30 MB spelling of
   the same shape never answered at all — past the live 5,000 ms hook timeout,
