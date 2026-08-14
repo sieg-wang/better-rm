@@ -1101,25 +1101,28 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
       }
     }
   }
-  let i = 0;
-
-  while (i < words.length) {
-    while (i < words.length && separators.has(words[i])) i += 1;
-    if (i >= words.length) break;
-    if (controlWords.has(words[i])) {
-      i += 1;
-      continue;
-    }
+  // Wrapper commands can be chained arbitrarily (for example
+  // `sudo env SAFE=1 command bash -c ...`). Unwrap each layer until the
+  // actual executable is reached; every branch advances i, so malformed
+  // wrapper-only input remains bounded.
+  // The command `find` runs through -exec wears exactly these wrappers and
+  // deletes exactly the same, so it asks this same function rather than re-
+  // reading the word after -exec: `find /etc -exec sudo rm -rf {} \;` deletes
+  // /etc just as `find /etc -exec rm -rf {} \;` does, and matching only the
+  // bare word saw `sudo`, called that find a reader, and allowed it (measured,
+  // together with `-exec nice rm` and `-exec env SAFE=1 command rm`). A second
+  // copy of this list is the thing that would drift, so there is one.
+  // find 用 -exec 跑的命令戴的就是這一族外殼，刪的東西一模一樣，所以它問同一個函式，而不是
+  // 自己再讀一次 -exec 後面那個字：只比對裸字會看到 sudo，就把這個 find 當成讀取工具放行
+  // （實測 `-exec nice rm`、`-exec env SAFE=1 command rm` 也一樣放行）。抄第二份清單就是
+  // 日後會走鐘的那一份，所以只留一份。
+  function resolveExecutable(start) {
+    let i = start;
     let executable = '';
     let executableIndex = -1;
     // Set when a wrapper hands the command its operands on stdin (xargs), where
     // the paths are unknowable before the command runs.
     let stdinCompletesOperands = false;
-
-    // Wrapper commands can be chained arbitrarily (for example
-    // `sudo env SAFE=1 command bash -c ...`). Unwrap each layer until the
-    // actual executable is reached; every branch advances i, so malformed
-    // wrapper-only input remains bounded.
     while (i < words.length && !separators.has(words[i])) {
       while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i += 1;
       if (i >= words.length || separators.has(words[i])) break;
@@ -1323,6 +1326,22 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
 
       break;
     }
+    return { executable, executableIndex, index: i, stdinCompletesOperands };
+  }
+
+  let i = 0;
+
+  while (i < words.length) {
+    while (i < words.length && separators.has(words[i])) i += 1;
+    if (i >= words.length) break;
+    if (controlWords.has(words[i])) {
+      i += 1;
+      continue;
+    }
+    const {
+      executable, executableIndex, index, stdinCompletesOperands,
+    } = resolveExecutable(i);
+    i = index;
 
     // Only advance past a real executable. When the unwrap loop above consumed
     // wrapper layers and stopped AT a separator (executable === ''), advancing
@@ -1451,15 +1470,29 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false) {
       const execOperands = [];
       for (; i < words.length && !terminators.has(words[i]); i += 1) {
         if (words[i] === '-delete') deletes = true;
-        if (['-exec', '-execdir', '-ok', '-okdir'].includes(words[i])
-          && ['rm', 'rmdir'].includes(path.basename(words[i + 1] || ''))) {
+        // The word after -exec is the command find runs, and it can wear the
+        // same wrapper layers any other command can. Comparing that one word
+        // against rm/rmdir saw `sudo`, `nice`, `env` -- none of them rm -- and
+        // called the find a reader: measured, `find /etc -exec sudo rm -rf {} \;`
+        // was allowed and deletes /etc. resolveExecutable is the same unwrapper
+        // command position uses, so the two can no longer disagree.
+        // -exec 後面那個字是 find 要跑的命令，而它可以戴上任何命令都能戴的外殼。拿那一個字
+        // 去比對 rm/rmdir，看到的是 sudo、nice、env，沒有一個是 rm，於是把這個 find 判成
+        // 讀取工具：實測 `find /etc -exec sudo rm -rf {} \;` 被放行，而它會刪掉 /etc。
+        const execCommand = ['-exec', '-execdir', '-ok', '-okdir'].includes(words[i])
+          ? resolveExecutable(i + 1)
+          : null;
+        if (execCommand && ['rm', 'rmdir'].includes(execCommand.executable)) {
           deletes = true;
           // The exec command has operands of its own, and they are not the search
           // roots: `find . -exec rm -rf /etc \;` runs rm on /etc once per file
           // found (measured). Judging only the roots read the wrong argument.
           // exec 那個命令自己也有操作元，而它們不是搜尋起點：`find . -exec rm -rf /etc \;`
           // 每找到一個檔案就對 /etc 跑一次 rm（實測）。只判 roots 是讀錯了引數。
-          for (let j = i + 2; j < words.length && !terminators.has(words[j]) && words[j] !== '+'; j += 1) {
+          // The operand scan starts after the UNWRAPPED command word, so a
+          // wrapper's own arguments (`sudo -u root`) are not read as rm targets.
+          // 掃描從拆完外殼的那個命令字之後開始，外殼自己的引數不會被當成 rm 的目標。
+          for (let j = execCommand.index + 1; j < words.length && !terminators.has(words[j]) && words[j] !== '+'; j += 1) {
             if (words[j] === '{}' || words[j].startsWith('-')) continue;
             execOperands.push(
               hasUnresolvedTargetExpansion(dynamicExpansions[j]) ? '/' : words[j],

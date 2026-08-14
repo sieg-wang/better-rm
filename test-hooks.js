@@ -244,6 +244,27 @@ const blocked = [
   'find . -exec rm -rf /etc \\;',
   'find . -execdir rm -rf /usr +',
   'find . -ok rm -rf /etc \\;',
+  // The command find runs through -exec wears the same wrappers any other
+  // command does, and deletes the same. Comparing only the word right after
+  // -exec saw sudo/nice/env, called the find a reader, and allowed all of these
+  // -- the top-level rows above prove the very same wrappers are refused when
+  // the rm is written directly, so this was one unwrapper existing twice.
+  // -exec 跑的命令戴的外殼與其他命令一樣，刪的東西也一樣。只比對 -exec 後面第一個字，看到
+  // 的是 sudo/nice/env，於是把 find 當讀取工具放行；同樣的外殼直接寫在 rm 前面時上面早就
+  // 拒絕了，差別只在於拆外殼的程式碼被寫了兩份。
+  'find /etc -exec sudo rm -rf {} \\;',
+  'find . -exec env SAFE=1 command rm -rf /etc \\;',
+  'find /usr -exec nice rm -rf {} \\;',
+  'find /etc -execdir sudo rm -rf {} +',
+  'find /etc -ok sudo rmdir {} \\;',
+  'find /etc -okdir env rm -rf {} \\;',
+  'find . -exec timeout 5 rm -rf /boot \\;',
+  'find . -exec nohup rm -rf /var \\;',
+  // A wrapper's own option operand is not an rm target, but the wrapper still
+  // has to be walked past before the real command is read.
+  // 外殼自己的選項操作元不是 rm 的目標，但還是得先走過外殼才讀得到真正的命令。
+  'find . -exec sudo -u root rm -rf /etc \\;',
+  'find . -exec /bin/sudo /bin/rm -rf /etc \\;',
   // A heredoc body executed by a shell that is NOT the heredoc's own command.
   // All measured to run the rm, all refused before this round, all allowed after
   // it until the command-position check landed.
@@ -394,6 +415,23 @@ const allowed = [
   'find . -name "*.pyc" -delete',
   'find build -delete',
   'find . -exec rm -rf {} +',
+  // Unwrapping the -exec command must not turn a reader into a deleter: a
+  // wrapper in front of a NON-rm command is still a reader, and a wrapper in
+  // front of an rm whose operands are ordinary is still ordinary work.
+  // Over-refusal here costs more than it saves -- these are everyday commands.
+  // 拆外殼不能把讀取工具變成刪除工具：外殼後面不是 rm 就還是在讀，外殼後面是 rm 但操作元
+  // 普通就還是普通的工作。這裡誤擋的代價比擋到的還高——這些都是日常命令。
+  'find . -exec sudo ls {} \\;',
+  'find . -exec nice grep -l TODO {} +',
+  'find . -exec sudo -u root ls {} \\;',
+  'find . -exec env FOO=1 command grep -l x {} +',
+  'find . -exec timeout 5 ls {} \\;',
+  'find . -exec sudo rm -rf {} +',
+  'find build -exec env FOO=1 rm -f {} \\;',
+  // A wrapper with nothing after it must not read as an unknowable command.
+  // 外殼後面什麼都沒有，不能被讀成「不可知的命令」。
+  'find . -exec sudo \\;',
+  'find . -exec env {} \\;',
   // xargs that does not reach rm is ordinary.
   'echo hi | xargs -n1 echo',
   'find . -name "*.o" | xargs grep -l main',
