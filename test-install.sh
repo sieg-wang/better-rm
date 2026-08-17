@@ -89,13 +89,18 @@ case "$1" in
             branch.main.remote)
                 case "${BETTER_RM_TEST_GIT_SCENARIO:-trusted}" in
                     missing-upstream) exit 1 ;;
+                    empty-remote) printf '\n' ;;
                     remote-dot) printf '.\n' ;;
                     *) printf 'origin\n' ;;
                 esac
                 ;;
             branch.main.merge)
                 [ "${BETTER_RM_TEST_GIT_SCENARIO:-trusted}" != "missing-upstream" ] || exit 1
-                printf 'refs/heads/main\n'
+                if [ "${BETTER_RM_TEST_GIT_SCENARIO:-trusted}" = "empty-merge" ]; then
+                    printf '\n'
+                else
+                    printf 'refs/heads/main\n'
+                fi
                 ;;
             # These are unreachable in production. They make the detached-HEAD
             # fixture continue all the way to pull if that specific refusal is
@@ -143,15 +148,35 @@ make_existing_install() {
 
 printf 'install.sh tests\n'
 
-# Match the owner/repository path independently of the serving host. In
-# particular, raw.githubusercontent.com URLs do not contain "github.com/" and
-# were the headline installation route missed by the old guard.
-if grep -n 'doggy8088/better-rm' \
+OLD_OPERATOR_SOURCE_RE='(github\.com(:[0-9]+)?[/:]|githubusercontent\.com(:[0-9]+)?/)doggy8088/better-rm'
+# Match actual GitHub source URLs independently of HTTPS/SSH/raw host spelling,
+# while allowing ordinary prose to acknowledge the original upstream.
+if grep -En "$OLD_OPERATOR_SOURCE_RE" \
     "$SCRIPT_DIR/README.md" "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR/install-hooks.sh" \
     >/dev/null; then
     fail "operator-facing install sources do not reference the old upstream"
 else
     pass "operator-facing install sources do not reference the old upstream"
+fi
+printf 'Based on work by doggy8088/better-rm.\n' > "$TMP_ROOT/upstream-credit.txt"
+if grep -Eq "$OLD_OPERATOR_SOURCE_RE" "$TMP_ROOT/upstream-credit.txt"; then
+    fail "plain-text upstream credit is not misclassified as an install source"
+else
+    pass "plain-text upstream credit is not misclassified as an install source"
+fi
+printf 'curl https://raw.githubusercontent.com/doggy8088/better-rm/main/install.sh\n' \
+    > "$TMP_ROOT/old-install-source.txt"
+if grep -Eq "$OLD_OPERATOR_SOURCE_RE" "$TMP_ROOT/old-install-source.txt"; then
+    pass "the narrowed gate still recognizes an old operator-facing source"
+else
+    fail "the narrowed gate still recognizes an old operator-facing source"
+fi
+printf 'curl https://raw.githubusercontent.com:443/doggy8088/better-rm/main/install.sh\n' \
+    > "$TMP_ROOT/old-install-source-with-port.txt"
+if grep -Eq "$OLD_OPERATOR_SOURCE_RE" "$TMP_ROOT/old-install-source-with-port.txt"; then
+    pass "the narrowed gate recognizes an old source with an explicit port"
+else
+    fail "the narrowed gate recognizes an old source with an explicit port"
 fi
 if grep -Fq \
     'https://raw.githubusercontent.com/sieg-wang/better-rm/main/install-hooks.sh' \
@@ -197,7 +222,8 @@ fi
 assert_no_log_prefix "an untrusted checkout is never pulled" \
     "pull " "$UNTRUSTED_LOG"
 
-for scenario in detached missing-upstream get-url-fails remote-dot; do
+for scenario in \
+    detached missing-upstream empty-remote empty-merge get-url-fails remote-dot; do
     BRANCH_HOME="$TMP_ROOT/$scenario-home"
     BRANCH_LOG="$TMP_ROOT/$scenario.log"
     BRANCH_OUTPUT="$TMP_ROOT/$scenario.output"
