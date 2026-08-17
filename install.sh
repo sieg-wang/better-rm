@@ -3,9 +3,9 @@
 # better-rm 安裝腳本 / Installation script for better-rm
 # 
 # 用法 (Usage):
-#   curl -sSL https://raw.githubusercontent.com/doggy8088/better-rm/main/install.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash
 #   或 (or):
-#   wget -qO- https://raw.githubusercontent.com/doggy8088/better-rm/main/install.sh | bash
+#   wget -qO- https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash
 #
 
 set -e  # 遇到錯誤時立即退出 / Exit on error
@@ -19,7 +19,9 @@ NC='\033[0m' # No Color
 
 # 安裝目錄 (Installation directory)
 INSTALL_DIR="$HOME/.better-rm"
-REPO_URL="https://github.com/doggy8088/better-rm.git"
+REPO_URL="https://github.com/sieg-wang/better-rm.git"
+TRUSTED_REPO_SSH_URL="git@github.com:sieg-wang/better-rm.git"
+TRUSTED_REPO_SSH_SCHEME_URL="ssh://git@github.com/sieg-wang/better-rm.git"
 
 # 輸出函式 (Output functions)
 info() {
@@ -41,6 +43,53 @@ warning() {
 # 檢查命令是否存在 (Check if command exists)
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+# 只從 Sieg-owned repository 更新現有安裝。目錄名不是 provenance；
+# configured branch remote 才是下一次 pull 真正會信任的來源。
+# Update an existing installation only from the Sieg-owned repository. A
+# directory name is not provenance; the configured branch remote is the source
+# the next pull would actually trust.
+is_trusted_repo_url() {
+    case "$1" in
+        "$REPO_URL"|"$TRUSTED_REPO_SSH_URL"|"$TRUSTED_REPO_SSH_SCHEME_URL")
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+require_trusted_update_source() {
+    local branch
+    local remote
+    local merge_ref
+    local remote_url
+
+    if ! branch=$(git symbolic-ref --quiet --short HEAD); then
+        error "錯誤：現有安裝位於 detached HEAD，拒絕自動更新"
+        error "Error: existing installation is on a detached HEAD; refusing automatic update"
+        return 1
+    fi
+    if ! remote=$(git config --get "branch.${branch}.remote") ||
+       ! merge_ref=$(git config --get "branch.${branch}.merge") ||
+       [ -z "$remote" ] || [ "$remote" = "." ] || [ -z "$merge_ref" ]; then
+        error "錯誤：目前 branch 沒有可驗證的 remote upstream，拒絕自動更新"
+        error "Error: current branch has no verifiable remote upstream; refusing automatic update"
+        return 1
+    fi
+    if ! remote_url=$(git remote get-url "$remote"); then
+        error "錯誤：無法解析 upstream remote '$remote'，拒絕自動更新"
+        error "Error: cannot resolve upstream remote '$remote'; refusing automatic update"
+        return 1
+    fi
+    if ! is_trusted_repo_url "$remote_url"; then
+        error "錯誤：拒絕從未信任的 upstream 更新：$remote_url"
+        error "Error: refusing to update from untrusted upstream: $remote_url"
+        error "預期來源 / Expected source: $REPO_URL"
+        return 1
+    fi
 }
 
 # 偵測使用者的 shell
@@ -105,7 +154,10 @@ install() {
             error "Please manually remove the directory and try again: rm -rf $INSTALL_DIR"
             exit 1
         fi
-        if git pull --quiet; then
+        if ! require_trusted_update_source; then
+            exit 1
+        fi
+        if git pull --ff-only --quiet; then
             success "更新成功 / Updated successfully"
         else
             error "更新失敗 / Update failed"

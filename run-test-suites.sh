@@ -34,6 +34,7 @@ run_suite "runtime hooks" node "$SCRIPT_DIR/test-hooks.js"
 # 兩道守衛對同一份語料的判定差分。上面各套只驗各自的期望，唯有這套看得見「規則只
 # 存在於其中一邊」。
 run_suite "guard parity" node "$SCRIPT_DIR/test-guard-parity.js"
+run_suite "install/update provenance" "$SCRIPT_DIR/test-install.sh"
 run_suite "hook installer" "$SCRIPT_DIR/test-install-hooks.sh"
 
 if [ "$FAILED" -ne 0 ]; then

@@ -1005,8 +1005,9 @@ assert_file "missing shared hook installs local runtime" "$MISSING_HOME/.claude/
 # 這行是「stub 真的被走到」的證據：沒有它，上面三個斷言就算改回打真網路也照樣綠。
 # Proof the stub was actually exercised; without it the assertions above would
 # stay green even if the download went back to hitting the network.
-assert_contains "the release download went through the stubbed boundary" \
-    "$(cat "$RELEASE_DOWNLOAD_LOG")" "releases/latest/download/protect-important-paths.js"
+assert_contains "the remote hook download uses the Sieg-owned HTTPS source" \
+    "$(cat "$RELEASE_DOWNLOAD_LOG")" \
+    "https://raw.githubusercontent.com/sieg-wang/better-rm/main/hooks/protect-important-paths.js"
 
 # PreToolUse 的完整契約：只有 exit 2、或 exit 0 且印出 deny，才算「擋下」。
 # 其餘一律是放行 —— 包含 SyntaxError 這種非零結束，本專案自己的註解就說那是

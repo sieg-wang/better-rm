@@ -13,7 +13,7 @@
 #   ./install-hooks.sh -a opencode
 #   ./install-hooks.sh -a grok
 #   ./install-hooks.sh -a claude --global
-#   curl -sSL https://github.com/doggy8088/better-rm/releases/latest/download/install-hooks.sh | bash -s -- -a claude
+#   curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install-hooks.sh | bash -s -- -a claude
 #
 
 set -e  # 遇到錯誤時立即退出 / Exit on error
@@ -29,12 +29,12 @@ NC='\033[0m' # No Color
 # Supported coding agents list
 SUPPORTED_AGENTS=(claude codex cursor copilot antigravity qoder pi opencode grok)
 VERSION="1.5.0"
-RELEASE_BASE_URL="https://github.com/doggy8088/better-rm/releases/latest/download"
-RELEASE_HOOK_ASSET_NAME="protect-important-paths.js"
-# OpenCode 外掛沒有對應的 RELEASE_*_ASSET_NAME：它由 write_bundled_opencode_plugin
+REMOTE_HOOK_BASE_URL="https://raw.githubusercontent.com/sieg-wang/better-rm/main/hooks"
+REMOTE_HOOK_ASSET_NAME="protect-important-paths.js"
+# OpenCode 外掛沒有對應的 REMOTE_*_ASSET_NAME：它由 write_bundled_opencode_plugin
 # 隨安裝程式一起出貨，不從網路取得（原因見該函式）。Release 仍然發佈
 # opencode-protect-important-paths.ts 供其他消費者使用，但這支安裝程式不再讀它。
-# The OpenCode plugin has no RELEASE_*_ASSET_NAME: write_bundled_opencode_plugin
+# The OpenCode plugin has no REMOTE_*_ASSET_NAME: write_bundled_opencode_plugin
 # ships it with the installer instead of fetching it (see that function for why).
 # The release still publishes opencode-protect-important-paths.ts for other
 # consumers; this installer no longer reads it.
@@ -103,35 +103,35 @@ command_exists() {
 # into a whitespace-separated string and expanding it unquoted splits a temp path
 # containing whitespace (GNU mktemp -d honours TMPDIR) into several words, so
 # rm -rf lands on unrelated targets — a wrong-target rm, not merely a missed one.
-cleanup_release_dirs() {
+cleanup_download_dirs() {
     local directory
     for directory in ${CLEANUP_DIRS[@]+"${CLEANUP_DIRS[@]}"}; do
         rm -rf -- "$directory"
     done
 }
 
-download_release_file() {
+download_remote_file() {
     local asset_name="$1"
     local destination="$2"
-    local download_url="${RELEASE_BASE_URL}/${asset_name}"
+    local download_url="${REMOTE_HOOK_BASE_URL}/${asset_name}"
 
     mkdir -p -- "$(dirname -- "$destination")"
 
     if command_exists curl; then
         if ! curl -fsSL "$download_url" -o "$destination"; then
-            error "無法從 Release 下載：$download_url"
-            error "Failed to download from release: $download_url"
+            error "無法從受信任的遠端來源下載：$download_url"
+            error "Failed to download from trusted remote source: $download_url"
             exit 1
         fi
     elif command_exists wget; then
         if ! wget -qO "$destination" "$download_url"; then
-            error "無法從 Release 下載：$download_url"
-            error "Failed to download from release: $download_url"
+            error "無法從受信任的遠端來源下載：$download_url"
+            error "Failed to download from trusted remote source: $download_url"
             exit 1
         fi
     else
         error "找不到 curl 或 wget，無法下載最新檔案"
-        error "curl or wget is required to download latest release assets"
+        error "curl or wget is required to download the remote hook"
         exit 1
     fi
 }
@@ -221,7 +221,7 @@ parse_arguments() {
 resolve_source_paths() {
     # trap 必須在任何 mktemp 之前就位，否則後續任何一條中止路徑都會留下暫存目錄。
     # The trap has to be armed before any mktemp, or an abort leaks the temp dir.
-    trap cleanup_release_dirs EXIT
+    trap cleanup_download_dirs EXIT
 
     SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
     HOOK_SOURCE_PATH="$SCRIPT_DIR/hooks/protect-important-paths.js"
@@ -231,9 +231,9 @@ resolve_source_paths() {
         release_dir="$(mktemp -d)"
         CLEANUP_DIRS+=("$release_dir")
         HOOK_SOURCE_PATH="$release_dir/hooks/protect-important-paths.js"
-        info "本機未找到共用 hook，改用最新 Release"
-        info "Shared hook not found locally; downloading from latest release"
-        download_release_file "$RELEASE_HOOK_ASSET_NAME" "$HOOK_SOURCE_PATH"
+        info "本機未找到共用 hook，改從 Sieg-owned repository 下載"
+        info "Shared hook not found locally; downloading from the Sieg-owned repository"
+        download_remote_file "$REMOTE_HOOK_ASSET_NAME" "$HOOK_SOURCE_PATH"
 
         if [ ! -f "$HOOK_SOURCE_PATH" ] || [ ! -r "$HOOK_SOURCE_PATH" ]; then
             error "下載共用 hook 失敗：$HOOK_SOURCE_PATH"
@@ -465,15 +465,15 @@ require_verified_downloaded_hook() {
 
     if hook_denies_protected_deletion "$control_good" &&
        ! hook_denies_protected_deletion "$control_bad"; then
-        error "從 Release 下載的 hook 無法擋下受保護的刪除，已中止安裝：$RELEASE_BASE_URL"
-        error "The hook downloaded from the release does not block protected deletions; install aborted: $RELEASE_BASE_URL"
+        error "從遠端來源下載的 hook 無法擋下受保護的刪除，已中止安裝：$REMOTE_HOOK_BASE_URL"
+        error "The hook downloaded from the remote source does not block protected deletions; install aborted: $REMOTE_HOOK_BASE_URL"
         error "下載內容可能被中途攔截（captive portal、CDN 錯誤頁）或不完整；請檢查網路後重試"
         error "The download may have been intercepted (captive portal, CDN error page) or truncated; check the network and retry"
         exit 1
     fi
 
-    error "無法驗證從 Release 下載的 hook：自我檢測本身跑不起來（需要可執行的 node）"
-    error "Cannot verify the hook downloaded from the release: the self-check itself could not run (a working node is required)"
+    error "無法驗證從遠端來源下載的 hook：自我檢測本身跑不起來（需要可執行的 node）"
+    error "Cannot verify the hook downloaded from the remote source: the self-check itself could not run (a working node is required)"
     error "未經驗證的網路內容不會被裝成 SAFETY hook，安裝已中止"
     error "Unverified network content is not installed as the SAFETY hook; install aborted"
     exit 1
@@ -894,7 +894,7 @@ resolve_opencode_plugin() {
     fi
 
     if [ ! -f "$OPENCODE_RUNTIME_SOURCE_PATH" ] || [ ! -r "$OPENCODE_RUNTIME_SOURCE_PATH" ]; then
-        download_release_file "$RELEASE_HOOK_ASSET_NAME" "$OPENCODE_RUNTIME_SOURCE_PATH"
+        download_remote_file "$REMOTE_HOOK_ASSET_NAME" "$OPENCODE_RUNTIME_SOURCE_PATH"
     fi
 
     if [ ! -f "$OPENCODE_RUNTIME_SOURCE_PATH" ] || [ ! -r "$OPENCODE_RUNTIME_SOURCE_PATH" ]; then
