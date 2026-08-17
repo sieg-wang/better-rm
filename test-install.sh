@@ -48,6 +48,17 @@ assert_no_log_prefix() {
     fi
 }
 
+assert_file_contains() {
+    local name="$1"
+    local expected="$2"
+    local file="$3"
+    if grep -Fq -- "$expected" "$file"; then
+        pass "$name"
+    else
+        fail "$name (missing: $expected)"
+    fi
+}
+
 mkdir -p "$FAKE_BIN"
 
 # Keep every Git interaction local and observable. The installer must decide
@@ -67,19 +78,37 @@ case "$1" in
         exit 0
         ;;
     symbolic-ref)
+        if [ "${BETTER_RM_TEST_GIT_SCENARIO:-trusted}" = "detached" ]; then
+            exit 1
+        fi
         printf 'main\n'
         exit 0
         ;;
     config)
         case "${3:-}" in
-            branch.main.remote) printf 'origin\n' ;;
-            branch.main.merge) printf 'refs/heads/main\n' ;;
+            branch.main.remote)
+                case "${BETTER_RM_TEST_GIT_SCENARIO:-trusted}" in
+                    missing-upstream) exit 1 ;;
+                    remote-dot) printf '.\n' ;;
+                    *) printf 'origin\n' ;;
+                esac
+                ;;
+            branch.main.merge)
+                [ "${BETTER_RM_TEST_GIT_SCENARIO:-trusted}" != "missing-upstream" ] || exit 1
+                printf 'refs/heads/main\n'
+                ;;
+            # These are unreachable in production. They make the detached-HEAD
+            # fixture continue all the way to pull if that specific refusal is
+            # deleted, instead of being accidentally saved by a later guard.
+            branch..remote) printf 'origin\n' ;;
+            branch..merge) printf 'refs/heads/main\n' ;;
             *) exit 1 ;;
         esac
         exit 0
         ;;
     remote)
         if [ "${2:-}" = "get-url" ]; then
+            [ "${BETTER_RM_TEST_GIT_SCENARIO:-trusted}" != "get-url-fails" ] || exit 1
             printf '%s\n' "$BETTER_RM_TEST_GIT_REMOTE_URL"
             exit 0
         fi
@@ -96,16 +125,28 @@ run_installer() {
     local home="$1"
     local remote_url="$2"
     local log="$3"
+    local scenario="${4:-trusted}"
+    local output_file="${5:-/dev/null}"
     env PATH="$FAKE_BIN:$PATH" \
         HOME="$home" SHELL=/bin/fish \
         BETTER_RM_TEST_GIT_LOG="$log" \
         BETTER_RM_TEST_GIT_REMOTE_URL="$remote_url" \
-        "$INSTALLER" >/dev/null 2>&1
+        BETTER_RM_TEST_GIT_SCENARIO="$scenario" \
+        "$INSTALLER" >"$output_file" 2>&1
+}
+
+make_existing_install() {
+    local home="$1"
+    mkdir -p "$home/.better-rm"
+    printf '#!/bin/bash\n' > "$home/.better-rm/better-rm"
 }
 
 printf 'install.sh tests\n'
 
-if grep -n 'github\.com/doggy8088/better-rm' \
+# Match the owner/repository path independently of the serving host. In
+# particular, raw.githubusercontent.com URLs do not contain "github.com/" and
+# were the headline installation route missed by the old guard.
+if grep -n 'doggy8088/better-rm' \
     "$SCRIPT_DIR/README.md" "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR/install-hooks.sh" \
     >/dev/null; then
     fail "operator-facing install sources do not reference the old upstream"
@@ -133,8 +174,7 @@ assert_log_line "a fresh install clones the Sieg-owned repository" \
 
 TRUSTED_HOME="$TMP_ROOT/trusted-home"
 TRUSTED_LOG="$TMP_ROOT/trusted.log"
-mkdir -p "$TRUSTED_HOME/.better-rm"
-printf '#!/bin/bash\n' > "$TRUSTED_HOME/.better-rm/better-rm"
+make_existing_install "$TRUSTED_HOME"
 if run_installer "$TRUSTED_HOME" "$TRUSTED_REPO_URL" "$TRUSTED_LOG"; then
     pass "an existing checkout with a trusted upstream updates"
 else
@@ -145,8 +185,7 @@ assert_log_line "a trusted update is fast-forward only" \
 
 UNTRUSTED_HOME="$TMP_ROOT/untrusted-home"
 UNTRUSTED_LOG="$TMP_ROOT/untrusted.log"
-mkdir -p "$UNTRUSTED_HOME/.better-rm"
-printf '#!/bin/bash\n' > "$UNTRUSTED_HOME/.better-rm/better-rm"
+make_existing_install "$UNTRUSTED_HOME"
 UNTRUSTED_STATUS=0
 run_installer "$UNTRUSTED_HOME" \
     "https://github.com/doggy8088/better-rm.git" "$UNTRUSTED_LOG" || UNTRUSTED_STATUS=$?
@@ -157,6 +196,35 @@ else
 fi
 assert_no_log_prefix "an untrusted checkout is never pulled" \
     "pull " "$UNTRUSTED_LOG"
+
+for scenario in detached missing-upstream get-url-fails remote-dot; do
+    BRANCH_HOME="$TMP_ROOT/$scenario-home"
+    BRANCH_LOG="$TMP_ROOT/$scenario.log"
+    BRANCH_OUTPUT="$TMP_ROOT/$scenario.output"
+    make_existing_install "$BRANCH_HOME"
+    BRANCH_STATUS=0
+    run_installer "$BRANCH_HOME" "$TRUSTED_REPO_URL" "$BRANCH_LOG" \
+        "$scenario" "$BRANCH_OUTPUT" || BRANCH_STATUS=$?
+    if [ "$BRANCH_STATUS" -ne 0 ]; then
+        pass "an existing checkout fails closed for $scenario"
+    else
+        fail "an existing checkout fails closed for $scenario"
+    fi
+    assert_no_log_prefix "$scenario never reaches pull" "pull " "$BRANCH_LOG"
+    case "$scenario" in
+        detached)
+            EXPECTED_ERROR="existing installation is on a detached HEAD"
+            ;;
+        get-url-fails)
+            EXPECTED_ERROR="cannot resolve upstream remote 'origin'"
+            ;;
+        *)
+            EXPECTED_ERROR="current branch has no verifiable remote upstream"
+            ;;
+    esac
+    assert_file_contains "$scenario reports its exact trust failure" \
+        "$EXPECTED_ERROR" "$BRANCH_OUTPUT"
+done
 
 printf 'Passed: %s\nFailed: %s\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ]
