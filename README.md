@@ -249,7 +249,9 @@ cat ~/.local/state/better-rm/deletion.log
 TIMESTAMP | v2 | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE
 ```
 
-`v2` 標記代表兩個路徑欄位是轉義過的：`\\` 反斜線、`\p` 直線 `|`、`\n` 換行、`\r` 歸位。因此含有 `|` 或換行的合法檔名也能被正確記錄與還原。沒有 `v2` 標記的紀錄是升級前寫下的舊版 5 欄格式（`TIMESTAMP | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE`），`--restore` 仍可讀取。
+`v2` 標記代表兩個路徑欄位是轉義過的：`\\` 反斜線、`\p` 直線 `|`、`\n` 換行、`\r` 歸位、`\s` 分號 `;`、`\a` 和號 `&`、`\g` 反引號、`\d` 錢號 `$`。前四個維持一筆紀錄一行、欄位不被分隔符切錯；後四個讓紀錄無法被當成 shell 命令執行——整筆紀錄長得就像一條 pipeline，未轉義的 `;`、`&`、`` ` ``、`$( )` 會在有人 source 或 eval 這些位元組時真的執行。因此含有 `|`、換行或 shell 元字元的合法檔名都能被正確記錄與還原。沒有 `v2` 標記的紀錄是升級前寫下的舊版 5 欄格式（`TIMESTAMP | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE`），`--restore` 仍可讀取。
+
+日誌檔本身必須是「本人所有、單一連結的一般檔案」。路徑上若已經是 symlink、hard link、FIFO 或別人的檔案，better-rm 會印出警告並停止記錄（刪除本身照常完成），不會沿著它把紀錄寫進別的檔案。日誌權限不列入判斷：從備份還原或落在 FAT／雲端掛載點的 0644 日誌照樣可用。
 
 範例：
 ```

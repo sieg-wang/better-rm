@@ -479,6 +479,130 @@ else
     test_fail "日誌失敗時的刪除結果或錯誤輸出不正確"
 fi
 
+test_item "日誌路徑是既有 symlink 時停止記錄且不寫進 target"
+# `[ -f ]` 與 `>>` 都跟隨 symlink，所以預先放好的連結會把每一筆刪除紀錄 append 到
+# 別人的檔案裡。這裡釘的是「target 一個位元組都沒變」，不是「有沒有警告」。
+# Both `[ -f ]` and `>>` follow a symlink, so a pre-planted link appends every
+# deletion record into somebody else's file. What is pinned here is that the
+# target does not grow by a single byte, not merely that a warning appeared.
+symlink_log_state="$TEST_WORK_DIR/symlink-log-state"
+symlink_log_victim="$TEST_WORK_DIR/symlink-log-victim.json"
+mkdir -p "$symlink_log_state"
+printf '{"keep":"me"}\n' > "$symlink_log_victim"
+ln -s "$symlink_log_victim" "$symlink_log_state/deletion.log"
+symlink_log_before=$(wc -c < "$symlink_log_victim" | tr -d ' ')
+echo "symlink log test" > symlink-log.txt
+symlink_log_output=$(BETTER_RM_STATE_DIR="$symlink_log_state" "$BETTER_RM" symlink-log.txt 2>&1)
+symlink_log_status=$?
+symlink_log_after=$(wc -c < "$symlink_log_victim" | tr -d ' ')
+if [ $symlink_log_status -eq 0 ] && [ ! -e symlink-log.txt ] && \
+   verify_in_trash "symlink-log.txt" && \
+   [ "$symlink_log_after" = "$symlink_log_before" ] && \
+   [ -L "$symlink_log_state/deletion.log" ] && \
+   echo "$symlink_log_output" | grep -q "已停止記錄"; then
+    test_pass "symlink 日誌被拒絕，刪除仍成功且 target 未被污染"
+else
+    test_fail "symlink 日誌未被拒絕 (status=$symlink_log_status, target ${symlink_log_before}→${symlink_log_after} bytes)"
+fi
+
+test_item "日誌路徑另有 hard link 時停止記錄且不寫進該 inode"
+# hard link 騙得過「非 symlink + 一般檔 + 本人所有」三項檢查（-L 否、-f 是、-O 是），
+# 只有 link 數看得見第二個名字。這一項先斷言那三項確實成立，再斷言紀錄沒有落地：
+# 少了 link 數那一條，這個測試就會紅。
+# A hard link passes "not a symlink + regular + owned" (-L no, -f yes, -O yes);
+# only the link count sees the second name. This asserts those three hold first
+# and that no record landed second, so dropping the link-count clause turns it red.
+hardlink_log_state="$TEST_WORK_DIR/hardlink-log-state"
+hardlink_log_victim="$TEST_WORK_DIR/hardlink-log-victim.json"
+mkdir -p "$hardlink_log_state"
+printf '{"k":1}\n' > "$hardlink_log_victim"
+ln "$hardlink_log_victim" "$hardlink_log_state/deletion.log"
+hardlink_log_before=$(wc -c < "$hardlink_log_victim" | tr -d ' ')
+echo "hardlink log test" > hardlink-log.txt
+hardlink_log_output=$(BETTER_RM_STATE_DIR="$hardlink_log_state" "$BETTER_RM" hardlink-log.txt 2>&1)
+hardlink_log_status=$?
+hardlink_log_after=$(wc -c < "$hardlink_log_victim" | tr -d ' ')
+if [ $hardlink_log_status -eq 0 ] && [ ! -e hardlink-log.txt ] && \
+   verify_in_trash "hardlink-log.txt" && \
+   [ ! -L "$hardlink_log_state/deletion.log" ] && \
+   [ -f "$hardlink_log_state/deletion.log" ] && \
+   [ -O "$hardlink_log_state/deletion.log" ] && \
+   [ "$hardlink_log_after" = "$hardlink_log_before" ] && \
+   echo "$hardlink_log_output" | grep -q "已停止記錄"; then
+    test_pass "hard link 日誌被拒絕，刪除仍成功且該 inode 未被寫入"
+else
+    test_fail "hard link 日誌未被拒絕 (status=$hardlink_log_status, inode ${hardlink_log_before}→${hardlink_log_after} bytes)"
+fi
+
+test_item "0644 的既有日誌照樣記錄與還原"
+# 權限刻意不列入綁定條件：從備份還原、或落在 FAT／雲端掛載點的日誌常常是 0644，
+# 若一併拒絕就會讓記錄與 --restore 一起靜默失效。
+# Mode is deliberately not part of the binding: a log restored from a backup or
+# living on a FAT/cloud mount is routinely 0644, and rejecting it would kill
+# logging and --restore together and in silence.
+loose_mode_state="$TEST_WORK_DIR/loose-mode-state"
+mkdir -p "$loose_mode_state"
+printf '%s\n' "LOOSE MODE FIRST" > loose-mode-seed.txt
+BETTER_RM_STATE_DIR="$loose_mode_state" "$BETTER_RM" loose-mode-seed.txt >/dev/null 2>&1
+chmod 644 "$loose_mode_state/deletion.log"
+printf '%s\n' "LOOSE MODE LEDGER" > loose-mode.txt
+BETTER_RM_STATE_DIR="$loose_mode_state" "$BETTER_RM" loose-mode.txt >/dev/null 2>&1
+loose_mode_restore_status=0
+BETTER_RM_STATE_DIR="$loose_mode_state" "$BETTER_RM" --restore loose-mode.txt >/dev/null 2>&1 ||
+    loose_mode_restore_status=$?
+if grep -q "loose-mode.txt" "$loose_mode_state/deletion.log" && \
+   [ "$loose_mode_restore_status" -eq 0 ] && [ -f loose-mode.txt ] && \
+   [ "$(cat loose-mode.txt)" = "LOOSE MODE LEDGER" ]; then
+    test_pass "0644 日誌仍可記錄與還原"
+else
+    test_fail "0644 日誌記錄或還原失敗 (restore status=$loose_mode_restore_status)"
+fi
+
+test_item "日誌欄位轉義 shell 元字元，紀錄被 source 也不會執行命令"
+# 一整筆紀錄長得就像一條 shell pipeline，欄位就是其中的命令。日誌被導到 shell rc 上
+# 時，檔名裡未轉義的 ; & ` $( ) 就是真的會執行——四種寫法在修正前全部實測執行成功。
+# A whole record reads like a shell pipeline whose fields are its commands. With
+# the log aimed at a shell rc, an unescaped ';', '&', '`' or '$( )' in a filename
+# really does execute -- all four were measured executing before this change.
+meta_exec_failures=""
+meta_case_index=0
+for meta_payload in 'semi; touch ACE-META; :' 'amp & touch ACE-META & :' 'grave`touch ACE-META`' 'dollar$(touch ACE-META)'; do
+    meta_case_index=$((meta_case_index + 1))
+    meta_dir="$TEST_WORK_DIR/meta-exec-$meta_case_index"
+    mkdir -p "$meta_dir/state" "$meta_dir/work"
+    printf '%s\n' "META" > "$meta_dir/work/$meta_payload"
+    ( cd "$meta_dir/work" && BETTER_RM_STATE_DIR="$meta_dir/state" "$BETTER_RM" -- "$meta_payload" ) >/dev/null 2>&1
+    grep -v '^#' "$meta_dir/state/deletion.log" 2>/dev/null | tail -1 > "$meta_dir/record"
+    ( cd "$meta_dir" && bash -c '. ./record' ) >/dev/null 2>&1
+    if [ -e "$meta_dir/ACE-META" ]; then
+        meta_exec_failures="$meta_exec_failures '$meta_payload'"
+    fi
+done
+if [ -z "$meta_exec_failures" ]; then
+    test_pass "shell 元字元在日誌欄位被轉義，source 紀錄不會執行命令"
+else
+    test_fail "日誌紀錄被 source 時執行了命令：$meta_exec_failures"
+fi
+
+test_item "含 shell 元字元的檔名仍可由日誌還原"
+# 轉義只有在還原也讀得回來時才算數；元字元檔名要能原樣回到原處。
+# The escaping only counts if restore reads it back: a metacharacter filename
+# must return to its original path byte for byte.
+meta_restore_state="$TEST_WORK_DIR/meta-restore-state"
+meta_restore_name='restore;&`$(x) meta.txt'
+mkdir -p "$meta_restore_state"
+printf '%s\n' "META ROUND TRIP" > "$meta_restore_name"
+BETTER_RM_STATE_DIR="$meta_restore_state" "$BETTER_RM" -- "$meta_restore_name" >/dev/null 2>&1
+meta_restore_status=0
+BETTER_RM_STATE_DIR="$meta_restore_state" "$BETTER_RM" --restore "$meta_restore_name" >/dev/null 2>&1 ||
+    meta_restore_status=$?
+if [ "$meta_restore_status" -eq 0 ] && [ -f "$meta_restore_name" ] && \
+   [ "$(cat "$meta_restore_name")" = "META ROUND TRIP" ]; then
+    test_pass "元字元檔名的日誌紀錄可正確還原"
+else
+    test_fail "元字元檔名還原失敗 (status=$meta_restore_status)"
+fi
+
 # ============================================================================
 # 測試 8: 參數選項 (Test 8: Command Options)
 # ============================================================================

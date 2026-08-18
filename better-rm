@@ -154,6 +154,22 @@ encode_log_field() {
     # The delimiter must not survive in the field at all: IFS splitting is not
     # escape-aware, so a '\|' would still be split.
     value="${value//|/\\p}"
+    # 一整筆紀錄長得就像一條 shell pipeline，欄位就是其中一段命令。只要有人拿到
+    # 這些位元組去 source（日誌被導向 shell rc、或有人 eval 日誌行），檔名裡的
+    # ; & ` $( ) 就是可執行的命令分隔與替換——實測四種寫法全部會執行，而垃圾桶
+    # 副本保留 755，它的絕對路徑正好是第 4 欄。轉義掉這一類字元，紀錄就只剩資料。
+    # 已知殘留：> 與 < 仍是原樣，那會重導向而不會執行命令。
+    # A whole record reads like a shell pipeline and each field is one command in
+    # it. Anything that sources those bytes (a log redirected onto a shell rc, or
+    # an eval over a log line) executes ';', '&', '`' and '$( )' out of a
+    # filename -- all four were measured executing -- and the trash copy keeps
+    # mode 755 with its absolute path sitting in field 4. Escaping this class
+    # leaves the record as data. Known residue: '>' and '<' are left alone; they
+    # redirect but do not execute a command.
+    value="${value//;/\\s}"
+    value="${value//&/\\a}"
+    value="${value//\`/\\g}"
+    value="${value//\$/\\d}"
     value="${value//$'\n'/\\n}"
     value="${value//$'\r'/\\r}"
     printf '%s' "$value"
@@ -186,6 +202,10 @@ decode_log_field() {
                 n) out+=$'\n' ;;
                 r) out+=$'\r' ;;
                 p) out+='|' ;;
+                s) out+=';' ;;
+                a) out+='&' ;;
+                g) out+='`' ;;
+                d) out+='$' ;;
                 '\') out+='\' ;;
                 *) out+="\\${value:index:1}" ;;
             esac
@@ -195,6 +215,49 @@ decode_log_field() {
         index=$((index + 1))
     done
     LOG_FIELD_DECODED="$out"
+}
+
+# 日誌路徑必須綁在我們自己那顆 inode 上，四個條件缺一不可：
+#   symlink   —— `[ -f ]` 與 `>>` 都會跟隨，紀錄會被 append 到別人的檔案裡；
+#                 導到 shell rc 上時那些位元組就是會被執行的命令（見 encode_log_field）。
+#   非一般檔  —— FIFO／device 會把每一筆刪除紀錄餵給別的程序。
+#   非本人所有—— 這顆 inode 不是我們建立的，不該由我們 append。
+#   link 數 >1—— hard link 騙得過前三項（實測 -L 否、-f 是、-O 是），但第二個名字
+#                 依然掛在同一顆 inode 上，之後每一筆紀錄都會同時出現在那條路徑。
+# 刻意不檢查 mode：0644 的日誌（從備份還原、或落在 FAT／雲端掛載點）會讓記錄與
+# --restore 一起靜默失效，而 owner + link 數已經把 inode 綁死了。
+# The log path must be bound to our own inode, and all four clauses are load-bearing:
+#   symlink       -- both `[ -f ]` and `>>` follow it, so records land in someone
+#                    else's file; aimed at a shell rc those bytes are executable
+#                    commands (see encode_log_field).
+#   non-regular   -- a FIFO or device feeds every deletion record to another process.
+#   foreign owner -- we did not create this inode and must not append to it.
+#   link count >1 -- a hard link defeats the first three (measured: -L no, -f yes,
+#                    -O yes) while a second name stays attached to the same inode,
+#                    so every future record shows up at that path too.
+# Mode is deliberately NOT checked: a 0644 log (restored from a backup, or living on
+# a FAT/cloud mount) would silently kill logging and --restore together, and owner
+# plus link count already pin the inode.
+log_file_is_bound() {
+    local path="$1"
+    local links
+    [ -L "$path" ] && return 1
+    [ -f "$path" ] || return 1
+    [ -O "$path" ] || return 1
+    # GNU 先、BSD 後，順序是安全關鍵：GNU 的 `stat -f` 印的是「檔案系統狀態」，
+    # 會吐幾百個字元到 stdout 才以 1 結束，反過來寫就會把那堆字當成 link 數。
+    # 這個 repo 的 CI 只有 ubuntu，GNU 正是必跑的那條路。
+    # GNU first, BSD second, and the order is the safety property: GNU's `stat -f`
+    # prints FILESYSTEM status, dumps hundreds of characters to stdout and only
+    # then exits 1, so the reverse order would read that dump as the link count.
+    # This repo's CI is ubuntu-only, i.e. the GNU branch is the one that always runs.
+    links=$(stat -c '%h' "$path" 2>/dev/null ||
+        stat -f '%l' "$path" 2>/dev/null ||
+        true)
+    # 數不出來就當成不合格：這是安全檢查，「無法確認」不等於「相符」。
+    # An unreadable link count fails the check: this is a security test, and
+    # "cannot confirm" is never "matches".
+    [ "$links" = "1" ]
 }
 
 # 記錄刪除操作到日誌檔案
@@ -220,6 +283,18 @@ log_deletion() {
         fi
     fi
     
+    # 路徑上已經有東西時，先確認那是我們自己的 inode；不合格就完全不碰它。
+    # 判斷用 `[ -e ] || [ -L ]`，因為斷掉的 symlink 兩者只有後者為真，而 `>` 會
+    # 沿著它把目標建出來。
+    # If anything already occupies the path, prove it is our own inode before
+    # touching it. The test is `[ -e ] || [ -L ]` because a dangling symlink is
+    # only visible to the second one, and `>` would follow it and create the target.
+    if { [ -e "$log_file" ] || [ -L "$log_file" ]; } && ! log_file_is_bound "$log_file"; then
+        warn_msg "刪除日誌不是本人所有的單一連結一般檔案，已停止記錄: $log_file"
+        warn_msg "Deletion log is not an owned single-link regular file, logging stopped: $log_file"
+        return 1
+    fi
+
     # 確保日誌檔案存在
     # Ensure log file exists
     if [ ! -f "$log_file" ]; then
@@ -230,8 +305,8 @@ log_deletion() {
                 echo "# 更好的 RM 刪除日誌"
                 echo "# Format: TIMESTAMP | v2 | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE"
                 echo "# 格式：時間戳記 | v2 | 原始路徑 | 垃圾桶路徑 | 雜湊值 | 檔案類型"
-                echo '# v2: path fields escape \\ (backslash) \p (pipe) \n (newline) \r (CR); records without the v2 marker use the legacy 5-field layout'
-                echo '# v2：路徑欄位轉義 \\ 反斜線、\p 直線、\n 換行、\r 歸位；沒有 v2 標記的紀錄沿用舊版 5 欄格式'
+                echo '# v2: path fields escape \\ (backslash) \p (pipe) \n (newline) \r (CR) \s (;) \a (&) \g (backtick) \d ($); records without the v2 marker use the legacy 5-field layout'
+                echo '# v2：路徑欄位轉義 \\ 反斜線、\p 直線、\n 換行、\r 歸位、\s 分號、\a 和號、\g 反引號、\d 錢號；沒有 v2 標記的紀錄沿用舊版 5 欄格式'
                 echo "# =============================================================================="
             } > "$log_file"
         ) 2>/dev/null; then
@@ -1217,8 +1292,8 @@ restore_file() {
     # trim 與解碼的成本 —— 日誌只增不減，掃描成本會隨時間單調變差。
     # 成立範圍要講清楚：本工具寫出的 v2 欄位一定是 encode_log_field 的輸出（每個
     # 反斜線都已加倍），在那個像上「原始路徑含目標名稱 ⇒ 整行含其轉義形式」可證；
-    # 但對任意手工編造的 v2 欄位並不成立，例如 `/craft/\a\\b.txt`（未知轉義 \a 緊
-    # 鄰標準的 \\）解碼後是 `/craft/\a\b.txt`，字面與標準轉義兩種寫法都不會出現在
+    # 但對任意手工編造的 v2 欄位並不成立，例如 `/craft/\z\\b.txt`（未知轉義 \z 緊
+    # 鄰標準的 \\）解碼後是 `/craft/\z\b.txt`，字面與標準轉義兩種寫法都不會出現在
     # 原始行裡而被跳過。那種紀錄 better-rm 自己不會寫出，且結果是「找不到」
     # （fail-closed），不會還原到錯的檔案。
     # Cheap pre-rejection: a raw-string test drops the vast majority of records
@@ -1228,8 +1303,8 @@ restore_file() {
     # encode_log_field (every backslash already doubled), and on that image
     # "the original path contains the target name" does imply "the raw line
     # contains its escaped spelling". It does NOT hold for an arbitrary
-    # hand-written v2 field: `/craft/\a\\b.txt` (an unknown escape \a next to a
-    # canonical \\) decodes to `/craft/\a\b.txt`, yet neither the literal nor
+    # hand-written v2 field: `/craft/\z\\b.txt` (an unknown escape \z next to a
+    # canonical \\) decodes to `/craft/\z\b.txt`, yet neither the literal nor
     # the canonical spelling occurs in the raw line, so the record is skipped.
     # better-rm never writes such a record, and the outcome is NOT FOUND
     # (fail-closed) rather than restoring the wrong file.
