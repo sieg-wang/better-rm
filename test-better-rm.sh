@@ -112,6 +112,57 @@ verify_log_entry() {
     fi
 }
 
+# 有界執行：跑一個命令，逾時就連同它整個 process group 殺掉。完成回傳 0（命令自己
+# 的離開碼放在 RUN_BOUNDED_STATUS），逾時回傳 1。
+# 為什麼需要：log_deletion 對非一般檔（FIFO）做重導向會停在 open() 上永遠不回來，
+# 而「用真的卡住去證明卡住」的測試沒辦法放進任何 gate——它會把整套測試一起吊死。
+# 為什麼不用 timeout(1)：macOS 沒有它，而 better-rm 必須在 stock /bin/bash 3.2.57
+# 上跑；寫成「有 timeout 才設上限」等於在 macOS 上悄悄沒有上限。
+# 為什麼殺整組：卡住的是 better-rm 底下那顆做重導向的 subshell，只殺 better-rm 會
+# 留下一個永遠 open() 不回來的孤兒；set -m 讓背景工作自成一個 process group。
+# Bounded run: execute a command and, on timeout, kill its whole process group.
+# Returns 0 when it finished (the command's own exit code lands in
+# RUN_BOUNDED_STATUS) and 1 when it timed out.
+# Why it exists: log_deletion redirecting into a non-regular file (a FIFO) parks in
+# open() forever, and a test that hangs to prove a hang cannot sit in any gate -- it
+# takes the whole suite down with it.
+# Why not timeout(1): macOS does not ship it and better-rm must run under stock
+# /bin/bash 3.2.57, so "bound it only when timeout exists" is silently unbounded there.
+# Why the whole group: what blocks is the redirect subshell under better-rm, so
+# killing better-rm alone leaves an orphan stuck in open(); `set -m` puts the
+# background job in its own process group so one kill reaches both.
+RUN_BOUNDED_STATUS=""
+run_bounded() {
+    local limit="$1"
+    shift
+    local done_file="$TEST_WORK_DIR/.run-bounded-done"
+    rm -f "$done_file" "$done_file.tmp"
+    RUN_BOUNDED_STATUS=""
+    set -m
+    (
+        "$@"
+        printf '%s' "$?" > "$done_file.tmp"
+        mv -f "$done_file.tmp" "$done_file"
+    ) &
+    local bounded_pid=$!
+    set +m
+    local waited=0
+    while [ "$waited" -lt "$limit" ]; do
+        if [ -f "$done_file" ]; then
+            wait "$bounded_pid" 2>/dev/null
+            RUN_BOUNDED_STATUS=$(cat "$done_file")
+            rm -f "$done_file"
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    kill -9 "-$bounded_pid" 2>/dev/null || kill -9 "$bounded_pid" 2>/dev/null
+    wait "$bounded_pid" 2>/dev/null
+    rm -f "$done_file" "$done_file.tmp"
+    return 1
+}
+
 # ============================================================================
 # 測試開始 (Tests Begin)
 # ============================================================================
@@ -532,6 +583,65 @@ if [ $hardlink_log_status -eq 0 ] && [ ! -e hardlink-log.txt ] && \
     test_pass "hard link 日誌被拒絕，刪除仍成功且該 inode 未被寫入"
 else
     test_fail "hard link 日誌未被拒絕 (status=$hardlink_log_status, inode ${hardlink_log_before}→${hardlink_log_after} bytes)"
+fi
+
+test_item "日誌路徑是 FIFO 時停止記錄，而且不會卡住"
+# 少了「一般檔」那一條，FIFO 走得過其餘三項（-L 否、-O 是、link 數 1），接著
+# log_deletion 的 `> "$log_file"` 就停在 open() 上，等一個永遠不會出現的讀端——
+# 這不是少記一筆，是整個 rm 掛在那裡不回來。這道守衛跑在這台機器上的每一次刪除，
+# 所以少掉那一條的代價是「rm 不會結束」，比漏記嚴重得多。
+# 這裡釘的是「有在時限內結束」，用 run_bounded 而不是直接呼叫：測試不能用真的
+# 卡住去證明卡住。
+# Without the regular-file clause a FIFO passes the other three (-L no, -O yes, one
+# link) and log_deletion's `> "$log_file"` then parks in open() waiting for a reader
+# that never arrives -- not a missing record, an rm that never returns. This guard
+# runs on every deletion on this machine, so dropping that clause costs far more than
+# a lost log line. What is pinned here is that the run FINISHES, and it goes through
+# run_bounded because a test must not hang in order to prove a hang.
+fifo_log_state="$TEST_WORK_DIR/fifo-log-state"
+fifo_log_output="$TEST_WORK_DIR/fifo-log-output.txt"
+mkdir -p "$fifo_log_state"
+mkfifo "$fifo_log_state/deletion.log"
+echo "fifo log test" > fifo-log.txt
+fifo_log_timed_out=0
+run_bounded 15 env BETTER_RM_STATE_DIR="$fifo_log_state" "$BETTER_RM" fifo-log.txt \
+    > "$fifo_log_output" 2>&1 || fifo_log_timed_out=1
+if [ "$fifo_log_timed_out" -eq 0 ] && [ "$RUN_BOUNDED_STATUS" = "0" ] && \
+   [ ! -e fifo-log.txt ] && verify_in_trash "fifo-log.txt" && \
+   [ -p "$fifo_log_state/deletion.log" ] && \
+   grep -q "已停止記錄" "$fifo_log_output"; then
+    test_pass "FIFO 日誌被拒絕，刪除在時限內完成且 FIFO 未被寫入"
+else
+    test_fail "FIFO 日誌未被拒絕或執行卡住 (timed_out=$fifo_log_timed_out, status=${RUN_BOUNDED_STATUS:-timeout})"
+fi
+
+test_item "日誌路徑是斷掉的 symlink 時停止記錄且不把 target 建出來"
+# 佔用判斷寫成 `[ -e ] || [ -L ]`，是因為斷掉的 symlink 只有後者看得見：拿掉 `[ -L ]`
+# 那一邊，這種情況下整個綁定檢查根本不會被叫到，接著 `> "$log_file"` 會沿著連結把
+# 目標檔建出來——把連結指向一個還不存在的 shell rc，第一次刪除就替對方建好那個檔，
+# 而檔案內容是 better-rm 自己寫的日誌位元組。
+# 這裡釘的是「target 沒有被建出來」，不是「有沒有警告」。
+# The occupancy test is `[ -e ] || [ -L ]` because only the second operand sees a
+# dangling symlink: drop `[ -L ]` and the binding check is never reached in this case,
+# after which `> "$log_file"` follows the link and CREATES the target -- aim the link
+# at a shell rc that does not exist yet and the first deletion creates it, filled with
+# better-rm's own log bytes. What is pinned is that the target was NOT created, not
+# that a warning appeared.
+dangling_log_state="$TEST_WORK_DIR/dangling-log-state"
+dangling_log_target="$TEST_WORK_DIR/dangling-log-target.rc"
+mkdir -p "$dangling_log_state"
+ln -s "$dangling_log_target" "$dangling_log_state/deletion.log"
+echo "dangling log test" > dangling-log.txt
+dangling_log_output=$(BETTER_RM_STATE_DIR="$dangling_log_state" "$BETTER_RM" dangling-log.txt 2>&1)
+dangling_log_status=$?
+if [ $dangling_log_status -eq 0 ] && [ ! -e dangling-log.txt ] && \
+   verify_in_trash "dangling-log.txt" && \
+   [ ! -e "$dangling_log_target" ] && \
+   [ -L "$dangling_log_state/deletion.log" ] && \
+   echo "$dangling_log_output" | grep -q "已停止記錄"; then
+    test_pass "斷掉的 symlink 日誌被拒絕，刪除仍成功且 target 未被建立"
+else
+    test_fail "斷掉的 symlink 日誌未被拒絕 (status=$dangling_log_status, target 被建立=$([ -e "$dangling_log_target" ] && echo yes || echo no))"
 fi
 
 test_item "0644 的既有日誌照樣記錄與還原"
