@@ -644,6 +644,50 @@ else
     test_fail "斷掉的 symlink 日誌未被拒絕 (status=$dangling_log_status, target 被建立=$([ -e "$dangling_log_target" ] && echo yes || echo no))"
 fi
 
+test_item "KNOWN-RESIDUALS.md 的三條與程式碼事實仍然對得上（雙向釘）"
+# 為什麼需要：這三項是刻意不修的既有殘留，前四輪 review 每一輪都重新推導了一次。
+# 光把理由寫進 md 擋不住第五次——文字會爛。所以這裡兩邊都釘：文字不見了會紅，
+# 而且**底下的程式碼事實變了也會紅**。第二半才是重點，它把「修好了卻忘了刪那段
+# 文字」變成一次失敗，而不是一段悄悄過期的謊。
+# 釘的是「理由」不是「結論」：結論會被一句「以上作廢」原地否定（2026-08-18 的
+# 對抗驗收實測三種改寫全部得手），理由不會——沒有人會為了繞過測試去補一段假的
+# O_NOFOLLOW 論證。這個極限在 KNOWN-RESIDUALS.md 裡也明說了。
+# Why it exists: three deliberately-unfixed residuals that four review rounds each
+# re-derived from scratch. Prose alone will not stop the fifth. This pins BOTH
+# directions: red if the text goes, red if the code fact it describes changes -- so
+# "fixed it but forgot the note" fails loudly instead of rotting quietly. It pins the
+# REASONS, not the verdicts: a verdict can be negated in place, a reason cannot.
+residuals_doc="$SCRIPT_DIR/KNOWN-RESIDUALS.md"
+residuals_problems=""
+if [ ! -f "$residuals_doc" ]; then
+    residuals_problems="KNOWN-RESIDUALS.md 不存在"
+else
+    # R1 — 文字面要留住「正確修法是驗 fd 而不是路徑」這個理由。
+    grep -q 'O_NOFOLLOW' "$residuals_doc" ||
+        residuals_problems="$residuals_problems R1的修法方向(O_NOFOLLOW)從文件消失;"
+    # R1 — 程式碼面：綁定檢查仍然是對「路徑」做的。若哪天改成驗 fd，殘留就消失了，
+    # 這段文字必須跟著刪。
+    grep -q 'log_file_is_bound() {' "$BETTER_RM" ||
+        residuals_problems="$residuals_problems R1所描述的log_file_is_bound已不存在;"
+    # R2 — 文字面要留住「無 root 不可測」這個理由，否則下一輪會有人硬寫一個假測試。
+    grep -q '無法在無 root 的情況下測試' "$residuals_doc" ||
+        residuals_problems="$residuals_problems R2的不可測理由從文件消失;"
+    # R2 — 程式碼面：那個沒被覆蓋的 clause 還在。被刪掉的話這條殘留就不成立了。
+    grep -q '\[ -O "\$path" \] || return 1' "$BETTER_RM" ||
+        residuals_problems="$residuals_problems R2所指的[-O]clause已不在better-rm裡;"
+    # R3 — 文字面要留住「兩邊都紅＝既有問題」，這點被三份報告各自誤判過。
+    grep -q '兩邊都紅' "$residuals_doc" ||
+        residuals_problems="$residuals_problems R3的對稱性結論從文件消失;"
+    # R3 — 程式碼面：那個牆鐘預算還在。換成不看牆鐘的寫法就該刪這條。
+    grep -q 'const budgetMs = 1000;' "$SCRIPT_DIR/test-hooks.js" ||
+        residuals_problems="$residuals_problems R3所指的1000ms牆鐘預算已不在test-hooks.js裡;"
+fi
+if [ -z "$residuals_problems" ]; then
+    test_pass "三條殘留的理由與其程式碼事實一致"
+else
+    test_fail "KNOWN-RESIDUALS.md 與程式碼不同步:$residuals_problems (修好了就把對應那條刪掉，別留著爛)"
+fi
+
 test_item "0644 的既有日誌照樣記錄與還原"
 # 權限刻意不列入綁定條件：從備份還原、或落在 FAT／雲端掛載點的日誌常常是 0644，
 # 若一併拒絕就會讓記錄與 --restore 一起靜默失效。
