@@ -43,7 +43,19 @@ delete this note" into a failure rather than a quietly stale claim.
    ```
    `node --check` 過、釘子維持綠，**而預算已經被調大了**——正是 R3 明文說不要做的
    那個修法。bash 側同形：`:  # removed 2026-08-20: [ -O "$path" ] || return 1`。
+   其餘同樣通得過的（實測，非推測）：bash 的 `:` no-op 前綴（`: [ -O … ] || return 1`，
+   連註解都不用）、JS 的 `if (false) { … }`、以及把整行搬進一個沒人呼叫的函式裡
+   ——最後這種看起來完全是活碼。
    **別把這半邊當成封死的。** 它擋的是最粗心的一種改法，不是有意的規避。
+
+4. **精確計數本身有一個 BSD-only 的繞法：NUL 位元組 ＋ `LC_ALL=C`。** BSD `grep -o`
+   碰到含 NUL 的檔案會印一行 `Binary file … matches`，於是 `wc -l` 永遠讀成 1，
+   不論實際有幾份拷貝。實測完整攻擊（刪掉整個 R1 段落 ＋ 留兩個孤立 token ＋ 種一個
+   NUL）在 `LC_ALL=C` 下 **136/136 全綠**。
+   需要**同時**滿足兩個條件才成立：把 markdown 蓄意弄成二進位檔，且跑在 C/POSIX
+   locale。少任一個都會紅（同攻擊無 NUL → 紅；有 NUL 但 UTF-8 locale → 紅），
+   而且 git 會把該檔顯示成 binary，review 時很難不注意。
+   ⚠️ CI 是 ubuntu（GNU grep），本機沒有 GNU grep 可測，**那一側的行為是推論不是實測**。
 
 還有一個環境陷阱：兩個程式碼 anchor 用的是 `grep -v … | grep -q …`，在 `better-rm`
 上前段會提早 SIGPIPE，整條管線回 141。這個測試檔目前沒開 `pipefail` 所以無害，
