@@ -17,10 +17,29 @@ overturn it. Each is pinned by a test in `test-better-rm.sh`, and the pin is
 code fact changes. That second half is the point — it turns "fixed but forgot to
 delete this note" into a failure rather than a quietly stale claim.
 
-已知極限，明說：**這種文字釘抓得到刪除，抓不到原地否定。** 有人在下面插一句
-「以上作廢」而不動程式碼，測試會照樣綠。這是 grep 型釘子的本質，2026-08-18 的
-對抗驗收實測過（三種改寫全部得手）。程式碼事實那一半才是有牙齒的那一半。
-Stated limit: a prose pin catches deletion, not in-place negation — measured.
+## 已知極限（實測，別高估這個釘子）
+
+2026-08-19 的對抗驗收把這個釘子攻擊過一輪，**三個洞是量出來的，不是推測的**：
+
+1. **抓不到原地否定。** 在下面插一句「以上作廢、重新開單」而不動任何 anchor，
+   測試照樣綠。grep 型釘子的本質。
+2. **抓不到把理由整段刪掉、只留 token。** 把 R1 的修法段落刪光、只在檔案結尾留
+   一個孤零零的 `O_NOFOLLOW`（甚至塞在 HTML 註解裡），照樣綠。**釘子看得到字串，
+   看不到位置與上下文。**
+3. **程式碼那一半原本也可以被「註解掉而不是刪掉」繞過**——這一個已修：現在兩個
+   程式碼 anchor 都先濾掉註解行才比對。修之前，把 `[ -O ]` 那行加個 `#` 就能讓
+   「有牙齒的那一半」失效，而註解掉一行是再普通不過的編輯。
+
+還有一個已知的假陽性：對 `[ -O ]` 做語意不變的改寫（例如換個等價寫法）會讓釘子
+變紅，而診斷訊息會說「已不在活碼裡」——方向是安全的（寧可誤報），但那句話當下
+是錯的。看到它請直接看程式碼，別信訊息字面。
+
+Stated limits, all measured on 2026-08-19: a prose pin catches deletion but not
+in-place negation (1), and not wholesale removal of the reasoning as long as the
+token survives anywhere in the file (2). The code-side half was ALSO defeatable by
+commenting the line out rather than deleting it — now fixed by filtering comment
+lines before matching (3). One known false positive: a semantics-preserving rewrite
+of the `[ -O ]` clause trips the pin with a diagnostic that is then literally wrong.
 
 ---
 

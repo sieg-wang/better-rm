@@ -672,15 +672,19 @@ else
     # R2 — 文字面要留住「無 root 不可測」這個理由，否則下一輪會有人硬寫一個假測試。
     grep -q '無法在無 root 的情況下測試' "$residuals_doc" ||
         residuals_problems="$residuals_problems R2的不可測理由從文件消失;"
-    # R2 — 程式碼面：那個沒被覆蓋的 clause 還在。被刪掉的話這條殘留就不成立了。
-    grep -q '\[ -O "\$path" \] || return 1' "$BETTER_RM" ||
-        residuals_problems="$residuals_problems R2所指的[-O]clause已不在better-rm裡;"
+    # R2 — 程式碼面：那個沒被覆蓋的 clause 還在，而且是**活的**不是被註解掉的。
+    # `grep -v '^[[:space:]]*#'` 是必要的：驗收實測「把該行註解掉」照樣讓 anchor 命中，
+    # 而註解掉一行是再普通不過的編輯，不是對抗行為——少了這一濾，這半邊就沒有牙齒。
+    # The comment filter is load-bearing: acceptance measured that commenting the line
+    # out still satisfied a bare grep, and commenting out is an ordinary edit.
+    grep -v '^[[:space:]]*#' "$BETTER_RM" | grep -q '\[ -O "\$path" \] || return 1' ||
+        residuals_problems="$residuals_problems R2所指的[-O]clause已不在better-rm的活碼裡;"
     # R3 — 文字面要留住「兩邊都紅＝既有問題」，這點被三份報告各自誤判過。
     grep -q '兩邊都紅' "$residuals_doc" ||
         residuals_problems="$residuals_problems R3的對稱性結論從文件消失;"
-    # R3 — 程式碼面：那個牆鐘預算還在。換成不看牆鐘的寫法就該刪這條。
-    grep -q 'const budgetMs = 1000;' "$SCRIPT_DIR/test-hooks.js" ||
-        residuals_problems="$residuals_problems R3所指的1000ms牆鐘預算已不在test-hooks.js裡;"
+    # R3 — 程式碼面：那個牆鐘預算還在，且是活碼。換成不看牆鐘的寫法就該刪這條。
+    grep -v '^[[:space:]]*//' "$SCRIPT_DIR/test-hooks.js" | grep -q 'const budgetMs = 1000;' ||
+        residuals_problems="$residuals_problems R3所指的1000ms牆鐘預算已不在test-hooks.js的活碼裡;"
 fi
 if [ -z "$residuals_problems" ]; then
     test_pass "三條殘留的理由與其程式碼事實一致"
