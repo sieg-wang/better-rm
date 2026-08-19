@@ -53,8 +53,14 @@ delete this note" into a failure rather than a quietly stale claim.
    不論實際有幾份拷貝。實測完整攻擊（刪掉整個 R1 段落 ＋ 留兩個孤立 token ＋ 種一個
    NUL）在 `LC_ALL=C` 下 **136/136 全綠**。
    需要**同時**滿足兩個條件才成立：把 markdown 蓄意弄成二進位檔，且跑在 C/POSIX
-   locale。少任一個都會紅（同攻擊無 NUL → 紅；有 NUL 但 UTF-8 locale → 紅），
-   而且 git 會把該檔顯示成 binary，review 時很難不注意。
+   locale。少任一個都會紅（同攻擊無 NUL → 紅；有 NUL 但 UTF-8 locale → 紅）。
+   ⚠️ **「git 會顯示成 binary 所以 review 看得到」這句話原本寫錯了，已更正**：
+   git 只檢查**前 8000 bytes**，本檔已超過一萬 bytes，所以 NUL 塞在**檔尾**會得到
+   一般文字 diff（實測 `numstat 4 24`），塞在**開頭**才會顯示 `- -`。攻擊者當然
+   放檔尾。**這個繞法沒有「review 一定看得到」這道保險。**
+   另一個當初寫錯的細節：control-2（NUL ＋ UTF-8 locale）之所以紅，機制與原本
+   假設不同——ASCII 那個 anchor 仍數到 1，是兩個中文 anchor 讀成 0 才紅的。
+   驗證腳本：`test/residual-harness/pin-nul-evasion.sh`（會把兩種放置位置都量）。
    ⚠️ CI 是 ubuntu（GNU grep），本機沒有 GNU grep 可測，**那一側的行為是推論不是實測**。
 
 還有一個環境陷阱：兩個程式碼 anchor 用的是 `grep -v … | grep -q …`，在 `better-rm`
@@ -112,6 +118,18 @@ descriptor**（`fstat` 比對 mode / uid / nlink），全程用同一個 fd appe
 四個 clause 裡，`[ -L ]`（symlink）、`[ -f ]`（一般檔／FIFO 無限 hang）、
 link 數（hard link）都有會紅的測試。**`[ -O ]` 沒有**：把它刪掉，整套
 `test-better-rm.sh` 照樣全綠。
+
+⚠️ **這句自 `5e295ef` 起不再字面成立**：那個 commit 教會釘子去 grep 活碼，所以刪掉
+`[ -O ]` 現在會讓**釘子**變紅。但**行為覆蓋依然是零**——紅的是「文件與程式碼不同步」
+那條，不是任何真的行使 ownership 的測試。驗證腳本會把這個差別分成 `CAUGHT`
+（真有行為測試抓到）與 `PIN-ONLY`（只有釘子叫）兩種判定，`[ -O ]` 是後者：
+`test/residual-harness/mutants-log-binding.sh`。
+
+⚠️ **同一支腳本查出一個新的、更值得注意的缺口**（2026-08-20，尚未修）：把
+`[ -f "$path" ] || return 1` 收窄成 `[ ! -p "$path" ]`（也就是「只擋 FIFO」的
+trimmed 版本）**逃過全部 136 個測試**。可觀察的後果是**一個 socket 被當成合法日誌
+靜默接受**。原因是 FIFO 那個測試釘的是「不會卡住」，不是「必須是一般檔」。
+要修得在 `test-better-rm.sh` 加一個 socket fixture；本輪刻意不動既有測試檔，故記錄不修。
 
 **為什麼沒補測試**（經獨立重新推導，不是採信）：
 
