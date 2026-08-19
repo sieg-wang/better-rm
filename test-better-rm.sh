@@ -662,6 +662,19 @@ residuals_problems=""
 if [ ! -f "$residuals_doc" ]; then
     residuals_problems="KNOWN-RESIDUALS.md 不存在"
 else
+    # 每個 anchor 在文件裡必須**恰好出現一次**。這條不是潔癖：2026-08-19 有一版
+    # 在解釋「只留一個孤立 token 就會維持綠」的段落裡，自己多寫了一次 R1 的 token，
+    # 結果整個 R1 段落被刪掉時測試照樣綠——警告變成了它警告的那個洞。文件裡寫了
+    # 「不得重複」的規則但沒有東西強制它，等於再次倚賴那個已知無效的機制。
+    # Exactly-once is enforced, not merely requested: a version of this file once
+    # duplicated an anchor inside the very paragraph warning that duplicates disarm
+    # the pin, and deleting that whole section then passed.
+    for residuals_anchor in 'O_NOFOLLOW' '無法在無 root 的情況下測試' '兩邊都紅'; do
+        residuals_hits=$(grep -c -- "$residuals_anchor" "$residuals_doc" 2>/dev/null || echo 0)
+        if [ "$residuals_hits" != "1" ]; then
+            residuals_problems="$residuals_problems anchor[$residuals_anchor]在文件裡出現${residuals_hits}次(必須恰好1次);"
+        fi
+    done
     # R1 — 文字面要留住「正確修法是驗 fd 而不是路徑」這個理由。
     grep -q 'O_NOFOLLOW' "$residuals_doc" ||
         residuals_problems="$residuals_problems R1的修法方向(O_NOFOLLOW)從文件消失;"

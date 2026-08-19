@@ -47,9 +47,12 @@ delete this note" into a failure rather than a quietly stale claim.
 Stated limits, all measured on 2026-08-19: a prose pin catches deletion but not
 in-place negation (1), and not wholesale removal of the reasoning as long as the
 token survives anywhere in the file (2). The code-side half was ALSO defeatable by
-commenting the line out rather than deleting it — now fixed by filtering comment
-lines before matching (3). One known false positive: a semantics-preserving rewrite
-of the `[ -O ]` clause trips the pin with a diagnostic that is then literally wrong.
+commenting the line out rather than deleting it, and that is only **half** closed
+(3): line-leading `#` / `//` now fails the pin, but a JS `/* … */` block, a bash
+`: <<'EOF'` block, and the line inside a string literal all still satisfy both code
+anchors — measured green. Do not read the code-side half as sealed.
+One known false positive: a semantics-preserving rewrite of the ownership clause
+trips the pin with a diagnostic that is then literally wrong.
 
 ---
 
@@ -59,13 +62,11 @@ of the `[ -O ]` clause trips the pin with a diagnostic that is then literally wr
 都對路徑做，通過之後 `log_deletion` 才用同一個路徑去 append。兩者之間有窗口，
 並行行程可以把 symlink 換進來，append 就跟著走過去。
 
-**實測：150 次迭代命中 43 次**（2026-08-18，同 UID racer）。獨立覆核用自己的
-harness 量到 **76/150（50.7%）**，比這高——命中率隨 harness 的積極程度變動，
-這是 TOCTOU 的正常現象。**所以這裡記的數字是下限，不是上限。**
-
-R2 的「無 root 不可測」也經獨立重新推導而非採信：chown 給 nobody／daemon／uid 1
-全部 EPERM；而 hardlink 一個 root 擁有的檔案就算成功，也會先撞 nlink 那一條而不是
-`[ -O ]`，所以那條路徑連測到正確的 clause 都做不到。
+**實測命中率隨 harness 的積極程度大幅變動**，這是 TOCTOU 的正常現象。三組獨立
+harness 量到的範圍：**7.3% / 8.0% / 28.7%(43/150) / 50.7%(76/150) / 72.0% / 96.7%**
+（2026-08-18 與 08-19，皆為同 UID racer）。
+**所以任何單一數字都只描述那個 harness，不描述這個洞的難度**——別把 43/150 當成
+上限，也別當成下限。要判斷風險請看前提條件，不是看比率。
 
 **為什麼不修**：目前 state dir 是 0700、使用者自有，攻擊者要先有同 UID 的執行
 能力——那個前提下他本來就能直接改日誌。風險真正上升的情境是
@@ -86,9 +87,21 @@ descriptor**（`fstat` 比對 mode / uid / nlink），全程用同一個 fd appe
 link 數（hard link）都有會紅的測試。**`[ -O ]` 沒有**：把它刪掉，整套
 `test-better-rm.sh` 照樣全綠。
 
-**為什麼沒補測試**：要構造攻擊需要一個**別的 UID 擁有的檔案**放在使用者自有的
-0700 目錄裡，而不用 root 就沒辦法 chown 給另一個 UID。這不是「還沒寫」，是
-**寫不出來**。
+**為什麼沒補測試**（經獨立重新推導，不是採信）：
+
+- `chown` 給 nobody／daemon／uid 1／65534 全部 EPERM。
+- 但**「別的 UID 擁有的檔案」本身做得出來**：`ln /etc/hosts <0700 state dir>/deletion.log`
+  回 0，得到一個 root 擁有、regular、就在使用者自有目錄裡的檔案。早先版本說這
+  「寫不出來」是**錯的**。
+- 真正做不出來的是 **`nlink == 1` 的那一種**。hardlink 必然 `nlink >= 2`，所以
+  這條路徑會被 link 數那一條擋掉——**把 `[ -O ]` 整條刪掉，同一個 fixture 產生的
+  輸出逐字相同**（實測：shipped 與 noO 兩版都印同一句拒絕訊息）。
+- 順帶更正一個容易寫反的細節：shipped 的檢查順序是 `[ -L ]`→`[ -f ]`→`[ -O ]`→link 數，
+  所以 hardlink fixture 實際上是**先被 `[ -O ]` 擋下**的。這不影響結論——重點是
+  刪掉 `[ -O ]` 之後 link 數那條會擋下同一個 fixture，所以它觀察不到差別。
+
+**結論成立、機制別寫反**：hardlink 路線無法偵測 `[ -O ]` 是否還在，不是因為
+nlink 先觸發，而是因為兩條 clause 對這個 fixture 給出相同結果。
 
 **處置：已知不可測、接受。** 不要為了讓覆蓋率好看去硬寫一個測不到真實條件的
 測試——那種測試的唯一效果是讓下一個人以為這裡有防護。
