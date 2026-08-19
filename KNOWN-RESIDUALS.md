@@ -29,12 +29,21 @@ delete this note" into a failure rather than a quietly stale claim.
    ⚠️ 所以**這份文件本身不得再出現任何 anchor token 的第二份字面拷貝**——寫這段
    警告的第一版就犯了這個錯（在這裡多寫了一次 R1 的 token），結果整個 R1 段落被
    刪掉時測試照樣綠。警告自己變成了它警告的那個洞。要提到 anchor 就描述它，別
-   照抄它。
+   照抄它。這條現在由測試強制（每個 anchor 精確計數必須為 1），不再只是請求。
+   ⚠️ 副作用要先知道：**R1–R3 是純中文的，哪天有人把它們鏡像成英文，anchor 就會
+   出現第二次、釘子會紅。** 那不是誤報而是這條規則的直接後果——真要雙語就得同時
+   改測試裡的 anchor 定義。
 3. **程式碼那一半的「註解掉而不是刪掉」只補了一半。** 現在兩個程式碼 anchor 會先
-   濾掉**行首**註解（`#` / `//`）再比對，所以那一種已經會紅了。**但還沒補的有**：
-   JS 的 `/* … */` 區塊註解（**這才是 JS 註解掉一行最常見的寫法**）、bash 的
-   `: <<'EOF'` 區塊、以及把整行放進字串字面裡——這三種目前都還是綠的。
-   實測過，別以為這半邊已經封死。
+   濾掉**行首**註解（`#` / `//`）再比對，所以那一種會紅。**其餘全都還是綠的**，
+   實測：JS 的 `/* … */`（單行與跨行皆可）、bash 的 `: <<'EOF'` 區塊、把整行放進
+   字串字面、bash 的 `if false; then … fi` 死碼包裹、以及**行尾註解**。
+   ⚠️ 行尾註解那種最危險，因為它同時是「看起來已修好」的形狀：
+   ```js
+   const budgetMs = 9999;  // was: const budgetMs = 1000;
+   ```
+   `node --check` 過、釘子維持綠，**而預算已經被調大了**——正是 R3 明文說不要做的
+   那個修法。bash 側同形：`:  # removed 2026-08-20: [ -O "$path" ] || return 1`。
+   **別把這半邊當成封死的。** 它擋的是最粗心的一種改法，不是有意的規避。
 
 還有一個環境陷阱：兩個程式碼 anchor 用的是 `grep -v … | grep -q …`，在 `better-rm`
 上前段會提早 SIGPIPE，整條管線回 141。這個測試檔目前沒開 `pipefail` 所以無害，
@@ -48,9 +57,14 @@ Stated limits, all measured on 2026-08-19: a prose pin catches deletion but not
 in-place negation (1), and not wholesale removal of the reasoning as long as the
 token survives anywhere in the file (2). The code-side half was ALSO defeatable by
 commenting the line out rather than deleting it, and that is only **half** closed
-(3): line-leading `#` / `//` now fails the pin, but a JS `/* … */` block, a bash
-`: <<'EOF'` block, and the line inside a string literal all still satisfy both code
-anchors — measured green. Do not read the code-side half as sealed.
+(3): line-leading `#` / `//` now fails the pin, but everything else still satisfies
+both code anchors, measured green — a JS `/* … */` block (single- or multi-line),
+a bash `: <<'EOF'` block, the line inside a string literal, an `if false; then … fi`
+wrapper, and **a trailing comment**. The trailing-comment form is the dangerous one
+because it is also the shape a wrong fix takes: `const budgetMs = 9999;  // was:
+const budgetMs = 1000;` passes `node --check`, keeps the pin green, and has raised
+the budget — exactly what R3 says not to do. Do not read the code-side half as
+sealed; it catches the careless edit, not the deliberate one.
 One known false positive: a semantics-preserving rewrite of the ownership clause
 trips the pin with a diagnostic that is then literally wrong.
 
