@@ -501,6 +501,18 @@ const blocked = [
   'echo x <<<"y"\nrm -rf /etc',
   "cat <<<z\n/bin/rm -rf /etc",
   "echo x <<<y\n\nrm -rf /etc",
+  // ...and the interior is still scanned, so a substitution that really does
+  // run inside an arithmetic expression is still refused. This is the row that
+  // stops the arithmetic fix from becoming a hole.
+  // ...而內部仍然會被掃描,所以真的會在算術式裡執行的替換照樣被拒。這一列是防止
+  // 算術修法變成一個洞的那一列。
+  'echo $(( $(rm -rf /etc) ))',
+  'echo $(( 1 + $(/bin/rm -rf /etc) ))',
+  // The other side of that boundary: these three DO run under bash (verified
+  // by the same touch probe), so they must stay refused.
+  // 邊界的另一邊:這三個在 bash 下確實會執行,必須維持拒絕。
+  'echo $((`rm -rf /etc`))',
+  'echo $( (rm -rf /etc) )',
   'echo "a # b $(rm -rf /etc)"',
   "echo a#b $(rm -rf /etc)",
   'echo "$(a#b; rm -rf /etc)"',
@@ -793,6 +805,38 @@ const allowed = [
   // 一般的 here-string 用法仍然放行:操作元是資料,而那個命令不會刪東西。
   'grep foo <<<"$var"',
   'echo x <<<y',
+  // ARITHMETIC expansion is not a command substitution. `$((` was read as `$(`
+  // followed by a nested `(`, so the EXPRESSION was scanned as if the shell
+  // were about to run it: a dynamic first token made the command word
+  // unresolvable, the "an unresolvable command word must be assumed to be rm"
+  // rule then treated every later token as a deletion operand, and ordinary
+  // arithmetic was refused. A spaced division was the loudest symptom -- the
+  // `/` operator was read as the root directory and reported as
+  // "refused to remove protected directory: /".
+  // Nothing inside `$(( ))` ever executes as a command word, so that rule does
+  // not apply here at all. Measured 2026-08-29: these five shapes were all
+  // DENY, and the age idiom below was refused three separate times during one
+  // working session.
+  // 算術展開不是命令替換。`$((` 被讀成 `$(` 加一個巢狀的 `(`,於是「運算式」被當成
+  // 即將執行的命令來掃描:第一個 token 是動態展開就讓命令字不可知,而「不可知的命令字
+  // 必須假設是 rm」這條規則接著把後面每個 token 都當成刪除操作元。
+  // `$(( ))` 裡面沒有任何東西會以「命令字」的身分執行,所以那條規則在這裡根本不適用。
+  'echo $(( $x + $y ))',
+  'echo $(( $a / 2 ))',
+  'echo $(( $(date +%s) - $(stat -f %m /etc/hosts) ))',
+  'PCT=$(( $d * 100 / $a )); echo $PCT',
+  'echo $(( ($x + $y) * 2 ))',
+  // The `$( (subshell) )` boundary, anchored against real bash rather than
+  // reasoned about. bash treats `$((` as arithmetic unconditionally, so a
+  // command word inside it is arithmetic tokens that fail to parse -- it is
+  // never run, and refusing it would be a false block. A subshell needs the
+  // space: `$( (cmd) )`, which is in the blocked list and stays there.
+  // Measured with the deletion replaced by a touch: no marker file for these.
+  // `$( (subshell) )` 的邊界,用真 bash 定錨而不是推論。bash 對 `$((` 一律當算術,
+  // 裡面的命令字只是解析不了的算術 token,永遠不會執行;拒絕它才是誤擋。
+  'echo $((rm -rf /etc))',
+  'echo $(( rm -rf /etc ))',
+  'echo $(((rm -rf /etc)))',
   'while read -r l; do echo "$l"; done <<<"$text"',
   'echo $# ; ls',
   "ls # don't\necho ok",

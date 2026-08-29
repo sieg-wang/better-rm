@@ -585,7 +585,38 @@ function commandSubstitutions(command, noCommentSpans = []) {
     if (char === '$' && input[i + 1] === '(') {
       const nested = readParenthesized(input, i + 1);
       if (nested) {
-        commands.push(nested.command);
+        // `$((` is ARITHMETIC, not a command substitution wrapping a subshell.
+        // readParenthesized counts the inner '(' too, so for `$(( expr ))` it
+        // returns the whole `( expr )` -- and pushing that as a COMMAND is what
+        // caused the false refusals: the expression was scanned as if the shell
+        // were about to run it, a dynamic first token made the command word
+        // unresolvable, and the "an unresolvable command word must be assumed
+        // to be rm" rule turned every later token into a deletion operand.
+        // `echo $(( $a / 2 ))` was refused with "protected directory: /",
+        // because the division operator was read as the root directory.
+        // Nothing inside `$(( ))` executes as a command word, so that rule does
+        // not apply. The INTERIOR is still scanned, because a substitution
+        // inside an arithmetic expression really does run -- `$(( $(rm -rf
+        // /etc) ))` stays refused.
+        // The `$( (subshell) )` ambiguity is resolved conservatively: only a
+        // body with no command separator is treated as arithmetic, so a real
+        // subshell keeps the old handling.
+        // `$((` 是「算術」,不是包著 subshell 的命令替換。readParenthesized 連內層的 '('
+        // 也算進去,所以對 `$(( expr ))` 它回傳整個 `( expr )`——把那個當成「命令」推進去
+        // 正是誤拒的成因:運算式被當成即將執行的命令來掃描,第一個 token 是動態展開就讓
+        // 命令字不可知,而「不可知的命令字必須假設是 rm」接著把後面每個 token 都當成刪除
+        // 操作元。`$(( ))` 裡沒有任何東西會以命令字的身分執行。內部仍然會掃,因為算術式
+        // 裡的替換是真的會執行的。
+        const body = nested.command;
+        const looksArithmetic = input[i + 2] === '('
+          && body.startsWith('(')
+          && body.endsWith(')')
+          && !/[;&|\n]/.test(body);
+        if (looksArithmetic) {
+          commands.push(...commandSubstitutions(body.slice(1, -1), noCommentSpans));
+        } else {
+          commands.push(body);
+        }
         i = nested.end;
       }
       continue;
