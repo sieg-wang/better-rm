@@ -61,8 +61,21 @@ cat > "$P/racer.sh" <<'RACER'
 #!/bin/bash
 # RM 由呼叫端傳入真正的 rm 執行檔。這個迴圈一秒會跑幾百次，要是它打到 better-rm，
 # 就會往使用者真正的垃圾桶與刪除日誌灌幾百筆記錄。
-LOG="$1"; TARGET="$2"; STOP="$3"; RM="$4"
-while [ ! -f "$STOP" ]; do
+LOG="$1"; TARGET="$2"; STOP="$3"; RM="$4"; WORKDIR="$5"; PARENT="$6"
+# Three independent stop conditions, because the stop FILE alone is not one.
+# If the parent is SIGKILLed it never writes the file and its traps never run,
+# and this loop -- a few hundred iterations a second -- would busy-loop on a
+# core until the machine is rebooted. The workspace check and the parent check
+# each end it without cooperation from the parent, and the iteration cap ends it
+# even if both of those are somehow satisfied. None of them can shorten a real
+# measurement: the cap is far above the ~150 attempts the caller makes.
+# 三個彼此獨立的停止條件,因為「stop 檔案」本身不算一個:父程序若被 SIGKILL,它永遠不會
+#寫出那個檔案、traps 也不會跑,而這個一秒數百次的迴圈會霸著一顆核心直到重開機。
+MAX=2000000
+n=0
+while [ ! -f "$STOP" ] && [ -d "$WORKDIR" ] && kill -0 "$PARENT" 2>/dev/null; do
+    n=$((n + 1))
+    [ "$n" -ge "$MAX" ] && break
     "$RM" -f "$LOG"; ln -s "$TARGET" "$LOG"
     "$RM" -f "$LOG"; printf '# legit log\n' > "$LOG"
 done
@@ -70,7 +83,7 @@ RACER
 chmod +x "$P/racer.sh"
 
 # racer 自己的 `ln: File exists` 是這場競賽的正常噪音，收進工作區的檔案而不是洗版。
-"$P/racer.sh" "$LOG" "$TARGET" "$STOP" "$HS_RM" 2>"$P/racer.stderr" &
+"$P/racer.sh" "$LOG" "$TARGET" "$STOP" "$HS_RM" "$P" "$$" 2>"$P/racer.stderr" &
 RACER_PID=$!
 hs_track_bg "$RACER_PID"
 

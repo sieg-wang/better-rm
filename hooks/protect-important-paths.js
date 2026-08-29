@@ -347,6 +347,30 @@ function shellWords(command) {
       index = (lineEnd === -1 ? input.length : lineEnd) - 1;
     } else if (char === '"' || char === "'") {
       quote = char;
+    } else if (char === '<' && input[index + 1] === '<' && input[index + 2] === '<') {
+      // A here-STRING. It has no body, and the heredoc branch below already
+      // excludes it -- but only when the scan is looking at the FIRST '<'. The
+      // loop then advanced one character and looked again from the SECOND '<',
+      // where the next two characters are '<' and the delimiter, so `<<<y`
+      // parsed as '<' followed by a heredoc `<< y`. Everything after the
+      // newline became that heredoc's BODY, and a body is DATA: it goes back
+      // only to a shell carrier, and `echo` is not one, so it was never
+      // scanned as commands at all.
+      // Measured 2026-08-29 against bash 5.3 (deletion replaced with a touch,
+      // marker file appeared): `echo x <<<y` + newline + `rm -rf /etc` was
+      // ALLOWED while bash really ran the rm. Pre-existing -- it predates the
+      // comment rule and reproduces on the version before it.
+      // Consuming all three characters here is the fix: the scan can no longer
+      // land inside the sequence.
+      // 這是 here-string,沒有內文,而下面的 heredoc 分支確實排除了它——但只在掃描看著
+      // 「第一個」'<' 的時候。迴圈往前一格後從「第二個」'<' 再看一次,那裡後面正好是
+      // '<' 加結束標記,於是 `<<<y` 被解析成 '<' 加一個 heredoc `<< y`,換行之後的一切
+      // 都成了那個 heredoc 的內文——而內文是「資料」,只會交還給 shell carrier,
+      // echo 不是,所以它從來沒有被當成命令掃描過。
+      if (word) pushWord(word), word = '';
+      pushWord('<<<', true);
+      index += 2;
+      atWordStart = true;
     } else if (char === '<' && input[index + 1] === '<' && input[index + 2] !== '<') {
       // A HEREDOC, not two redirections. The body that follows is DATA: this
       // guard was tokenising it as shell, so a line of ordinary prose became a

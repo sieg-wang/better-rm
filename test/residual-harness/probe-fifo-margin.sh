@@ -23,6 +23,15 @@ HS_REPO="$(cd -- "$HS_SELF_DIR/../.." && pwd -P)"
 . "$HS_SELF_DIR/lib/harness.sh"
 
 hs_require_repo
+# This is the ONLY probe that runs better-rm against a FIFO deletion log with no
+# bound, and a FIFO with no reader is exactly what the regression it measures
+# looks like -- so it hung forever on its own subject. Demonstrated 2026-08-29:
+# with `--brm` pointed at a build whose `[ -f ]` guard was removed, the probe
+# never returned, its EXIT trap never ran, and it left its workspace behind in
+# TMPDIR. Same bound and same shape as probe-log-path-variants.sh.
+# 這是唯一一支在無界情況下讓 better-rm 對著 FIFO 刪除日誌跑的探測,而「沒有讀者的 FIFO」
+# 正是它要量的那個回歸的樣子——於是它被自己的受測對象卡死,連 EXIT trap 都沒跑到。
+hs_require_timeout
 
 BRM="$HS_REPO/better-rm"
 N=20
@@ -52,7 +61,14 @@ i=1
 while [ "$i" -le "$N" ]; do
     echo "v$i" > "$P/cwd/victim$i.txt"
     t0=$(hs_now)
-    hs_isolated "$P/cwd" "$BRM" "victim$i.txt" >/dev/null 2>&1
+    if ! hs_isolated "$P/cwd" "$HS_TIMEOUT_BIN" -s KILL 12 "$BRM" "victim$i.txt" >/dev/null 2>&1; then
+        # A killed run has no duration to report. Fail loudly rather than
+        # folding a 12-second timeout into the median as if it were a
+        # measurement -- that would turn the hang into a quiet outlier.
+        # 被殺掉的那一次沒有「耗時」可報。要大聲失敗,而不是把 12 秒摺進中位數當成量測值。
+        printf 'probe-fifo-margin: iteration %s did not finish within 12s -- the FIFO path is wedged, not slow\n' "$i" >&2
+        exit 1
+    fi
     t1=$(hs_now)
     hs_elapsed "$t0" "$t1" >> "$P/times.txt"
     i=$((i + 1))

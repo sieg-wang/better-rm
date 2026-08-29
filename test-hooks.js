@@ -486,6 +486,21 @@ const blocked = [
   "cat <<EOF\n# $(rm -rf /etc)\nEOF",
   "cat <<EOF\ntext # $(rm -rf /etc)\nEOF",
   "cat <<EOF\n# `rm -rf /etc`\nEOF",
+  // A here-STRING is three characters and has no body. The scan used to land on
+  // the SECOND '<' of `<<<`, read the remaining two as a heredoc operator, and
+  // turn every following line into that heredoc's BODY -- data, handed back
+  // only to a shell carrier, and `echo` is not one, so those lines were never
+  // scanned as commands at all. Measured 2026-08-29 against bash 5.3 with the
+  // deletion replaced by a touch: the marker file appeared, so bash really runs
+  // it. Pre-existing, and it reproduces on the version before the comment rule.
+  // here-string 是三個字元且沒有內文。掃描原本會落在 `<<<` 的「第二個」'<' 上,把剩下
+  // 兩個讀成 heredoc 運算子,於是後面每一行都變成那個 heredoc 的內文——而內文是資料,
+  // 只會交還給 shell carrier,echo 不是,所以那些行從來沒有被當成命令掃描過。
+  "echo x <<<y\nrm -rf /etc",
+  "echo x <<<y #\nrm -rf /etc",
+  'echo x <<<"y"\nrm -rf /etc',
+  "cat <<<z\n/bin/rm -rf /etc",
+  "echo x <<<y\n\nrm -rf /etc",
   'echo "a # b $(rm -rf /etc)"',
   "echo a#b $(rm -rf /etc)",
   'echo "$(a#b; rm -rf /etc)"',
@@ -773,6 +788,12 @@ const allowed = [
   'echo file#1 ; ls',
   'ls # rm -rf /etc',
   'ls\n# rm -rf /etc',
+  // Ordinary here-string use stays allowed: the operand is data for a command
+  // that does not delete, exactly as before the fix.
+  // 一般的 here-string 用法仍然放行:操作元是資料,而那個命令不會刪東西。
+  'grep foo <<<"$var"',
+  'echo x <<<y',
+  'while read -r l; do echo "$l"; done <<<"$text"',
   'echo $# ; ls',
   "ls # don't\necho ok",
 ];
