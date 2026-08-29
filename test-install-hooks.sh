@@ -2580,6 +2580,79 @@ assert_not_contains "opencode does not claim fail-closed before publication succ
 assert_contains "opencode reports that the fail-closed runtime was not published" \
     "$OPENCODE_STUB_PUBLISH_OUTPUT" "could not be published"
 
+# --- the behavioural probe must not have a size ceiling -------------------------
+# WHY (measured 2026-08-29): the probe handed the whole candidate hook to
+# `node -e` as ONE argv string. Linux caps a single argv string at
+# MAX_ARG_STRLEN (32 pages = 131072 bytes) and fails the exec with E2BIG past
+# it; macOS has no per-argument cap. The hook crossed the limit at 132201 bytes
+# (up from 124694) and every OpenCode runtime verification on the ubuntu CI
+# runner started failing, while all six suites stayed green on macOS. It failed
+# in the worst possible shape too: the probe reported its OWN failure as "this
+# hook does not deny", so a healthy install was refused and left a stub that
+# blocks every command under OpenCode.
+#
+# HONEST LIMIT OF THIS TEST: on macOS it passes with or without the fix, because
+# the ceiling does not exist there. It is red on Linux, which is where CI runs
+# and where the ceiling lives. The structural assertion below is the half that
+# is red everywhere.
+#
+# It deliberately pads far past the limit rather than relying on the shipped
+# hook's current size: today the real hook happens to be over 131072 bytes, so
+# the ordinary opencode tests exercise this by accident, and that coverage would
+# vanish silently the day someone trims the file.
+#
+# 為什麼(2026-08-29 量得):探測把整份候選 hook 當成「單一 argv 字串」交給 node -e。
+# Linux 對單一 argv 字串有 MAX_ARG_STRLEN(32 頁 = 131072 bytes)的上限,超過就 E2BIG;
+# macOS 沒有。hook 在 132201 bytes 跨過該線,ubuntu CI 上每一次 OpenCode runtime 驗證
+# 都開始失敗,而 macOS 上六個套件全綠。這個測試在 macOS 上不論修沒修都會過——它在 Linux
+# 上才會紅,而 CI 正是跑在 Linux。下面那條結構斷言則是在任何平台都會紅的那一半。
+OVERSIZED_REPO="$TMP_ROOT/oversized-installer"
+mkdir -p "$OVERSIZED_REPO"
+tar -C "$SCRIPT_DIR" --exclude .git -cf - . | tar -C "$OVERSIZED_REPO" -xf -
+{
+    printf '\n'
+    i=0
+    while [ "$i" -lt 3000 ]; do
+        printf '// argv-ceiling padding %s: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' "$i"
+        i=$((i + 1))
+    done
+} >> "$OVERSIZED_REPO/hooks/protect-important-paths.js"
+OVERSIZED_BYTES=$(wc -c < "$OVERSIZED_REPO/hooks/protect-important-paths.js" | tr -d ' ')
+if [ "$OVERSIZED_BYTES" -gt 131072 ]; then
+    pass "oversized fixture really is past the 131072-byte argv ceiling ($OVERSIZED_BYTES bytes)"
+else
+    fail "oversized fixture is only $OVERSIZED_BYTES bytes — the padding no longer clears MAX_ARG_STRLEN"
+fi
+
+OVERSIZED_PROJECT="$TMP_ROOT/oversized-project"
+make_repo "$OVERSIZED_PROJECT"
+assert_success "a hook past the argv ceiling still verifies" \
+    bash -c "cd '$OVERSIZED_PROJECT' && '$OVERSIZED_REPO/install-hooks.sh' -a opencode"
+assert_file "the oversized runtime hook was actually published" \
+    "$OVERSIZED_PROJECT/hooks/protect-important-paths.js"
+
+# The platform-independent half: the probe must execute the held bytes as a
+# FILE. Passing them as `-e <source>` is what created the ceiling, so a revert
+# to that shape reddens here on macOS too, before CI ever sees it.
+# 與平台無關的那一半:探測必須把握住的位元組當成「檔案」執行。回退成 `-e <source>`
+# 會在 macOS 上就先紅,不必等 CI。
+# grep -F, and against the FILE rather than through the shared assert helpers:
+# those pass the haystack as a shell argument and match with a BASIC regex, so a
+# needle containing [ ] silently becomes a character class and the assertion
+# reads as a failure whatever the file says. Measured while writing this test.
+# 用 grep -F 且直接比對檔案:共用 helper 會把 haystack 當 shell 參數傳並以 BRE 比對,
+# needle 裡的 [ ] 會靜默變成字元類,不論檔案內容為何都判失敗。
+if grep -qF 'hookArgs = ["-e", source]' "$INSTALLER"; then
+    fail "the probe does not pass candidate bytes through argv"
+else
+    pass "the probe does not pass candidate bytes through argv"
+fi
+if grep -qF 'hookArgs = [stagedPath]' "$INSTALLER"; then
+    pass "the probe executes the held bytes as a file"
+else
+    fail "the probe executes the held bytes as a file"
+fi
+
 echo ""
 echo "========================================"
 echo "Passed: $PASSED"

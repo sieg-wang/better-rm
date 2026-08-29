@@ -361,15 +361,17 @@ hook_denies_protected_deletion() {
     probe_script='
     const { spawnSync } = require("child_process");
     const fs = require("fs");
+    const os = require("os");
+    const path = require("path");
     const hookPath = process.argv[1];
     const useSource = process.env.BETTER_RM_HOOK_SOURCE_MODE === "source";
     let hookArgs = [hookPath];
+    let stagedDir = null;
     if (useSource) {
       try {
         // fd 3 is a read handle for the installer-held stage inode. Positional
         // reads leave its shared offset at zero, so a later cmp fallback still
-        // sees the complete candidate. Child processes intentionally do not
-        // inherit arbitrary descriptors, so they execute these bytes with -e.
+        // sees the complete candidate.
         const size = fs.fstatSync(3).size;
         const content = Buffer.alloc(size);
         let offset = 0;
@@ -378,17 +380,41 @@ hook_denies_protected_deletion() {
           if (count === 0) process.exit(1);
           offset += count;
         }
-        // `node -e` does not make the evaluated source its main module, so a
-        // normal `if (require.main === module) main()` CLI guard stays false.
-        // Start that same entry point explicitly after evaluating the held
-        // bytes; this preserves the real hook stdin/stdout contract.
-        const source = `${content.toString("utf8")}
-if (typeof main === "function" && require.main !== module) main();`;
-        hookArgs = ["-e", source];
+        // These bytes used to be handed to `node -e` as ONE argv string. Linux
+        // caps a single argv string at MAX_ARG_STRLEN (32 pages = 131072 bytes)
+        // and fails the exec with E2BIG past it; macOS has no per-argument cap,
+        // so the ceiling was invisible on a developer machine and surfaced only
+        // on the ubuntu CI runner -- and it surfaced as "this hook does not
+        // deny", i.e. the probe reporting its own failure as a bad hook, which
+        // is the worst shape a fail-closed check can take: it refuses a healthy
+        // install and leaves a stub that blocks every command.
+        // Measured 2026-08-29: the hook crossed the limit at 132201 bytes (up
+        // from 124694) and every OpenCode runtime verification on Linux began
+        // failing while all six suites stayed green on macOS.
+        // Writing the bytes we already hold to a private file removes the
+        // ceiling and keeps the property source mode exists for: what runs is
+        // the content of the HELD inode, never a re-read of the candidate path.
+        // Running it as a FILE also drops the old `-e` bootstrap line, because
+        // `require.main === module` is true again for the real CLI guard.
+        // 這些位元組原本是以「單一 argv 字串」交給 node -e 的。Linux 對單一 argv 字串有
+        // MAX_ARG_STRLEN(32 頁 = 131072 bytes)的硬上限,超過就 E2BIG;macOS 沒有這個
+        // per-argument 上限,所以這道天花板在開發機上看不見,只在 ubuntu CI 上冒出來——
+        // 而且它冒出來的樣子是「這個 hook 不會拒絕」,也就是探測把自己的失敗偽裝成壞掉的
+        // hook,那是 fail-closed 檢查最糟的一種形狀。
+        stagedDir = fs.mkdtempSync(path.join(os.tmpdir(), "better-rm-probe-"));
+        const stagedPath = path.join(stagedDir, "candidate.js");
+        fs.writeFileSync(stagedPath, content, { mode: 0o600 });
+        hookArgs = [stagedPath];
       } catch (_error) {
         process.exit(1);
       }
     }
+    const done = (code) => {
+      if (stagedDir !== null) {
+        try { fs.rmSync(stagedDir, { recursive: true, force: true }); } catch (_e) {}
+      }
+      process.exit(code);
+    };
     const commands = [
       "rm -rf /",
       "rm -rf /etc",
@@ -407,10 +433,10 @@ if (typeof main === "function" && require.main !== module) main();`;
         encoding: "utf8",
         timeout: 5000,
       });
-      if (result.error || result.status !== 0) process.exit(1);
-      if (!/"permissionDecision":"deny"/.test(result.stdout)) process.exit(1);
+      if (result.error || result.status !== 0) done(1);
+      if (!/"permissionDecision":"deny"/.test(result.stdout)) done(1);
     }
-    process.exit(0);
+    done(0);
 '
     if [ "$candidate_mode" = source ]; then
         BETTER_RM_HOOK_SOURCE_MODE=source node -e "$probe_script" "$1" 3<&6 2>/dev/null
