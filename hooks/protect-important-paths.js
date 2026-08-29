@@ -224,6 +224,22 @@ function shellWords(command) {
   let wordHasDynamicExpansion = false;
   let quote = '';
   let escaped = false;
+  // Whether the NEXT character would begin a new word. Only a '#' in that
+  // position opens a comment -- bash's own rule. This has to be a FLAG and not
+  // `word === ''`: a closed EMPTY quote leaves `word` empty while the shell is
+  // still inside a word, so `ls ""#; /bin/rm -rf ~/.ssh` read as a comment, the
+  // skip ran to end of LINE, and the whole ';'-separated deletion after it
+  // vanished -- reopening a bypass this file had already closed. Measured
+  // 2026-08-29 against bash 5.3: `ls '#'` runs, then the rm really executes.
+  // The first version of the comment rule used `word === ''` and argued in a
+  // comment that it was harmless because `#x` is not a protected path. That
+  // argument reasoned about the rest of the WORD and missed that the skip runs
+  // to the end of the LINE. Do not reintroduce it.
+  // 下一個字元會不會是新的字的開頭。只有在那個位置的 '#' 才開啟註解——這是 bash 自己的
+  // 規則。必須是「旗標」而不是 `word === ''`：關閉的空引號會讓 word 仍為空字串，但 shell
+  // 其實還在一個字裡面，於是 `ls ""#; /bin/rm -rf ~/.ssh` 被讀成註解、跳到「行尾」，把後面
+  // 整條以 ';' 分隔的刪除指令一起吞掉——重新打開了本檔早已關上的繞過。
+  let atWordStart = true;
 
   // Whether the word at this index was written as an unquoted shell OPERATOR
   // rather than as text that happens to spell one. `;`, `\;` and `';'` all
@@ -247,6 +263,10 @@ function shellWords(command) {
 
   for (let index = 0; index < input.length; index += 1) {
     const char = input[index];
+    // Default to "inside a word"; only the branches that END a word set it back.
+    // 預設為「在字裡面」，只有真正結束一個字的分支才把它設回 true。
+    const wasAtWordStart = atWordStart;
+    atWordStart = false;
     if (escaped) {
       // A backslash-newline is a LINE CONTINUATION, and bash deletes BOTH
       // characters before it tokenises anything -- unquoted and inside double
@@ -305,6 +325,26 @@ function shellWords(command) {
         // Unbalanced '(': keep the old character-by-character behaviour.
         word += char;
       }
+    } else if (char === '#' && wasAtWordStart) {
+      // A COMMENT, and it runs to the end of the line. Without this the '#' and
+      // everything after it were tokenised as shell, and an ODD quote inside a
+      // comment -- "# don't", '# say "hi' -- opened a quote state that ran to the
+      // end of the INPUT. Every command on every following line was swallowed
+      // into that one quoted word and never scanned, so
+      // `git status # it's fine` + newline + `/bin/rm -rf ~/.ssh` was ALLOWED.
+      // `/bin/rm` also sidesteps the rm->better-rm alias, so both layers missed
+      // it. Measured 2026-08-29. This is bash's own rule, and the `word === ''`
+      // half is what keeps it from over-reaching: a '#' only opens a comment at
+      // the START of a word, so `file#1`, `http://x#frag`, `${#arr[@]}` and `$#`
+      // all keep their '#' as ordinary text.
+      // The newline is deliberately NOT consumed: the heredoc branches below key
+      // on it, and eating it here would detach a body from its operator.
+      // 這是註解，一路到行尾。少了這個分支，'#' 與其後全部被當 shell 斷詞，而註解裡一個
+      // 落單的引號會開啟一路吃到「輸入結尾」的引號狀態——後面每一行的每一條命令都被吞進
+      // 那個字裡，從未被掃描。「字首」那一半是防止過度延伸的關鍵。刻意不吃掉換行，否則
+      // 下面的 heredoc 分支會與內文失聯。
+      const lineEnd = input.indexOf('\n', index);
+      index = (lineEnd === -1 ? input.length : lineEnd) - 1;
     } else if (char === '"' || char === "'") {
       quote = char;
     } else if (char === '<' && input[index + 1] === '<' && input[index + 2] !== '<') {
@@ -333,6 +373,7 @@ function shellWords(command) {
         operatorIndex, delimiter: parsed.delimiter, stripTabs, quoted: parsed.quoted,
       });
       index = parsed.end - 1;
+      atWordStart = true;
     } else if (char === '\n' && pendingHeredocs.length > 0) {
       // The bodies begin on the next line, in the order the operators appeared.
       // 內文從下一行開始，順序與運算子出現的順序相同。
@@ -379,11 +420,14 @@ function shellWords(command) {
       pendingHeredocs.length = 0;
       pushWord('\n', true);
       index = Math.min(position, input.length) - 1;
+      atWordStart = true;
     } else if (';&|()<>\n'.includes(char)) {
       if (word) pushWord(word), word = '';
       pushWord(char, true);
+      atWordStart = true;
     } else if (/\s/.test(char)) {
       if (word) pushWord(word), word = '';
+      atWordStart = true;
     } else {
       if (char === '$' || char === '`') wordHasDynamicExpansion = true;
       word += char;
@@ -404,12 +448,36 @@ function readParenthesized(input, openIndex) {
   let depth = 1;
   let innerQuote = '';
   let innerEscaped = false;
+  // Where the ')' scan is, is also where a COMMENT would start -- and a comment
+  // hides both quotes and parentheses from this scan. Same rule as the tokenizer:
+  // '#' opens a comment only unquoted and only at the start of a word.
+  // 找 ')' 的掃描同時也要認得註解——註解會同時遮蔽引號與括號。規則與 tokenizer 相同。
+  let atWordStart = true;
   for (let i = openIndex + 1; i < input.length; i += 1) {
     const char = input[i];
+    const wasAtWordStart = atWordStart;
+    atWordStart = false;
     if (innerEscaped) {
       innerEscaped = false;
     } else if (char === '\\' && innerQuote !== "'") {
       innerEscaped = true;
+    // `!innerQuote` here is defence in depth, not the load-bearing guard: the
+    // word-start update below is itself gated on `!innerQuote`, so atWordStart
+    // can never be true inside quotes and a mutant that deletes either one alone
+    // is EQUIVALENT -- no test can kill it. Measured 2026-08-29; recorded so the
+    // next reviewer does not go looking for the missing test.
+    // 這裡的 `!innerQuote` 是縱深防禦而非承重的守衛:下面更新字首狀態那一行本身就被
+    // `!innerQuote` 包住,所以引號內 atWordStart 永遠不會是 true。單獨刪掉其中任一個都是
+    // 等價突變,沒有測試殺得掉。記在這裡,免得下一個審查者去找那個不存在的測試。
+    } else if (char === '#' && !innerQuote && wasAtWordStart) {
+      const lineEnd = input.indexOf('\n', i);
+      // A comment with no newline after it swallows the closing ')' too, which is
+      // exactly what bash does -- `echo $(ls # x)` is an unterminated substitution
+      // and a syntax error. Returning null keeps the caller's existing fallback.
+      // 沒有換行的註解會把收尾的 ')' 一起吃掉，這正是 bash 的行為（該式子是語法錯誤）。
+      if (lineEnd === -1) return null;
+      i = lineEnd;
+      atWordStart = true;
     } else if (innerQuote) {
       if (char === innerQuote) innerQuote = '';
       else if (innerQuote === '"' && char === '$' && input[i + 1] === '(') {
@@ -429,18 +497,36 @@ function readParenthesized(input, openIndex) {
         return { command: input.slice(openIndex + 1, i), end: i };
       }
     }
+    if (!innerQuote && !innerEscaped && /[\s;&|()<>]/.test(char)) atWordStart = true;
   }
   return null;
 }
 
-function commandSubstitutions(command) {
+// noCommentSpans: [start, end) offsets of UNQUOTED heredoc bodies. Inside a
+// heredoc body a '#' is ordinary text, not a comment -- but `$( )` in an
+// unquoted body IS expanded, before the reading command ever sees the result.
+// Applying the comment rule there hid every substitution after a '#' on that
+// line, so `cat <<EOF` + newline + `# $(rm -rf ~/.ssh)` + newline + `EOF` was
+// ALLOWED while bash really ran the deletion (measured 2026-08-29). The spans
+// scope the NEW rule only; substitution finding is untouched, so a `$(` that
+// opens outside a body and closes inside it still resolves exactly as before.
+// noCommentSpans:未加引號 heredoc 內文的 [start, end) 位移。內文裡的 '#' 是普通文字而不是
+// 註解，但那裡的 `$( )` 是真的會展開的。把註解規則套進去會藏掉該行 '#' 之後的每一個替換。
+function commandSubstitutions(command, noCommentSpans = []) {
   const input = String(command || '');
   const commands = [];
+  const inNoCommentSpan = (i) => noCommentSpans.some(([a, b]) => i >= a && i < b);
   let quote = '';
   let escaped = false;
+  // Same comment rule as the tokenizer. This scanner has no word accumulator, so
+  // "start of a word" is tracked explicitly instead of read off `word === ''`.
+  // 與 tokenizer 相同的註解規則。這個掃描器沒有字的累加器，所以「字首」用旗標明確追蹤。
+  let atWordStart = true;
 
   for (let i = 0; i < input.length; i += 1) {
     const char = input[i];
+    const wasAtWordStart = atWordStart;
+    atWordStart = false;
     if (escaped) {
       escaped = false;
       continue;
@@ -459,6 +545,17 @@ function commandSubstitutions(command) {
     }
     if (!quote && (char === '"' || char === "'")) {
       quote = char;
+      continue;
+    }
+    // `!quote` is defence in depth here for the same reason as in
+    // readParenthesized: the word-start update at the bottom of this loop is
+    // gated on `!quote`, so deleting either alone is an equivalent mutant.
+    // 這裡的 `!quote` 與 readParenthesized 同理,是縱深防禦;單獨刪掉是等價突變。
+    if (!quote && char === '#' && wasAtWordStart && !inNoCommentSpan(i)) {
+      const lineEnd = input.indexOf('\n', i);
+      if (lineEnd === -1) break;
+      i = lineEnd;
+      atWordStart = true;
       continue;
     }
     if (char === '$' && input[i + 1] === '(') {
@@ -494,6 +591,7 @@ function commandSubstitutions(command) {
         i = end;
       }
     }
+    if (!quote && /[\s;&|()<>]/.test(char)) atWordStart = true;
   }
   return commands;
 }
@@ -1364,7 +1462,14 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
     }
   }
 
-  const substitutions = commandSubstitutions(scannable);
+  // Unquoted bodies stay in `scannable` (their substitutions really run), so the
+  // comment rule has to be switched off across exactly those spans.
+  // 未加引號的內文仍留在 scannable 裡（它們的替換是真的會執行），所以註解規則必須在正好
+  // 那些區間上關閉。
+  const unquotedBodySpans = (words.heredocs || [])
+    .filter((entry) => !entry.quoted)
+    .map((entry) => [entry.bodyStart, entry.bodyEnd]);
+  const substitutions = commandSubstitutions(scannable, unquotedBodySpans);
   if (substitutions.length > 0) {
     if (depth >= 8) targets.push('/');
     else {

@@ -446,6 +446,50 @@ const blocked = [
   // The outer single quotes keep the continuation literal, so it is the INNER
   // shell that joins the lines -- the nested parse has to remove it too.
   "bash -c 'rm -rf \\\n/boot'",
+  // A '#' COMMENT is not shell. Three separate scanners had to learn bash's rule
+  // -- shellWords, readParenthesized and commandSubstitutions -- and each of the
+  // rows below kills the mutant that deletes one specific guard. Every verdict
+  // here was checked against real bash 5.3 by replacing the deletion with a
+  // touch and seeing whether the marker file appeared; nothing below is reasoned
+  // about, all of it is measured (2026-08-29).
+  //
+  // 1) An odd quote inside a comment used to open a quote state that ran to the
+  //    end of the INPUT, swallowing every later command. "# don't" / "# it's" is
+  //    a comment an agent writes by hand, and `/bin/rm` also sidesteps the
+  //    rm->better-rm alias, so both layers missed it.
+  // 2) `""#` -- a '#' straight after a CLOSED EMPTY quote. The shell is still
+  //    inside a word there, so it is NOT a comment; reading it as one skipped to
+  //    end of LINE and dropped the whole ';'-separated deletion after it. This
+  //    row exists because the first version of the fix got exactly this wrong.
+  // 3) A '#' inside an UNQUOTED heredoc body is ordinary text, and `$( )` there
+  //    really is expanded before the reading command sees it.
+  // 4) A '#' that is not at the start of a word (a#b), or is inside quotes, is
+  //    not a comment -- and a substitution after it must still be found.
+  //
+  // '#' 註解不是 shell。三個掃描器都必須學會 bash 的規則,下面每一列都殺掉「刪掉某一道
+  // 特定守衛」的突變。每個判定都用真 bash 5.3 驗證過(把刪除換成 touch 看標記檔有沒有
+  // 出現),沒有一條是推論來的。
+  "git status # it's fine\n/bin/rm -rf /etc",
+  "ls # don't\nrm -rf /etc",
+  'ls # say "hi\nrm -rf /etc',
+  "echo $(ls # it's\nrm -rf /etc)",
+  // Inside double quotes shellWords never tokenises the interior, so this one
+  // reaches the deletion ONLY through readParenthesized understanding the
+  // comment. It is the single row that kills the readParenthesized mutant.
+  // 在雙引號裡 shellWords 不會斷詞內部,所以這一列只能靠 readParenthesized 認得註解才走
+  // 得到刪除指令——它是唯一殺掉 readParenthesized 突變的一列。
+  'echo "$(ls # it\'s\nrm -rf /etc)"',
+  "echo `ls # it's\nrm -rf /etc`",
+  'ls ""#; /bin/rm -rf /etc',
+  "ls ''#; rm -rf /etc",
+  'ls ""#| rm -rf /etc',
+  "cat <<EOF\n# $(rm -rf /etc)\nEOF",
+  "cat <<EOF\ntext # $(rm -rf /etc)\nEOF",
+  "cat <<EOF\n# `rm -rf /etc`\nEOF",
+  'echo "a # b $(rm -rf /etc)"',
+  "echo a#b $(rm -rf /etc)",
+  'echo "$(a#b; rm -rf /etc)"',
+  "echo \"$(grep ' #' f; rm -rf /etc)\"",
 ];
 
 const allowed = [
@@ -709,6 +753,28 @@ const allowed = [
   // 不可知，於是假設是 rm，操作元被以 '/' 為目標拒絕。普通的多行指令被擋，且無從蓋過。
   'node run.js \\\n  "$HOME" "$HOME/projects"',
   'echo a \\\n  "$PWD/b"',
+  // The negative half of the comment rule -- the half that keeps it from becoming
+  // a blanket deny, and from turning a comment that merely MENTIONS a deletion
+  // into a refusal. A '#' opens a comment only when it is unquoted AND starts a
+  // word, which is bash's own rule. The first row is load-bearing in the other
+  // direction too: a substitution inside a real comment is never run by bash, so
+  // collecting it would be a false refusal, and it is the row that kills the
+  // commandSubstitutions comment mutant.
+  // 註解規則的反面——讓它不變成全面拒絕,也不把「提到刪除」的註解當成刪除。'#' 只有在未加
+  // 引號「且位於字首」時才開啟註解。第一列同時是反方向的支柱:真註解裡的替換 bash 從不執行。
+  'ls # $(rm -rf /etc)',
+  'curl http://example.com/y#frag ; ls',
+  'echo ${#arr[@]} ; ls',
+  'echo "a # b" ; ls',
+  "echo '# rm -rf /etc' ; ls",
+  'echo "" # rm -rf /etc',
+  "cat <<'EOF'\n# rm -rf /etc\nEOF",
+  "cat <<'EOF' # note\nrm -rf /etc\nEOF",
+  'echo file#1 ; ls',
+  'ls # rm -rf /etc',
+  'ls\n# rm -rf /etc',
+  'echo $# ; ls',
+  "ls # don't\necho ok",
 ];
 
 // Finding: a shell carrier nested past the recursion depth cap (8) must fail
