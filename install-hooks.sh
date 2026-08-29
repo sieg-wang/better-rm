@@ -406,6 +406,16 @@ hook_denies_protected_deletion() {
         fs.writeFileSync(stagedPath, content, { mode: 0o600 });
         hookArgs = [stagedPath];
       } catch (_error) {
+        // Clean up here too. mkdtemp succeeds before writeFileSync, so a failure
+        // between them (disk full, EACCES) reached this exit with the directory
+        // already created -- reachable without any mutation, and it would leave
+        // a 0700 directory behind on exactly the runs that are already going
+        // wrong.
+        // 這裡也要清理。mkdtemp 先於 writeFileSync 成功,兩者之間失敗(磁碟滿、EACCES)
+        // 會帶著已建好的目錄走到這個 exit——不需要任何突變就到得了。
+        if (stagedDir !== null) {
+          try { fs.rmSync(stagedDir, { recursive: true, force: true }); } catch (_e) {}
+        }
         process.exit(1);
       }
     }
