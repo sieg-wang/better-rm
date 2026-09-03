@@ -19,6 +19,12 @@ PUSH=1
 CI_WAIT_TIMEOUT_SECONDS=1800
 CI_WAIT_INTERVAL_SECONDS=15
 CI_WORKFLOW_FILE="ci-release.yml"
+# Push and `gh` must both land on the sieg-wang fork, never the doggy8088
+# upstream: `git push` (no explicit remote) already tracks mine/main, but
+# `gh`'s ambient repo-resolution picks the upstream fork instead, so every
+# gh call below is pinned with --repo rather than left to resolve on its own.
+RELEASE_REMOTE="mine"
+RELEASE_GH_REPO="sieg-wang/better-rm"
 
 RELEASE_FILES=(
   "CHANGELOG.md"
@@ -361,7 +367,7 @@ run_release() {
   previous_tag="$(git -C "$PROJECT" tag --sort=-creatordate | grep -m 1 "^${VERSION_PREFIX}[0-9]\+\.[0-9]\+\.[0-9]\+$" || true)"
   local previous_tag_or_head=""
   local changed
-  local -a push_cmd=(git -C "$PROJECT" push origin HEAD --follow-tags)
+  local -a push_cmd=(git -C "$PROJECT" push "$RELEASE_REMOTE" HEAD --follow-tags)
   local branch
   local sha
   local release_notes_file
@@ -433,6 +439,7 @@ run_release() {
       while [[ $SECONDS -lt $deadline ]]; do
         run_count=$((run_count + 1))
         run_info="$(gh run list \
+          --repo "$RELEASE_GH_REPO" \
           --workflow "$CI_WORKFLOW_FILE" \
           --limit 20 \
           --json status,conclusion,url,headSha,createdAt \
@@ -470,7 +477,7 @@ run_release() {
       echo "確認 Release 物件建立中（標籤 ${tag}）。"
       deadline=$((SECONDS + CI_WAIT_TIMEOUT_SECONDS))
       while [[ $SECONDS -lt $deadline ]]; do
-        if gh release view "${tag}" --json id >/dev/null 2>&1; then
+        if gh release view "${tag}" --repo "$RELEASE_GH_REPO" --json id >/dev/null 2>&1; then
           release_ready=1
           break
         fi
@@ -510,7 +517,7 @@ run_release() {
       if [[ -z "$release_files_list" ]]; then
         release_files_list="- 無可追蹤變更檔案"
       fi
-      release_url="$(gh release view "$tag" --json url --jq '.url' || true)"
+      release_url="$(gh release view "$tag" --repo "$RELEASE_GH_REPO" --json url --jq '.url' || true)"
 
       release_notes_file="$(mktemp)"
       {
@@ -549,7 +556,7 @@ run_release() {
       } > "$release_notes_file"
 
       echo "更新 GitHub Release 內容：${tag}"
-      gh release edit "${tag}" --notes-file "$release_notes_file"
+      gh release edit "${tag}" --repo "$RELEASE_GH_REPO" --notes-file "$release_notes_file"
       rm -f "$release_notes_file"
 
       echo "Release Note 更新完成。"
@@ -564,9 +571,9 @@ run_release() {
   echo "  git -C \"$PROJECT\" commit -m \"chore(release): bump to ${version}\""
   echo "  git -C \"$PROJECT\" tag -a ${tag} -m \"Release ${tag}\""
   if [[ "$PUSH" -eq 1 ]]; then
-    echo "  git -C \"$PROJECT\" push origin HEAD --follow-tags   # 推播後由 CI 建立 GitHub Release"
+    echo "  git -C \"$PROJECT\" push $RELEASE_REMOTE HEAD --follow-tags   # 推播後由 CI 建立 GitHub Release"
   else
-    echo "  git -C \"$PROJECT\" push origin HEAD --follow-tags   # 已設定 --no-push，需手動改執行"
+    echo "  git -C \"$PROJECT\" push $RELEASE_REMOTE HEAD --follow-tags   # 已設定 --no-push，需手動改執行"
   fi
   echo "如不直接提交，請先確認已在 git diff 中檢視版本同步情形。"
 }

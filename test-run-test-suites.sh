@@ -146,6 +146,12 @@ printf 'installer\n' >> "$BETTER_RM_RUNNER_LOG"
 exit "${BETTER_RM_INSTALLER_STATUS:-0}"
 EOF
 
+cat > "$FIXTURE/test-bump-and-release.sh" <<'EOF'
+#!/bin/bash
+printf 'release\n' >> "$BETTER_RM_RUNNER_LOG"
+exit "${BETTER_RM_RELEASE_STATUS:-0}"
+EOF
+
 # One fake node stands in for both Node suites, so it has to tell them apart by
 # the script it was handed. A stub that logged the same name for both would let
 # the runner drop either suite while the manifest still looked complete.
@@ -168,7 +174,8 @@ exit 1
 EOF
 
 chmod +x "$FIXTURE/test-run-test-suites.sh" "$FIXTURE/test-better-rm.sh" \
-    "$FIXTURE/test-install.sh" "$FIXTURE/test-install-hooks.sh" "$FAKE_BIN/node"
+    "$FIXTURE/test-install.sh" "$FIXTURE/test-install-hooks.sh" \
+    "$FIXTURE/test-bump-and-release.sh" "$FAKE_BIN/node"
 
 # The contract itself is part of the public manifest. The workflow executes it
 # independently too, so either path catches omission of the other.
@@ -179,7 +186,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$CONTRACT_FAIL_LOG" \
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || CONTRACT_FAIL_STATUS=$?
 assert_equal "runner reports an aggregation-contract-only failure" "1" "$CONTRACT_FAIL_STATUS"
 assert_equal "runner completes the manifest after an aggregation-contract failure" \
-    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller')" \
+    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller\nrelease')" \
     "$(cat "$CONTRACT_FAIL_LOG" 2>/dev/null)"
 
 # The earliest suite fails. The public runner must still invoke both later suites,
@@ -191,7 +198,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$FAIL_LOG" BETTER_RM_CORE_STATUS=17
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || FAIL_STATUS=$?
 assert_equal "runner reports aggregate failure" "1" "$FAIL_STATUS"
 assert_equal "runner continues through all suites after the first failure" \
-    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller')" "$(cat "$FAIL_LOG" 2>/dev/null)"
+    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$FAIL_LOG" 2>/dev/null)"
 
 # Each later suite gets its own failing leg. Otherwise a runner that aggregates
 # only the first command's status still satisfies the continuation test above.
@@ -201,7 +208,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$HOOK_FAIL_LOG" BETTER_RM_HOOK_STAT
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || HOOK_FAIL_STATUS=$?
 assert_equal "runner reports a runtime-hook-only failure" "1" "$HOOK_FAIL_STATUS"
 assert_equal "runner completes the manifest after a runtime-hook failure" \
-    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller')" "$(cat "$HOOK_FAIL_LOG" 2>/dev/null)"
+    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$HOOK_FAIL_LOG" 2>/dev/null)"
 
 # The guard-parity suite reserves a distinct exit code (99) for "the probe itself
 # is broken". The aggregator must treat that as a failure like any other, or a
@@ -214,7 +221,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$PARITY_FAIL_LOG" BETTER_RM_PARITY_
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || PARITY_FAIL_STATUS=$?
 assert_equal "runner reports a guard-parity-only failure" "1" "$PARITY_FAIL_STATUS"
 assert_equal "runner completes the manifest after a guard-parity failure" \
-    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller')" "$(cat "$PARITY_FAIL_LOG" 2>/dev/null)"
+    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$PARITY_FAIL_LOG" 2>/dev/null)"
 
 SOURCE_INSTALLER_FAIL_LOG="$TMP_ROOT/source-installer-fail.log"
 SOURCE_INSTALLER_FAIL_STATUS=0
@@ -223,7 +230,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$SOURCE_INSTALLER_FAIL_LOG" \
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || SOURCE_INSTALLER_FAIL_STATUS=$?
 assert_equal "runner reports a source-installer-only failure" "1" "$SOURCE_INSTALLER_FAIL_STATUS"
 assert_equal "runner records the complete manifest on a source-installer failure" \
-    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller')" \
+    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller\nrelease')" \
     "$(cat "$SOURCE_INSTALLER_FAIL_LOG" 2>/dev/null)"
 
 INSTALLER_FAIL_LOG="$TMP_ROOT/installer-fail.log"
@@ -233,7 +240,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$INSTALLER_FAIL_LOG" \
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || INSTALLER_FAIL_STATUS=$?
 assert_equal "runner reports an installer-only failure" "1" "$INSTALLER_FAIL_STATUS"
 assert_equal "runner records the complete manifest on an installer failure" \
-    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller')" "$(cat "$INSTALLER_FAIL_LOG" 2>/dev/null)"
+    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$INSTALLER_FAIL_LOG" 2>/dev/null)"
 
 PASS_LOG="$TMP_ROOT/pass.log"
 PASS_STATUS=0
@@ -241,7 +248,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$PASS_LOG" \
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || PASS_STATUS=$?
 assert_equal "runner succeeds when every suite succeeds" "0" "$PASS_STATUS"
 assert_equal "successful runner invokes each suite exactly once" \
-    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller')" "$(cat "$PASS_LOG" 2>/dev/null)"
+    "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$PASS_LOG" 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
 # 解析檢查掃描：每一個追蹤中的 shell 與 JS 檔（含 better-rm 自己）都必須解析得過。

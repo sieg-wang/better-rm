@@ -36,6 +36,7 @@ run_suite "runtime hooks" node "$SCRIPT_DIR/test-hooks.js"
 run_suite "guard parity" node "$SCRIPT_DIR/test-guard-parity.js"
 run_suite "install/update provenance" "$SCRIPT_DIR/test-install.sh"
 run_suite "hook installer" "$SCRIPT_DIR/test-install-hooks.sh"
+run_suite "release script remote targeting" "$SCRIPT_DIR/test-bump-and-release.sh"
 
 if [ "$FAILED" -ne 0 ]; then
     printf '\nOne or more repository test suites failed.\n' >&2
