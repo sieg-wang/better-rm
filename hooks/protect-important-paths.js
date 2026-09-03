@@ -826,6 +826,77 @@ function hasUnresolvedTargetExpansion(isDynamic) {
 // 會讓 OpenCode runtime hook 驗不過，安裝程式於是發布 fail-closed 替代品，拒掉每一次工具呼叫。
 const UNRESOLVED_TARGET = '\u0000unresolved:';
 
+// A shell carrier whose SCRIPT this gate could not read: it arrived on a pipe,
+// through a process substitution, or as the output of a command substitution
+// inside the carrier's own here-string or heredoc body. Same sentinel
+// discipline as UNRESOLVED_TARGET above -- including the reason it is written as
+// an ESCAPE and never as a raw byte -- and the same reason for existing: the
+// refusal has to say what it actually is, not borrow the protected-directory
+// wording for a path the command never named. It carries the SHAPE
+// (`curl | bash`) so the message can quote the command rather than describe it.
+// carrier 的腳本這道閘門讀不到：它從 pipe、process substitution，或 carrier 自己的
+// here-string／heredoc 內文裡的命令替換輸出進來。與上面的 UNRESOLVED_TARGET 同一套規矩
+// （包含為什麼寫成跳脫序列而不是原始位元組），存在的理由也相同：拒絕訊息必須說出它真正是
+// 什麼，不能借用受保護目錄那套措辭去講一條命令根本沒寫的路徑。它帶著「形狀」
+// （`curl | bash`），讓訊息可以引用命令本文而不是描述它。
+const UNSCANNABLE_SCRIPT = '\u0000unscannable:';
+
+// The receiving end of a pipe is a command word this gate cannot resolve, and
+// nothing after it names a file to read. It may be a shell taking its script
+// from the pipe, so it is refused -- but it is NOT the refusal above, and the
+// difference is the message: nothing here is known to be a shell, so telling the
+// reader that this command "feeds a script into a shell" and pointing at
+// PIPED_SCRIPT_EXCEPTIONS describes a command they did not write and offers a
+// knob that cannot help them. Measured 2026-09-03: `git log | $PAGER` and
+// `ps aux | "$HOME/bin/filter.sh"` both received exactly that message. The second
+// is now resolved and allowed; the first still refuses, with wording that says
+// what actually happened and how to spell it so it does not.
+// 管線的接收端是一個這道閘門解不開的命令字，而它後面沒有任何字指出要讀哪個檔案。它可能是
+// 一個從 pipe 讀腳本的 shell，所以拒絕——但它不是上面那一種拒絕，差別就在訊息：這裡沒有
+// 任何東西被認定是 shell，跟使用者說「這條命令把腳本餵給 shell」再叫他去改
+// PIPED_SCRIPT_EXCEPTIONS，是在描述一條他沒有寫的命令、並給他一個幫不上忙的旋鈕。
+const UNREADABLE_PIPE_TARGET = '\u0000pipe-target:';
+
+// The install routes exempted from the rule above, as raw URL text prefixes.
+// Every entry is scheme + host + owner/repo and MUST end with '/': a bare host
+// would except every repository on that host, a scheme-less entry would match
+// inside a longer host (`raw.githubusercontent.com.evil.tld`), and the trailing
+// slash is what rejects `better-rm-evil`. Literal startsWith, no wildcards, no
+// port spellings, no `http://` -- it should stay this simple, and extending it
+// is a user's decision, which is why the refusal message names the constant.
+// Deliberately NOT listed: `doggy8088/better-rm` (the upstream this repo is
+// forked from -- no route in this README cites it, and this repo's own release
+// path targets sieg-wang), and `github.com/sieg-wang/better-rm` (the HTML host,
+// which nothing pipes from).
+// WHAT THIS LIST IS NOT: an identity check. It matches text on the command line,
+// so anything that can write the command can write the prefix, and this gate
+// cannot verify what the server returns. Its job is to stop the sound rule from
+// refusing this project's own documented install route (README.md), never to
+// establish trust. That is why the option allowlists below exist: measured
+// 2026-09-03, `curl -k --connect-to raw.githubusercontent.com:443:127.0.0.1:18443
+// -sSL <prefix-matching URL>` delivered attacker-controlled bytes from a
+// loopback TLS server while the URL text matched this prefix byte for byte, and
+// `--resolve`, `--proxy`, `--unix-socket`, `-K` and `-o` move the fetch the same
+// way. So an exempted fetch may carry only options that cannot move it.
+// 這份清單「不是」身分驗證：它比對的是命令列上的文字，任何能寫命令的人都能寫出這個前綴，而
+// 這道閘門無法驗證伺服器回什麼。它的職責只是不要讓那條成立的規則擋掉本專案 README 記載的
+// 安裝路徑，不是建立信任。底下的選項白名單就是為此存在：2026-09-03 實測，`--connect-to`
+// 能在網址文字逐位元組相符的情況下，從 loopback TLS 伺服器送出攻擊者控制的內容，
+// `--resolve`、`--proxy`、`--unix-socket`、`-K`、`-o` 也一樣會移動這次抓取。
+const PIPED_SCRIPT_EXCEPTIONS = [
+  'https://raw.githubusercontent.com/sieg-wang/better-rm/',
+];
+
+// Deny-by-default option allowlists for an exempted fetch. An option that is
+// NOT on these lists makes the producer unreadable again, which is the
+// fail-closed direction: a curl option added upstream cannot silently join the
+// exemption, and a reader can see exactly what the exemption tolerates.
+// 豁免抓取的選項白名單（預設拒絕）。不在清單上的選項會讓產生器重新變成「讀不到」，這是
+// fail-closed 的方向：curl 日後新增的選項不會自己混進豁免裡，而且讀的人一眼看得出豁免容忍
+// 的到底是哪幾個選項。
+const EXEMPT_CURL_OPTIONS = /^(?:-[sSLf46#]+|--silent|--show-error|--location|--fail|--ipv4|--ipv6|--compressed|--no-progress-meter)$/;
+const EXEMPT_WGET_OPTIONS = /^(?:-q|-nv|-4|-6|-O-|-qO-|--quiet|--no-verbose|--output-document=-)$/;
+
 // The only variables this gate will resolve. Everything else stays unknown and
 // is refused, which is the decided policy: a short allowlist buys back the
 // commands people actually type without pretending the gate can predict a shell.
@@ -1848,6 +1919,621 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
     return { executable, executableIndex, index: i, stdinCompletesOperands };
   }
 
+  // A carrier whose SCRIPT arrives on a PIPE or through a PROCESS SUBSTITUTION.
+  // The routes above read a script the command line SHOWS (`-c`, a heredoc body,
+  // a here-string). This one is about a script the command line does not show:
+  // measured 2026-09-03 with the deletion replaced by a touch, so the marker
+  // file proves the shell really runs them, `echo "rm -rf /etc" | bash`,
+  // `curl … | bash`, `cat f | bash`, `bash <(…)` and `… | tee f | bash` were all
+  // ALLOWED while their byte-equivalent heredoc and here-string spellings were
+  // refused -- the only difference was where the script came from.
+  // The rule, and it is a posture change the user approved (FOLLOWUP.md decision
+  // 1, 2026-09-03): when a carrier's script comes from a pipe or a process
+  // substitution, this gate must be able to READ it. A LITERAL emitter
+  // (echo/printf words, `cat <<EOF`) is read and judged by the ordinary rules,
+  // so `echo hi | bash` stays allowed; an install route on
+  // PIPED_SCRIPT_EXCEPTIONS is let through; anything else -- INCLUDING a
+  // producer this parser cannot classify -- is refused. There is no fail-open
+  // branch here on purpose: an unclassifiable producer is a refusal, not an
+  // allowance.
+  // What it does NOT close, stated so nobody reads the rule as complete:
+  // `bash < file`, `bash script.sh`, `bash -c "$(curl …)"` WITH NO PIPE (the
+  // pipe-fed spelling `curl … | bash -c "$(cat)"` is refused since 2026-09-04),
+  // `eval "$(curl …)"`, `… | xargs -I{} bash -c "{}"` and `… | xargs -0 bash -c`
+  // are all still allowed (KNOWN-RESIDUALS.md R4-b), as is a carrier option that
+  // takes an argument outside the bash/sh spellings this walk enumerates
+  // (`curl … | fish -d 3`, R4-c). `cat f | bash` is refused while the one-character-different
+  // `bash < f` is not, so anyone who knows the rule walks around it: what this
+  // buys is that the gate stops being blind to a common shape, not that an
+  // adversary cannot get a script past it.
+  // carrier 的腳本從 pipe 或 process substitution 進來。上面那幾條路徑讀的是命令列「看得
+  // 見」的腳本（-c、heredoc 內文、here-string），這一條講的是命令列看不見的那種：2026-09-03
+  // 把刪除換成 touch 實測（標記檔證明 shell 真的會跑），`echo "rm -rf /etc" | bash`、
+  // `curl … | bash`、`cat f | bash`、`bash <(…)`、`… | tee f | bash` 全部放行，而它們逐位元組
+  // 等價的 heredoc 與 here-string 寫法卻都被拒——差別只在腳本從哪裡進來。
+  // 規則（這是使用者裁決過的姿態改變，FOLLOWUP.md 決定 1）：carrier 的腳本從 pipe 或 process
+  // substitution 進來時，這道閘門必須讀得到它。字面產生器（echo/printf 的字、`cat <<EOF`）
+  // 會被讀出來、照一般規則判；PIPED_SCRIPT_EXCEPTIONS 上的安裝路徑放行；其餘一律拒絕，
+  // 包含「這個解析器分類不出來的產生器」。這裡刻意沒有 fail-open 的分支。
+  const r4Carriers = new Set([...shellCarriers, 'source', '.']);
+  const stdinScriptPaths = new Set(['/dev/stdin', '/dev/fd/0', '-']);
+  // Matching ')' for every operator '(' , computed once for the whole word
+  // stream. Scanning per substitution instead was quadratic on nested
+  // `<( <( … ) )`, and a gate that outruns the live 5,000 ms hook timeout makes
+  // NO decision and does not block the command -- slow is the same as absent,
+  // which is the measurement the JUDGING_BUDGET_MS comment below was written for.
+  // 每個運算子 '(' 的對應 ')' 只算一次。改成「每個替換各掃一次」在
+  // `<( <( … ) )` 這種嵌套下是平方級，而跑贏 5,000 ms 逾時的閘門不做任何裁決、也不會擋下
+  // 命令——「慢」等於「不存在」。
+  const closingParen = new Map();
+  {
+    const openParens = [];
+    for (let k = 0; k < words.length; k += 1) {
+      if (!operatorTokens[k]) continue;
+      if (words[k] === '(') openParens.push(k);
+      else if (words[k] === ')' && openParens.length > 0) closingParen.set(openParens.pop(), k);
+    }
+  }
+  // A command boundary for this rule. '<' and '>' are NOT boundaries: a
+  // redirection stays inside its simple command. An '&' that FOLLOWS a '<' or
+  // '>' operator is part of that redirection (`2>&1`), not a terminator --
+  // without this carve-out `echo hi 2>&1 | bash` takes the word `1` for its
+  // producer and newly refuses (measured ALLOW today, and pinned as an allow row).
+  // 這條規則用的命令邊界。'<' 與 '>' 不是邊界（重導向留在它的簡單命令裡）。跟在 '<'／'>'
+  // 之後的 '&' 屬於那個重導向（`2>&1`）而不是終止符——少了這個特例，
+  // `echo hi 2>&1 | bash` 的產生器會變成 `1` 這個字而被新擋掉。
+  const isCommandBoundary = (k) => {
+    if (!operatorTokens[k]) return false;
+    const word = words[k];
+    if (word === ';' || word === '|' || word === '\n' || word === '(' || word === ')') return true;
+    if (word !== '&') return false;
+    return !(k > 0 && operatorTokens[k - 1] && (words[k - 1] === '>' || words[k - 1] === '<'));
+  };
+  // Exactly one '|' in the boundary run, so `||` -- which this tokenizer emits
+  // as two separate '|' words -- is two commands and not a pipeline, and
+  // `false || bash -c 'echo hi'` stays allowed. '&' rides along for `|&`, and a
+  // subshell paren rides along for `echo hi | ( bash )` / `( echo hi ) | bash`.
+  // 邊界串裡恰好一個 '|'：`||`（這個 tokenizer 會切成兩個 '|' 字）是兩條命令而不是管線。
+  const isPipeRun = (run) => {
+    let pipes = 0;
+    for (const word of run) {
+      if (word === '|') pipes += 1;
+      else if (word !== '\n' && word !== '&' && word !== '(' && word !== ')') return false;
+    }
+    return pipes === 1;
+  };
+  // The word stream plus its sidecars, so one producer classifier can be used
+  // both on this command line and on a command substitution re-tokenized out of
+  // a carrier's here-string. Two copies of that classifier is the thing that
+  // would drift, so there is one.
+  // 字串流與它的側車資料一起傳，讓同一個產生器分類器既能用在這條命令列上，也能用在從
+  // carrier 的 here-string 重新斷詞出來的命令替換上。抄第二份就是日後會走鐘的那一份。
+  const wordContext = (text) => {
+    const contextWords = shellWords(text);
+    const contextOperators = contextWords.operatorTokens || [];
+    const contextClosing = new Map();
+    const contextOpen = [];
+    for (let k = 0; k < contextWords.length; k += 1) {
+      if (!contextOperators[k]) continue;
+      if (contextWords[k] === '(') contextOpen.push(k);
+      else if (contextWords[k] === ')' && contextOpen.length > 0) contextClosing.set(contextOpen.pop(), k);
+    }
+    return {
+      words: contextWords,
+      operatorTokens: contextOperators,
+      dynamicExpansions: contextWords.dynamicExpansions || [],
+      heredocBodies: new Map((contextWords.heredocs || []).map((entry) => [entry.operatorIndex, entry.body])),
+      closingParen: contextClosing,
+    };
+  };
+  const outerContext = {
+    words, operatorTokens, dynamicExpansions, heredocBodies, closingParen,
+  };
+  // Deliberately conservative unwrap for a PRODUCER: every wrapper spelling this
+  // does not fully understand resolves to a word that is not echo/printf/curl/
+  // wget, which makes the producer unreadable -- the fail-closed answer. It is
+  // NOT resolveExecutable(): that one is driven by the rm operand scan and
+  // consumes option operands per wrapper, and being wrong here must cost a
+  // refusal, never an allowance.
+  // 產生器端刻意保守的外殼拆解：任何它看不全的外殼寫法都會落在「不是
+  // echo/printf/curl/wget」的字上，於是產生器變成讀不到——也就是 fail-closed 的答案。
+  const producerExecutable = (context, start, end) => {
+    let k = start;
+    while (k < end) {
+      if (context.operatorTokens[k]) return { index: -1, name: '' };
+      const word = context.words[k];
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) { k += 1; continue; }
+      const name = path.basename(word);
+      if (controlWords.has(name)) { k += 1; continue; }
+      if (transparent.has(name)) {
+        k += 1;
+        while (k < end && !context.operatorTokens[k] && context.words[k].startsWith('-')) k += 1;
+        continue;
+      }
+      return { index: k, name };
+    }
+    return { index: -1, name: '' };
+  };
+  // Three readable producers, and one refusal that is the default.
+  const classifyProducer = (context, start, end) => {
+    if (start >= end) return { kind: 'opaque', label: 'unknown' };
+    const resolved = producerExecutable(context, start, end);
+    if (resolved.index === -1) return { kind: 'opaque', label: 'unknown' };
+    const label = resolved.name;
+    if (hasUnresolvedTargetExpansion(context.dynamicExpansions[resolved.index])) {
+      return { kind: 'opaque', label };
+    }
+    const argv = [];
+    const options = [];
+    const operands = [];
+    const heredocs = [];
+    let dynamic = false;
+    let substitutionOperand = false;
+    for (let k = resolved.index + 1; k < end; k += 1) {
+      // `<<` and `<<-` are NOT operator words in this tokenizer -- the heredoc
+      // branch pushes them as ordinary words (measured: operatorTokens is false
+      // at their index while it is true for `<<<`, `<`, `>`, `&`) -- so the
+      // authoritative signal is the `heredocs` sidecar, keyed by the operator's
+      // index. That is the same signal the carrier option route uses (:1930),
+      // and reading it off operatorTokens instead made `cat <<EOF | bash` see
+      // two extra operands and refuse its own benign form (measured).
+      // `<<` 與 `<<-` 在這個 tokenizer 裡不是運算子字（heredoc 分支把它們當普通字推進去），
+      // 所以權威訊號是以運算子索引為鍵的 `heredocs` 側車——與 carrier option route 用的是同
+      // 一個訊號。改用 operatorTokens 判斷會讓 `cat <<EOF | bash` 多看到兩個操作元而擋掉
+      // 自己的良性寫法（實測）。
+      if (context.heredocBodies.has(k)) {
+        heredocs.push(context.heredocBodies.get(k));
+        k += 1;
+        continue;
+      }
+      if (context.operatorTokens[k]) {
+        const word = context.words[k];
+        if (word === '<<<') { k += 1; continue; }
+        if (word === '<' || word === '>') {
+          let j = k;
+          while (context.operatorTokens[j + 1] && context.words[j + 1] === '<') j += 1;
+          if (context.operatorTokens[j + 1] && context.words[j + 1] === '(') {
+            substitutionOperand = true;
+            k = context.closingParen.has(j + 1) ? context.closingParen.get(j + 1) : end;
+            continue;
+          }
+          if (context.operatorTokens[j + 1] && context.words[j + 1] === '&') { k = j + 2; continue; }
+          k = j + 1;
+          continue;
+        }
+        continue;
+      }
+      const word = context.words[k];
+      if (
+        /^[0-9]+$/.test(word) && context.operatorTokens[k + 1]
+        && (context.words[k + 1] === '<' || context.words[k + 1] === '>')
+      ) continue;
+      if (hasUnresolvedTargetExpansion(context.dynamicExpansions[k])) dynamic = true;
+      if (word === '--') continue;
+      argv.push(word);
+      if (word.startsWith('-') && word !== '-') options.push(word);
+      else operands.push(word);
+    }
+    // A producer that reads its own operand from a process substitution
+    // (`cat <(curl …) | bash`) hands the carrier bytes nobody read.
+    if (substitutionOperand) return { kind: 'opaque', label };
+    // A heredoc body IS readable text and the carrierPresent route above already
+    // scans it, which is why `cat <<EOF | bash` is refused for what the body says
+    // and the benign twin stays allowed. It stays readable only while the heredoc
+    // is the whole of what the producer emits: `cat script.sh <<EOF | bash`
+    // concatenates the FILE first, one token away from the `cat script.sh | bash`
+    // this rule refuses.
+    // heredoc 內文本身是讀得到的文字，上面的 carrierPresent 路徑早就在掃它。但只有在
+    // 「heredoc 就是產生器吐出的全部」時才算讀得到：`cat script.sh <<EOF | bash` 會先把檔案
+    // 接上去，而它跟本規則要拒的 `cat script.sh | bash` 只差一個 token。
+    if (heredocs.length > 0) {
+      if (operands.length > 0 || dynamic) return { kind: 'opaque', label };
+      return { kind: 'heredoc', label, bodies: heredocs };
+    }
+    if ((label === 'echo' || label === 'printf') && !dynamic) {
+      // Two scans, union of the targets. The JOIN catches `echo rm -rf /etc`;
+      // the per-operand scan catches `printf %s "rm -rf /etc"` and
+      // `echo -e "rm -rf /etc"`, where the join puts a format string or an
+      // option in command position and the deletion hides behind it. Same two
+      // shapes the unresolved-executable arm already needs (:1904-1911).
+      // 兩種掃法、目標取聯集。join 抓 `echo rm -rf /etc`；逐操作元掃抓
+      // `printf %s "rm -rf /etc"`（join 會把格式字串推到命令位置，把刪除藏在後面）。
+      return {
+        kind: 'literal',
+        label,
+        texts: [argv.join(' '), ...operands.filter((word) => /\s/.test(word))],
+      };
+    }
+    if (
+      (label === 'curl' || label === 'wget') && !dynamic && operands.length === 1
+      && !/\.\.|%2e|%2f|%5c/i.test(operands[0])
+      && PIPED_SCRIPT_EXCEPTIONS.some((prefix) => operands[0].startsWith(prefix))
+      && options.every((option) => (
+        label === 'curl' ? EXEMPT_CURL_OPTIONS : EXEMPT_WGET_OPTIONS
+      ).test(option))
+    ) return { kind: 'exempt', label };
+    return { kind: 'opaque', label };
+  };
+  const scriptFromProducer = (context, start, end, shape, nest, opaque) => {
+    const verdict = classifyProducer(context, start, end);
+    if (verdict.kind === 'exempt') return;
+    if (verdict.kind === 'literal') {
+      for (const text of verdict.texts) {
+        if (!text) continue;
+        if (depth >= 8) targets.push('/');
+        else targets.push(...commandTargets(text, depth + 1, true, expansionEnv));
+      }
+      return;
+    }
+    if (verdict.kind === 'heredoc') {
+      for (const body of verdict.bodies) {
+        unscannableSubstitutions(body, shape, nest + 1);
+      }
+      return;
+    }
+    targets.push(opaque ? opaque() : UNSCANNABLE_SCRIPT + shape(verdict.label));
+  };
+  // The carrier's script text is visible, but a command SUBSTITUTION inside it is
+  // not: `bash <<< "$(curl -s URL)"` runs whatever that URL serves, and it was
+  // measured ALLOW while the plain `curl … | bash` next to it was refused --
+  // six characters cheaper than the workaround the new refusal recommends.
+  // carrier 的腳本文字看得見，但裡面的命令替換看不見：`bash <<< "$(curl -s URL)"` 執行的是
+  // 那個網址吐出來的東西，實測放行，而它旁邊的 `curl … | bash` 是拒絕的。
+  function unscannableSubstitutions(text, shape, nest) {
+    const inners = commandSubstitutions(String(text || ''));
+    if (inners.length === 0) return;
+    if (nest >= 4) {
+      targets.push(UNSCANNABLE_SCRIPT + shape('nested substitution'));
+      return;
+    }
+    for (const inner of inners) {
+      const context = wordContext(inner);
+      scriptFromProducer(context, 0, context.words.length, shape, nest);
+    }
+  }
+  // Every INPUT process substitution on the command line, keyed by the fd it is
+  // attached to: `3< <(…)` -> '3', a bare `< <(…)` -> '0'. Built once over the
+  // whole word stream, not per segment, because `exec 3< <(curl …); bash /dev/fd/3`
+  // opens the fd in one command and names it in the next. Output substitutions
+  // (`> >(…)`) are deliberately absent: they are not a script source
+  // (KNOWN-RESIDUALS.md R4-b).
+  // 整條命令列上每一個「輸入方向」的 process substitution，以它掛的 fd 為鍵。只建一次、不
+  // 分段，因為 `exec 3< <(…); bash /dev/fd/3` 是在前一條命令開的 fd。
+  const procsubByFd = new Map();
+  for (let k = 0; k < words.length; k += 1) {
+    if (!operatorTokens[k] || words[k] !== '<') continue;
+    // The second '<' of a `< <(` run belongs to the substitution, not to a
+    // redirection of its own.
+    if (k > 0 && operatorTokens[k - 1] && words[k - 1] === '<') continue;
+    let j = k;
+    while (operatorTokens[j + 1] && words[j + 1] === '<') j += 1;
+    if (!(operatorTokens[j + 1] && words[j + 1] === '(')) continue;
+    const close = closingParen.has(j + 1) ? closingParen.get(j + 1) : words.length;
+    const fd = (k > 0 && !operatorTokens[k - 1] && /^[0-9]+$/.test(words[k - 1]))
+      ? words[k - 1]
+      : '0';
+    if (!procsubByFd.has(fd)) procsubByFd.set(fd, { start: j + 2, end: close });
+  }
+  {
+    const segments = [];
+    let cursor = 0;
+    while (cursor < words.length) {
+      const run = [];
+      while (cursor < words.length && isCommandBoundary(cursor)) {
+        run.push(words[cursor]);
+        cursor += 1;
+      }
+      const start = cursor;
+      while (cursor < words.length && !isCommandBoundary(cursor)) cursor += 1;
+      segments.push({ start, end: cursor, run });
+    }
+    for (let n = 0; n < segments.length; n += 1) {
+      const segment = segments[n];
+      if (segment.start >= segment.end) continue;
+      const { executable, executableIndex } = resolveExecutable(segment.start);
+      if (!executable || executableIndex < 0) continue;
+      // A command word that only exists after expansion may BE a carrier, and it
+      // gets the same answer the rest of this file gives that shape: assume the
+      // worst. Its here-string twin already fails closed (:1900-1903), so
+      // `CMD=bash; $CMD <<< "rm -rf /etc"` was refused while
+      // `CMD=bash; curl … | $CMD` was allowed -- one unknowable, two answers.
+      // ... but "only exists after expansion" is NOT the same as "unknowable":
+      // this file already resolves $HOME, $PWD and $TMPDIR for every rm operand
+      // (targetFromWord -> resolveKnownExpansions), and reading a pipe target
+      // with a different rule than an rm operand is exactly how
+      // `ps aux | "$HOME/bin/filter.sh"` came to be refused while
+      // `rm -rf "$HOME/build"` is allowed (measured 2026-09-03). Resolve first,
+      // with the SAME function, and only what is still unresolved after that is
+      // treated as a possible carrier. resolveKnownExpansions fails closed on
+      // everything it does not understand (`${PAGER:-less}`, `$(…)`, an empty or
+      // relative value, a value carrying whitespace), so this cannot widen past
+      // the three names.
+      // 展開後才知道的命令字可能就是 carrier，答案與本檔案其他地方一致：假設最壞。它的
+      // here-string 雙胞胎早就 fail closed，於是同一種不可知先前有兩種答案。但「展開後才
+      // 知道」不等於「不可知」：這個檔案對每一個 rm 操作元早就會解 $HOME／$PWD／$TMPDIR，
+      // 管線接收端改用另一套規則讀，正是 `ps aux | "$HOME/bin/filter.sh"` 被擋掉而
+      // `rm -rf "$HOME/build"` 放行的原因。先用同一個函式解，解不開的才當成可能的 carrier。
+      const carrierWord = words[executableIndex];
+      let dynamicCarrier = hasUnresolvedTargetExpansion(dynamicExpansions[executableIndex]);
+      let carrier = path.basename(executable);
+      if (dynamicCarrier) {
+        const resolvedCarrier = resolveKnownExpansions(carrierWord, expansionEnv);
+        if (resolvedCarrier !== null) {
+          dynamicCarrier = false;
+          carrier = path.basename(resolvedCarrier);
+        }
+      }
+      // `eval` is deliberately NOT a carrier here: it never reads a script from
+      // stdin, so `echo x | eval` is a no-op and refusing it would be a pure
+      // false denial. It stays in the `carriers` set above, which is about
+      // heredoc bodies, not about stdin.
+      // `eval` 刻意不算 carrier：它從不從 stdin 讀腳本，`echo x | eval` 是空操作，擋它是
+      // 純粹的誤擋。
+      if (carrier === 'eval') continue;
+      if (!r4Carriers.has(carrier) && !dynamicCarrier) continue;
+      // `-n` (bash/sh/dash/zsh/ksh noexec, fish --no-execute) makes the carrier
+      // PARSE its input and stop. `… | xargs -n1 bash -n`, `cat f | env bash -n`,
+      // `cat f | timeout 5 bash -n` and `| sh -n` are the syntax check this
+      // machine's own suites run on every shell file; nothing they read is
+      // executed, so refusing them was a pure false denial (measured 2026-09-03:
+      // all six spellings DENY, and the payload never ran under either bash).
+      // The scan stops at `--` and at the option that carries a script, because
+      // after either of those an `-n` is an argument and not an option.
+      // `-n` 讓 carrier 只解析不執行：`… | xargs -n1 bash -n`、`cat f | env bash -n`、
+      // `| sh -n` 是本機各套測試都在跑的語法檢查，讀進去的東西一個都不會被執行，擋它是純粹
+      // 的誤擋。掃描在 `--` 與「帶腳本的那個選項」處停下：在那之後的 `-n` 是引數不是選項。
+      let noExec = false;
+      for (let k = executableIndex + 1; k < words.length && !isCommandBoundary(k); k += 1) {
+        if (operatorTokens[k] || heredocBodies.has(k)) continue;
+        const word = words[k];
+        if (word === '--') break;
+        if (word === '--noexec' || word === '--no-execute' || word === '--no-exec') {
+          noExec = true;
+          break;
+        }
+        if (!word.startsWith('-') || word === '-') continue;
+        if (word.startsWith('--')) continue;
+        if (/^-[^-]*c/.test(word)) break;
+        if (/^-[A-Za-z]*n/.test(word)) {
+          noExec = true;
+          break;
+        }
+      }
+      if (noExec) continue;
+      let visible = false;
+      let scriptIsFile = false;
+      let stdinMarker = false;
+      let commandOption = null;
+      const procsubRanges = [];
+      const scriptBodies = [];
+      const fileOperands = [];
+      for (let k = executableIndex + 1; k < words.length && !isCommandBoundary(k); k += 1) {
+        const word = words[k];
+        // A heredoc on the carrier's OWN argv (`bash <<EOF`): its body is the
+        // script, an existing route already scans it, and it overrides stdin.
+        // Keyed off the `heredocs` sidecar, not operatorTokens -- see the note in
+        // classifyProducer above.
+        if (heredocBodies.has(k)) {
+          visible = true;
+          scriptBodies.push(heredocBodies.get(k));
+          k += 1;
+          continue;
+        }
+        if (operatorTokens[k]) {
+          if (word === '<<<') {
+            visible = true;
+            if (k + 1 < words.length) scriptBodies.push(words[k + 1]);
+            k += 1;
+            continue;
+          }
+          if (word === '<' || word === '>') {
+            // `bash < <(…)` tokenizes as two separate '<' operator words -- the
+            // second belongs to the substitution -- so a run of them is one
+            // redirection here.
+            let j = k;
+            while (operatorTokens[j + 1] && words[j + 1] === '<') j += 1;
+            if (operatorTokens[j + 1] && words[j + 1] === '(') {
+              const close = closingParen.has(j + 1) ? closingParen.get(j + 1) : words.length;
+              if (word === '<') procsubRanges.push({ start: j + 2, end: close });
+              k = close;
+              continue;
+            }
+            // `<&`/`0<&0` is fd DUPLICATION, not a file redirect: it does not
+            // take stdin away from the pipe. Measured, marker files created
+            // under bash 5.3.15 and /bin/bash 3.2.57: `echo "…" | bash 0<&0`,
+            // `| bash <&0`, `| /bin/bash 0<&0` and `| bash 0<&0 -s` all execute
+            // the piped script, so reading `<&` as "a redirect overrides the
+            // pipe" would have shipped this rule with a four-character bypass.
+            // `<&`／`0<&0` 是 fd 複製而不是檔案重導向：它沒有把 stdin 從 pipe 那裡拿走。
+            // 實測（bash 5.3.15 與 /bin/bash 3.2.57 都產生標記檔）四種寫法都會執行從
+            // pipe 進來的腳本，所以把 `<&` 讀成「重導向覆蓋 pipe」等於帶著一個四字元的
+            // 繞法出貨。
+            if (operatorTokens[j + 1] && words[j + 1] === '&') { k = j + 2; continue; }
+            // `<>` opens the fd for reading AND writing, and this tokenizer emits
+            // it as two operator words. `bash <> /dev/stdin` is still reading the
+            // pipe, so the target below has to be inspected for this spelling too.
+            // `<>` 是讀寫開啟，這個 tokenizer 會切成兩個運算子字；`bash <> /dev/stdin`
+            // 讀的仍然是 pipe，所以底下那個判斷也要看得到這種寫法。
+            let redirect = j;
+            if (word === '<' && operatorTokens[redirect + 1] && words[redirect + 1] === '>') {
+              redirect += 1;
+            }
+            // A plain `< file` really does override the pipe, and a FILE is out
+            // of this rule's scope (KNOWN-RESIDUALS.md R4-b) -- but ONLY when the
+            // target really is a file. `/dev/stdin`, `/dev/fd/0` and `-` name the
+            // pipe itself, and reading them as "a file overrides the pipe" left
+            // `curl … | bash < /dev/stdin`, `< /dev/fd/0`, `0< /dev/stdin`,
+            // `sudo bash < /dev/stdin` and `zsh < /dev/stdin` ALLOWED while the
+            // plain `curl … | bash` next to them was refused (measured 2026-09-03,
+            // marker files under bash 5.3.15 and /bin/bash 3.2.57). It is the same
+            // list stdinScriptPaths already uses for an OPERAND; the redirect
+            // simply was not consulting it.
+            // 純粹的 `< file` 確實會蓋掉 pipe，而「檔案」不在這條規則範圍內——但只有在目標
+            // 真的是檔案時才成立。`/dev/stdin`、`/dev/fd/0`、`-` 指的就是那個 pipe 自己。
+            if (word === '<') {
+              const redirectTarget = (redirect + 1 < words.length && !operatorTokens[redirect + 1])
+                ? words[redirect + 1]
+                : null;
+              if (redirectTarget === null || !stdinScriptPaths.has(redirectTarget)) {
+                scriptIsFile = true;
+              }
+            }
+            k = redirect + 1;
+            continue;
+          }
+          continue;
+        }
+        // An fd number written before a redirection operator belongs to it, not
+        // to the argv (`bash 0<&0`, `bash 2>/dev/null`).
+        if (
+          /^[0-9]+$/.test(word) && operatorTokens[k + 1]
+          && (words[k + 1] === '<' || words[k + 1] === '>')
+        ) continue;
+        if (word === '--') continue;
+        // A lone `\\` is a line continuation with nothing after it. bash 3.2
+        // EXECUTES `cat f | bash \\` (measured: marker file under /bin/bash 3.2.57;
+        // bash 5.3.15 errors instead), and 3.2 is the interpreter five launchd
+        // plists on this machine actually run, so reading the backslash as a
+        // script FILE operand shipped the shape allowed on the interpreter that
+        // matters. It names no file either way.
+        // 單獨一個 `\\` 是「後面沒東西」的續行。實測 bash 3.2 會執行 `cat f | bash \\`
+        // （5.3 則報錯），而 3.2 正是本機五個 launchd plist 真正跑的直譯器。
+        if (word === '\\') continue;
+        if ((word.startsWith('-') && word !== '-') || (word.startsWith('+') && word.length > 1)) {
+          // The option that carries the script, spelled with the SAME test the
+          // option route uses (/^-[^-]*c/), so a bundle counts exactly as a bare
+          // `-c` does: `cat f | bash -lc 'wc -l'`, `-ec` and `sh -exc` are the
+          // login-shell idiom this machine's launchd and ssh wrappers use, and
+          // spelling the exclusion as the exact word `-c` would newly refuse all
+          // three.
+          // 帶腳本的那個選項，用的是與 option route 相同的判斷（/^-[^-]*c/），所以合寫的
+          // `-lc`、`-ec`、`-exc` 與單獨的 `-c` 一視同仁。
+          if (
+            word === '--command' || /^-[^-]*c/.test(word)
+            || (carrier === 'fish' && (
+              word === '-C' || word.startsWith('--init-command') || word.startsWith('--command=')
+            ))
+          ) {
+            visible = true;
+            commandOption = (k + 1 < words.length && !operatorTokens[k + 1])
+              ? words[k + 1]
+              : null;
+            break;
+          }
+          if (/^-[A-Za-z]*s/.test(word)) stdinMarker = true;
+          // `-O shopt`, `+O shopt`, `-o option`, `+o option`, `--rcfile FILE` and
+          // `--init-file FILE` take their argument as a SEPARATE word (bash --help,
+          // "invocation only"). Without consuming it that word was read as the
+          // script FILE, and `curl … | bash -O extglob` was ALLOWED -- measured
+          // 2026-09-03 with a touch payload, marker files under both bash 5.3.15
+          // and /bin/bash 3.2.57 for all seven spellings. `--norc`, `--posix`,
+          // `--login`, `--noediting` and every other long option take none, and the
+          // `--rcfile=FILE` spelling carries its own, so neither consumes a word.
+          // Consuming one word too many can only ADD a refusal, never remove one:
+          // a word this loop does not see cannot set scriptIsFile.
+          // 這幾個選項的引數是「分開的下一個字」（bash --help 的 invocation only 那組）。
+          // 不吃掉它，那個字就會被當成腳本檔，於是 `curl … | bash -O extglob` 放行——實測
+          // 七種寫法在 5.3 與 3.2 下都產生標記檔。多吃一個字只會多一個拒絕、不會少一個。
+          if (/^[-+][A-Za-z]*[Oo]$/.test(word) || word === '--rcfile' || word === '--init-file') {
+            if (k + 1 < words.length && !operatorTokens[k + 1]) k += 1;
+          }
+          continue;
+        }
+        // `-s`, `-` and a stdin PATH are markers, not script files: after one of
+        // them the remaining operands are positional arguments and stdin is
+        // still the script, which is why `echo "rm -rf /etc" | bash /dev/stdin`
+        // and `| bash -s` are refused rather than read as `bash <script file>`.
+        if (stdinScriptPaths.has(word)) { stdinMarker = true; continue; }
+        if (!stdinMarker) fileOperands.push(word);
+      }
+      // A `/dev/fd/N` operand is not a FILE when a process substitution opened
+      // fd N: `bash /dev/fd/3 3< <(curl …)` names the substitution, and reading it
+      // as a script file let the whole shape through -- measured 2026-09-03,
+      // marker file under both bash 5.3.15 and /bin/bash 3.2.57, for the operand
+      // written before the redirect and after it. procsubByFd is built over the
+      // WHOLE command line rather than this segment, so the
+      // `exec 3< <(curl …); bash /dev/fd/3` spelling -- which opens the fd in an
+      // earlier command -- is answered by the same test. Attributing a procsub to
+      // a later segment can only add a refusal.
+      // `/dev/fd/N` 操作元在「fd N 是被 process substitution 開的」時不是檔案。
+      // procsubByFd 是對整條命令列建的，所以跨 `;` 的 `exec 3< <(…); bash /dev/fd/3`
+      // 也由同一個判斷接住。
+      for (const operand of fileOperands) {
+        const fdMatch = /^\/dev\/fd\/([0-9]+)$/.exec(operand);
+        const fdRange = fdMatch ? procsubByFd.get(fdMatch[1]) : undefined;
+        if (fdRange) {
+          if (!procsubRanges.some((range) => range.start === fdRange.start)) {
+            procsubRanges.push(fdRange);
+          }
+          continue;
+        }
+        scriptIsFile = true;
+      }
+      const pipeFed = n > 0 && isPipeRun(segment.run);
+      // Reached the carrier test only because the word is unresolvable, not
+      // because it is a shell this gate knows. The refusal is the same; the
+      // MESSAGE must not be, or it tells the reader their command feeds a script
+      // into a shell and sends them to a URL allowlist that has nothing to do
+      // with `git log | $PAGER`.
+      // 只因為「這個字解不開」才走到 carrier 判斷，而不是因為它真的是 shell。拒不拒一樣，
+      // 訊息不能一樣。
+      const opaquePipeTarget = (dynamicCarrier && !r4Carriers.has(carrier))
+        ? () => UNREADABLE_PIPE_TARGET + carrierWord
+        : null;
+      if (!visible && !scriptIsFile && pipeFed) {
+        const producer = segments[n - 1];
+        if (segment.run.includes(')') || producer.start >= producer.end) {
+          // A compound producer (`( curl … ) | bash`, `{ …; } | bash`): every
+          // command inside it feeds the pipe, so there is no single producer to
+          // classify and the honest answer is that this gate did not read it.
+          // 複合產生器：裡面每一條命令都在餵那個 pipe，沒有單一產生器可以分類。
+          targets.push(
+            opaquePipeTarget ? opaquePipeTarget() : `${UNSCANNABLE_SCRIPT}subshell | ${carrier}`,
+          );
+        } else {
+          scriptFromProducer(
+            outerContext, producer.start, producer.end,
+            (label) => `${label} | ${carrier}`, 0, opaquePipeTarget,
+          );
+        }
+      }
+      // The carrier's script IS visible (`-c '…'`) and it is STILL fed by a pipe:
+      // a command substitution inside that string reads the pipe.
+      // `curl … | bash -c "$(cat)"`, `-c "$(cat /dev/stdin)"` and
+      // `bash -s -c "$(cat)"` all execute what the pipe carried and were ALLOWED
+      // (measured 2026-09-03, marker files under bash 5.3.15 and /bin/bash
+      // 3.2.57), while `curl … | bash` beside them was refused. This is the SAME
+      // substitution check the here-string route runs, on the -c argument, and it
+      // is applied only when a pipe feeds the segment: `bash -c "$(curl …)"` with
+      // no pipe is KNOWN-RESIDUALS.md R4-b and stays out of scope.
+      // 腳本看得見（`-c '…'`）而且仍然有 pipe 在餵它：那串文字裡的命令替換讀的就是 pipe。
+      // 這裡用的是 here-string 路徑同一個替換檢查，而且只在「有 pipe 餵這一段」時才跑。
+      if (visible && commandOption !== null && pipeFed) {
+        unscannableSubstitutions(
+          commandOption, (label) => `${carrier} -c "$(${label})"`, 0,
+        );
+      }
+      // A process substitution in a carrier's argv is in scope even with `-s`
+      // (fail closed): telling "the procsub IS the script" apart from "the
+      // procsub is $1" needs modelling positional parameters, which this gate
+      // cannot do. If that ever bites, the narrowing is "a procsub is a script
+      // source only when the carrier has no -s".
+      // carrier 的 argv 裡的 process substitution 即使有 `-s` 也在範圍內（fail closed）：
+      // 要分辨「procsub 就是腳本」與「procsub 是 $1」得建模位置參數。
+      if (!visible && !scriptIsFile) {
+        for (const range of procsubRanges) {
+          scriptFromProducer(
+            outerContext, range.start, range.end,
+            (label) => `${carrier} <(${label})`, 0,
+          );
+        }
+      }
+      for (const body of scriptBodies) {
+        unscannableSubstitutions(body, (label) => `${carrier} <<< "$(${label})"`, 0);
+      }
+    }
+  }
+
   let i = 0;
 
   while (i < words.length) {
@@ -2281,6 +2967,67 @@ function unknownDenial(operand, isCopilot, isAntigravity, isCursor, isGrok) {
   return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
 }
 
+// The refusal for a script this gate could not READ. It is the first refusal in
+// this file that says 拒絕執行 / "Refused to run" rather than 拒絕刪除 /
+// "Refused to remove", and the difference is not cosmetic: nothing here names a
+// protected directory, and borrowing that wording would send people looking for
+// a path the command never wrote -- the same defect UNRESOLVED_TARGET exists to
+// avoid. It quotes the SHAPE it saw (`curl | bash`) rather than describing it,
+// names the rule so the message can be searched for, and gives two ways through
+// plus the one knob, because a refusal with no way out is how people end up
+// disabling the gate. Anything that greps this repository's refusals for
+// 刪除/remove will not see these: that is a deliberate consequence of the new
+// posture, recorded in CHANGELOG.md.
+// 這是「腳本讀不到」的拒絕。它是本檔案第一個說「拒絕執行」而不是「拒絕刪除」的訊息，而這個
+// 差別不是修辭：這裡沒有任何受保護目錄被指名，借用那套措辭只會讓人去找一條命令從來沒寫過的
+// 路徑——與 UNRESOLVED_TARGET 存在的理由是同一件事。訊息引用它看到的「形狀」而不是描述它、
+// 指名規則（方便搜尋），並給兩條繞法加一個旋鈕，因為沒有出路的拒絕最後換來的是有人把整道
+// 閘門關掉。
+function unscannableScriptDenial(shape, isCopilot, isAntigravity, isCursor, isGrok) {
+  const zh = `拒絕執行：這條命令把腳本從 pipe 或 process substitution 餵給 shell（${shape}），`
+    + `這道閘門在執行前讀不到那段腳本，因此無法判斷它會不會刪除受保護的目錄`
+    + `（這不是說它一定會刪，是說這道閘門讀不到）。規則：unscannable piped script。`
+    + `繞法：先存成檔案再讀過執行（curl -o install.sh <url> && bash install.sh），`
+    + `或把命令寫成字面的 <shell> -c '<命令>'。`
+    + `若這是一條你信任的安裝路徑，把它的網址前綴加進 hooks/protect-important-paths.js 的`
+    + ` PIPED_SCRIPT_EXCEPTIONS —— 那份清單比對的是命令列上的網址文字，不是身分驗證。`;
+  const en = `Refused to run: this command feeds a script into a shell through a pipe or a process`
+    + ` substitution (${shape}), and this gate cannot read that script before it runs, so it cannot tell`
+    + ` whether the script removes a protected directory (this does not say that it does; it says this`
+    + ` gate could not read it). Rule: unscannable piped script.`
+    + ` Workaround: save it to a file and read it first (curl -o install.sh <url> && bash install.sh),`
+    + ` or spell the command literally as <shell> -c '<command>'. If this is an install route you trust,`
+    + ` add its URL prefix to PIPED_SCRIPT_EXCEPTIONS in hooks/protect-important-paths.js -- that list`
+    + ` matches the URL TEXT on the command line and is not an identity check.`;
+  return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
+}
+
+// The refusal for a pipe whose RECEIVING END this gate could not resolve. It is
+// separate from unscannableScriptDenial on purpose: that message states as fact
+// that the command feeds a script into a shell and offers PIPED_SCRIPT_EXCEPTIONS
+// as the way through. Neither is true here -- the word may be a pager, a
+// formatter or anything else, and no URL allowlist can help -- and a refusal that
+// describes a command the user did not write is the defect UNRESOLVED_TARGET
+// exists to avoid. It names the word it could not resolve, names its own rule so
+// the message is searchable, and gives the two spellings that make it go away.
+// 「管線接收端解不開」的拒絕。刻意與 unscannableScriptDenial 分開：那句話把「餵腳本給
+// shell」講成事實、並把 PIPED_SCRIPT_EXCEPTIONS 當成出路，這裡兩者都不成立。
+function unreadablePipeTargetDenial(word, isCopilot, isAntigravity, isCursor, isGrok) {
+  const zh = `拒絕執行：這條管線的接收端（${word}）是一個要展開後才知道的命令字，`
+    + `而它後面沒有任何字指出要讀哪個檔案，所以它可能就是一個從 pipe 讀腳本的 shell，`
+    + `這道閘門在執行前分辨不出來（這不是說它一定是，是說這道閘門解不開這個字）。`
+    + `規則：unresolvable pipe target。`
+    + `繞法：把它寫成字面的絕對路徑（例如 /usr/bin/less），或給它一個檔案操作元。`
+    + `只有 $HOME、$PWD、$TMPDIR 會被解析。`;
+  const en = `Refused to run: the receiving end of this pipe (${word}) is a command word that only`
+    + ` exists after expansion, and nothing after it names a file to read, so it may be a shell taking`
+    + ` its script from the pipe and this gate cannot tell before it runs (this does not say that it is;`
+    + ` it says this gate could not resolve the word). Rule: unresolvable pipe target.`
+    + ` Workaround: spell it as a literal absolute path (e.g. /usr/bin/less), or give it a file operand.`
+    + ` Only $HOME, $PWD and $TMPDIR are resolved.`;
+  return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
+}
+
 function denial(reason, isCopilot, isAntigravity, isCursor, isGrok) {
   const message = `拒絕刪除受保護的目錄：${reason} / Refused to remove protected directory: ${reason}`;
   return denialShape(message, isCopilot, isAntigravity, isCursor, isGrok);
@@ -2377,7 +3124,11 @@ function evaluate(payload, env = process.env) {
     // 281 ms——一個目標讀一次時鐘落在雜訊裡，因為連最便宜的目標都比讀一次時鐘貴三個數量級。
     if (Date.now() > deadline) break;
     const target = targets[judged];
-    if (target.startsWith(UNRESOLVED_TARGET)) continue;
+    if (
+      target.startsWith(UNRESOLVED_TARGET)
+      || target.startsWith(UNSCANNABLE_SCRIPT)
+      || target.startsWith(UNREADABLE_PIPE_TARGET)
+    ) continue;
     const reason = protectedReason(target, cwd, home, extraDirs);
     if (reason) return denial(reason, isCopilot, isAntigravity, isCursor, isGrok);
   }
@@ -2393,6 +3144,34 @@ function evaluate(payload, env = process.env) {
   // otherwise, so there is no "unjudged" target left for this scan to reach.
   // 只有在每個目標都判完時才會走到這裡：否則上面那個分支已經回傳了，這個掃描不可能碰到沒判
   // 過的目標。
+  // A script this gate could not read beats the unresolved-variable message:
+  // it names a concrete rule and carries the way through, and for
+  // `echo "$cmd" | bash` the unresolved message would be a lie -- that command
+  // has no deletion target at all. A protected path found in a producer this
+  // gate COULD read still wins over both, above.
+  // 「讀不到腳本」的訊息優先於「解不開變數」：它指名一條具體規則、也帶著出路，而對
+  // `echo "$cmd" | bash` 來說，解不開變數那句話是假的——那條命令根本沒有刪除目標。
+  // NOTE, deliberately not "fixed": the sentinel is pushed into `targets`, so it
+  // counts toward unjudgeableDenial's totalCount above. Filtering it out would
+  // need a second pass over the array to change one number in a timeout message.
+  for (const target of targets) {
+    if (!target.startsWith(UNSCANNABLE_SCRIPT)) continue;
+    return unscannableScriptDenial(
+      target.slice(UNSCANNABLE_SCRIPT.length), isCopilot, isAntigravity, isCursor, isGrok,
+    );
+  }
+  // Below the unscannable-script refusal and above the unresolved-variable one,
+  // for the same reason that one is ordered where it is: it names a concrete rule
+  // and carries the way through, while "cannot determine which path this expands
+  // to" would be a lie -- `git log | $PAGER` has no deletion target at all.
+  // 排在「讀不到腳本」之後、「解不開變數」之前，理由與後者相同：`git log | $PAGER` 根本沒有
+  // 刪除目標，用那句話回答是假的。
+  for (const target of targets) {
+    if (!target.startsWith(UNREADABLE_PIPE_TARGET)) continue;
+    return unreadablePipeTargetDenial(
+      target.slice(UNREADABLE_PIPE_TARGET.length), isCopilot, isAntigravity, isCursor, isGrok,
+    );
+  }
   for (const target of targets) {
     if (!target.startsWith(UNRESOLVED_TARGET)) continue;
     return unknownDenial(

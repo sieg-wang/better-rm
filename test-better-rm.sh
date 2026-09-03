@@ -674,7 +674,16 @@ else
     # of this check shipped while claiming to enforce exactly-once. The `tr -d` is
     # equally load-bearing: BSD `wc -l` pads with spaces, and without it the
     # comparison never equals "1" and the pin is permanently red.
-    for residuals_anchor in 'O_NOFOLLOW' '無法在無 root 的情況下測試' '兩邊都紅'; do
+    # '## R4-b' 與 '## R4-c' 是「章節還在」的釘子，不是內容釘子：R4 被收窄成
+    # CLOSED-WITH-EXCEPTION-LIST 之後，真正的殘留全在這兩節裡，而刪掉一整節不會
+    # 讓任何一個 hook 測試轉紅（那些測試釘的是行為，不是文件）。用 '## ' 開頭是因為
+    # 這條迴圈要求「恰好一次」：裸的 R4-b 在文件裡出現三次（zh 標題、en 段落、R4 的
+    # 交叉引用），只有標題那一行是 '## R4-b'。
+    # '## R4-b' and '## R4-c' pin that the SECTIONS still exist. Deleting either one
+    # turns no hook test red, because those pin behaviour rather than the document.
+    # The '## ' prefix is load-bearing: this loop demands exactly one occurrence and
+    # a bare 'R4-b' appears three times (zh heading, en paragraph, R4 cross-reference).
+    for residuals_anchor in 'O_NOFOLLOW' '無法在無 root 的情況下測試' '兩邊都紅' '## R4-b' '## R4-c'; do
         residuals_hits=$(grep -o -- "$residuals_anchor" "$residuals_doc" 2>/dev/null | wc -l | tr -d '[:space:]')
         if [ "$residuals_hits" != "1" ]; then
             residuals_problems="$residuals_problems anchor[$residuals_anchor]在文件裡出現${residuals_hits}次(必須恰好1次);"
