@@ -243,6 +243,86 @@ assert_equal "runner succeeds when every suite succeeds" "0" "$PASS_STATUS"
 assert_equal "successful runner invokes each suite exactly once" \
     "$(printf 'contract\ncore\nhooks\nparity\nsource-installer\ninstaller')" "$(cat "$PASS_LOG" 2>/dev/null)"
 
+# ---------------------------------------------------------------------------
+# 解析檢查掃描：每一個追蹤中的 shell 與 JS 檔（含 better-rm 自己）都必須解析得過。
+# 這道掃描補的是一個「執行覆蓋率」的洞，不是「行為」的洞：run-test-suites.sh 的
+# 清單有六套，而 test/residual-harness 下的 13 個追蹤檔與 593 行的
+# bump-and-release.sh 不在任何一套裡——沒有任何 gate 會執行它們，也就沒有任何
+# gate 會發現它們連解析都過不了。實測：在 git archive 出來的副本裡把一個未閉合的
+# `if true; then` 附加到 test/residual-harness/repeat-core.sh，六套測試全綠。
+# bump-and-release.sh 的第一次真正執行是一次「發佈」，那不是適合發現語法錯誤的時機。
+# A parse-only sweep over every tracked shell and JS file, better-rm included.
+# It closes an EXECUTION-COVERAGE gap rather than a behavioural one: the runner's
+# manifest names six suites, and the 13 tracked files under test/residual-harness
+# plus the 593-line bump-and-release.sh are in none of them -- no gate runs them,
+# so no gate notices when they stop parsing. Measured: appending an unterminated
+# `if true; then` to test/residual-harness/repeat-core.sh in a git-archive copy
+# leaves all six suites GREEN. bump-and-release.sh's first real run is a
+# publication, which is not the moment to discover a syntax error.
+#
+# 刻意用 /bin/bash 而不是 PATH 上的 bash：這台機器的 /bin/bash 是 3.2.57，而這些腳本
+# 真正跑在哪個直譯器下就是它（launchd 與 shebang 都指向它），PATH 上的 bash 是 5.3。
+# ubuntu runner 的 /bin/bash 是 5.x，所以 3.2 那一半只在本機真的會動——不要為了讓兩台
+# 主機一致就改成裸 bash -n，那等於把本機這一半關掉。
+# /bin/bash deliberately, not `bash` from PATH: /bin/bash here is 3.2.57 and that
+# is the interpreter half of these scripts really run under, while `bash` on PATH
+# is 5.3. The ubuntu runner's /bin/bash is 5.x, so the 3.2 half only really fires
+# locally -- do NOT weaken this to a bare `bash -n` to make the two hosts agree.
+#
+# git ls-files 是首選,因為那就是 CI 檢出的清單;git archive 解出來的樹沒有 .git,所以
+# 有 find 作為後備。兩者都空代表這道掃描自己壞了,必須大聲失敗而不是靜靜通過——
+# 「什麼都沒檢查卻是綠的」正是它要防的那個形狀。
+# git ls-files first, because that is the list CI checks out; a git-archive tree
+# has no .git, so find is the fallback. An empty list from both means this sweep
+# is itself broken and must fail loudly rather than pass in silence -- "checked
+# nothing and stayed green" is the exact shape it exists to catch.
+PARSE_SWEEP_SH_LIST="$TMP_ROOT/parse-sweep-sh.txt"
+PARSE_SWEEP_JS_LIST="$TMP_ROOT/parse-sweep-js.txt"
+( cd "$SCRIPT_DIR" && git ls-files '*.sh' 2>/dev/null ) > "$PARSE_SWEEP_SH_LIST"
+if [ ! -s "$PARSE_SWEEP_SH_LIST" ]; then
+    ( cd "$SCRIPT_DIR" && find . -type f -name '*.sh' | sed 's|^\./||' | sort ) > "$PARSE_SWEEP_SH_LIST"
+fi
+printf '%s\n' 'better-rm' >> "$PARSE_SWEEP_SH_LIST"
+( cd "$SCRIPT_DIR" && git ls-files '*.js' 2>/dev/null ) > "$PARSE_SWEEP_JS_LIST"
+if [ ! -s "$PARSE_SWEEP_JS_LIST" ]; then
+    ( cd "$SCRIPT_DIR" && find . -type f -name '*.js' | sed 's|^\./||' | sort ) > "$PARSE_SWEEP_JS_LIST"
+fi
+
+PARSE_SWEEP_PROBLEMS=""
+PARSE_SWEEP_SH_COUNT=0
+# 從「檔案」而不是 pipe 讀進來：pipe 會讓迴圈跑在 subshell 裡，計數與問題清單都會在
+# 迴圈結束時消失，這道掃描就會永遠回報 0 個問題。
+# Read from a FILE, not a pipe: a pipe puts the loop in a subshell and both the
+# counter and the problem list vanish when it ends, which would make this sweep
+# report zero problems for ever.
+while IFS= read -r parse_sweep_file; do
+    [ -n "$parse_sweep_file" ] || continue
+    [ -f "$SCRIPT_DIR/$parse_sweep_file" ] || continue
+    PARSE_SWEEP_SH_COUNT=$((PARSE_SWEEP_SH_COUNT + 1))
+    /bin/bash -n "$SCRIPT_DIR/$parse_sweep_file" 2>/dev/null ||
+        PARSE_SWEEP_PROBLEMS="$PARSE_SWEEP_PROBLEMS $parse_sweep_file(bash -n)"
+done < "$PARSE_SWEEP_SH_LIST"
+
+PARSE_SWEEP_JS_COUNT=0
+while IFS= read -r parse_sweep_file; do
+    [ -n "$parse_sweep_file" ] || continue
+    [ -f "$SCRIPT_DIR/$parse_sweep_file" ] || continue
+    PARSE_SWEEP_JS_COUNT=$((PARSE_SWEEP_JS_COUNT + 1))
+    node --check "$SCRIPT_DIR/$parse_sweep_file" >/dev/null 2>&1 ||
+        PARSE_SWEEP_PROBLEMS="$PARSE_SWEEP_PROBLEMS $parse_sweep_file(node --check)"
+done < "$PARSE_SWEEP_JS_LIST"
+
+if [ "$PARSE_SWEEP_SH_COUNT" -ge 2 ] && [ "$PARSE_SWEEP_JS_COUNT" -ge 1 ]; then
+    pass "the parse sweep found files to check (shell=$PARSE_SWEEP_SH_COUNT, js=$PARSE_SWEEP_JS_COUNT)"
+else
+    fail "the parse sweep found nothing to check (shell=$PARSE_SWEEP_SH_COUNT, js=$PARSE_SWEEP_JS_COUNT)"
+fi
+if [ -z "$PARSE_SWEEP_PROBLEMS" ]; then
+    pass "every tracked shell and JS file parses, including the ones no suite runs"
+else
+    fail "files that do not parse:$PARSE_SWEEP_PROBLEMS"
+fi
+
 printf 'Passed: %s\nFailed: %s\n' "$PASSED" "$FAILED"
 if [ "$FAILED" -ne 0 ]; then
     exit 1

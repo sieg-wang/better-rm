@@ -685,7 +685,18 @@ else
         residuals_problems="$residuals_problems R1的修法方向(O_NOFOLLOW)從文件消失;"
     # R1 — 程式碼面：綁定檢查仍然是對「路徑」做的。若哪天改成驗 fd，殘留就消失了，
     # 這段文字必須跟著刪。
-    grep -q 'log_file_is_bound() {' "$BETTER_RM" ||
+    # 這裡與下面 R2/R3 兩條用同一道活碼過濾，理由也相同：驗收實測「把該行註解掉」
+    # 照樣讓一個裸 grep 命中，而註解掉一行是再普通不過的編輯。修這一類的那個 commit
+    # 只改了它引用到的那兩行，把同一個檔案裡形狀相同的第三個站點留著——量過：把
+    # log_file_is_bound 整批改名、只留一行註解掉的舊定義，整套 136 個測試全綠。
+    # Same live-code filter as the R2 and R3 halves below, for the same reason:
+    # acceptance measured that commenting the line out still satisfies a bare
+    # grep, and commenting out is an ordinary edit. The commit that fixed this
+    # class changed only the two lines it quoted and left this third site, the
+    # same shape, in the same file -- measured: renaming log_file_is_bound
+    # throughout and leaving one commented-out copy of the old definition keeps
+    # all 136 tests green.
+    grep -v '^[[:space:]]*#' "$BETTER_RM" | grep -q 'log_file_is_bound() {' ||
         residuals_problems="$residuals_problems R1所描述的log_file_is_bound已不存在;"
     # R2 — 文字面要留住「無 root 不可測」這個理由，否則下一輪會有人硬寫一個假測試。
     grep -q '無法在無 root 的情況下測試' "$residuals_doc" ||
@@ -749,6 +760,23 @@ for meta_payload in 'semi; touch ACE-META; :' 'amp & touch ACE-META & :' 'grave`
     printf '%s\n' "META" > "$meta_dir/work/$meta_payload"
     ( cd "$meta_dir/work" && BETTER_RM_STATE_DIR="$meta_dir/state" "$BETTER_RM" -- "$meta_payload" ) >/dev/null 2>&1
     grep -v '^#' "$meta_dir/state/deletion.log" 2>/dev/null | tail -1 > "$meta_dir/record"
+    # 先確認真的有東西可以 source。少了這兩道正向控制，這個迴圈分不出「轉義成功」與
+    # 「根本沒記錄」：沒有日誌時 record 是 0 bytes，source 一個空檔案什麼都不會發生，
+    # 四列全部通過。實測：把 better-rm 的日誌路徑搬到 $state_dir/logs/deletion.log
+    # （目錄會被既有的 mkdir -p 自動建出來，--restore 也跟著搬，所以下面那個元字元還原
+    # 測試仍然是綠的），這四列在強化前照樣全過。
+    # Confirm there is actually something to source. Without these two positive
+    # controls the loop cannot tell "escaped" from "never logged": with no log the
+    # record is 0 bytes, sourcing an empty file does nothing, and all four rows
+    # pass. Measured: moving better-rm's log to $state_dir/logs/deletion.log (the
+    # existing mkdir -p creates it, and --restore moves with it, so the
+    # metacharacter restore test below stays green) leaves these four rows green
+    # before this change.
+    if [ ! -s "$meta_dir/record" ]; then
+        meta_exec_failures="$meta_exec_failures '$meta_payload'(沒有紀錄可 source / no record was written)"
+    elif ! grep -qF 'ACE-META' "$meta_dir/record"; then
+        meta_exec_failures="$meta_exec_failures '$meta_payload'(紀錄裡沒有 payload 名稱 / the payload name is not in the record)"
+    fi
     ( cd "$meta_dir" && bash -c '. ./record' ) >/dev/null 2>&1
     if [ -e "$meta_dir/ACE-META" ]; then
         meta_exec_failures="$meta_exec_failures '$meta_payload'"
@@ -757,7 +785,7 @@ done
 if [ -z "$meta_exec_failures" ]; then
     test_pass "shell 元字元在日誌欄位被轉義，source 紀錄不會執行命令"
 else
-    test_fail "日誌紀錄被 source 時執行了命令：$meta_exec_failures"
+    test_fail "日誌欄位轉義的守衛失敗——執行了命令，或根本沒有紀錄可驗 / the escaping guard failed: a command ran, or there was no record to check：$meta_exec_failures"
 fi
 
 test_item "含 shell 元字元的檔名仍可由日誌還原"
@@ -3789,6 +3817,129 @@ if [ "$old_format_status" -eq 0 ] && [ -f old_format.txt ] && \
     test_pass "舊格式日誌紀錄仍可還原"
 else
     test_fail "舊格式日誌紀錄無法還原 (status=$old_format_status)"
+fi
+
+test_item "升級前寫下的紀錄：名稱含反斜線與 metacharacter（v2 舊編碼）與舊版五欄都能還原"
+# 88e6611 把 encode_log_field 加寬（新增 \s \a \g \d）之後，--restore 的便宜前置過濾只認得
+# 「原始字串」與「現行編碼」兩種寫法。名稱同時含一個反斜線與一個 ; & ` $ 時，27236f9 與
+# 88e6611 之間那一版寫下的 v2 紀錄兩種都不是——它把反斜線加倍、卻把 ';' 原樣留著——於是
+# 整行被跳過，--restore 回報找不到。垃圾桶副本還在，但唯一的取回路徑就是 --restore，沒有
+# --list 可退。fail-closed（絕不會還原到錯的檔案），但東西拿不回來。
+# 88e6611 widened encode_log_field with four new escapes (\s \a \g \d), and the
+# cheap pre-filter in --restore knows only two spellings: the raw string and the
+# CURRENT encoding. For a name holding both a backslash and one of ; & ` $, the
+# v2 record written by the revisions between 27236f9 and 88e6611 is neither -- it
+# doubled the backslash and left the ';' raw -- so both needles miss, the line is
+# skipped, and --restore reports NOT FOUND while the trash copy is still there,
+# with --restore the only way back.
+#
+# 兩種歷史佈局都跑，而且它們是「不同的」東西，這一點是量過才寫的：
+#   v2_pre_upgrade → 六欄，帶 27236f9 那一版的轉義（反斜線加倍、| \n \r，沒有 \s \a \g \d）
+#   legacy_raw     → 五欄，完全沒有轉義。encode_log_field 與 v2 標記是同一個 commit
+#                    （27236f9）進來的，所以五欄紀錄一律是原始位元組，那個佈局從來沒轉義過。
+# CHANGELOG.md 說「--restore 仍能在升級前的紀錄裡找到原始的 ';'，v2 與舊版五欄都已釘住」，
+# 而在此之前沒有任何測試涵蓋舊版五欄（`grep '| v2 |' test-better-rm.sh` 只有雙斜線與效能
+# 填充那三處，沒有一個含 ; & ` 或 $）。raw;semi.txt 那幾列就是那句話的釘子，兩種佈局都是
+# 綠的，所以新增的第三個 needle 不可能靠「什麼都比對得上」讓整段通過。
+# Both historical layouts run, and they are DIFFERENT things -- measured, not
+# assumed: v2_pre_upgrade is six fields carrying 27236f9's escaping, while
+# legacy_raw is five fields with NO escaping at all, because encode_log_field and
+# the v2 marker arrived in the same commit (27236f9), so a five-field record is
+# always raw bytes. CHANGELOG.md claims --restore "still finds a raw ';' in a
+# pre-upgrade record ... pinned for both the v2 and the legacy five-field
+# layout", and until now nothing covered the legacy one (`grep '| v2 |'
+# test-better-rm.sh` finds only the doubled-slash and perf-filler rows, none of
+# which holds ; & ` or $). The raw;semi.txt rows are that pin, green in both
+# layouts, which is also what stops the new third needle from passing this block
+# by matching everything.
+encode_pre_upgrade_field() {
+    # 27236f9 引入、88e6611 之前的 encode_log_field，逐行照抄。轉抄是刻意的：那個編碼器
+    # 已經不在原始碼裡，沒有出處可讀。而「現行格式」那一半並不是轉抄——它直接用 better-rm
+    # 自己寫出來的日誌——所以兩半不會一起漂走。
+    # encode_log_field as it stood from 27236f9 until 88e6611, transcribed. The
+    # transcription is deliberate: that encoder no longer exists in the source,
+    # so there is nothing to read it from. The current-format half below is NOT
+    # transcribed -- it restores from the log better-rm itself wrote -- so the
+    # two halves cannot drift together.
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//|/\\p}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    printf '%s' "$value"
+}
+pre_upgrade_meta_ok=1
+pre_upgrade_meta_detail=""
+for ledger_format in v2_pre_upgrade legacy_raw; do
+    for meta_name in 'pre\;up.txt' 'pre\&up.txt' 'pre\$up.txt' 'raw;semi.txt'; do
+        setup
+        cd "$TEST_WORK_DIR" || continue
+        printf '%s\n' "PRE-UPGRADE METACHAR" > "$meta_name"
+        "$BETTER_RM" "$meta_name" >/dev/null 2>&1
+        meta_trash=$(find "$TEST_TRASH_DIR" -type f -name '*__*' | head -1)
+        if [ -z "$meta_trash" ] || [ -e "$meta_name" ]; then
+            pre_upgrade_meta_ok=0
+            pre_upgrade_meta_detail="$pre_upgrade_meta_detail [$ledger_format '$meta_name': 刪除沒有產生垃圾桶副本 / delete produced no trash copy]"
+            continue
+        fi
+        {
+            printf '%s\n' "# Better-RM Deletion Log"
+            if [ "$ledger_format" = "v2_pre_upgrade" ]; then
+                printf '%s | v2 | %s | %s | %s | %s\n' \
+                    "20260101_000000_000000000" \
+                    "$(encode_pre_upgrade_field "$TEST_WORK_DIR/$meta_name")" \
+                    "$(encode_pre_upgrade_field "$meta_trash")" \
+                    "0123456789abcdef" "file"
+            else
+                printf '%s | %s | %s | %s | %s\n' \
+                    "20260101_000000_000000000" \
+                    "$TEST_WORK_DIR/$meta_name" \
+                    "$meta_trash" \
+                    "0123456789abcdef" "file"
+            fi
+        } > "$TEST_STATE_DIR/deletion.log"
+        meta_status=0
+        "$BETTER_RM" --restore "$meta_name" >/dev/null 2>&1 || meta_status=$?
+        if [ "$meta_status" -ne 0 ] || [ ! -f "$meta_name" ] || \
+           [ "$(cat "$meta_name")" != "PRE-UPGRADE METACHAR" ]; then
+            pre_upgrade_meta_ok=0
+            pre_upgrade_meta_detail="$pre_upgrade_meta_detail [$ledger_format '$meta_name': status=$meta_status]"
+        fi
+    done
+done
+# 現行格式的控制列：不覆寫日誌，直接用 better-rm 自己寫的那一筆還原。
+# Current-format control: do not touch the log, restore from the record
+# better-rm itself wrote.
+for meta_name in 'pre\;up.txt' 'raw;semi.txt'; do
+    setup
+    cd "$TEST_WORK_DIR" || continue
+    printf '%s\n' "CURRENT FORMAT METACHAR" > "$meta_name"
+    "$BETTER_RM" "$meta_name" >/dev/null 2>&1
+    current_meta_status=0
+    "$BETTER_RM" --restore "$meta_name" >/dev/null 2>&1 || current_meta_status=$?
+    if [ "$current_meta_status" -ne 0 ] || [ ! -f "$meta_name" ] || \
+       [ "$(cat "$meta_name")" != "CURRENT FORMAT METACHAR" ]; then
+        pre_upgrade_meta_ok=0
+        pre_upgrade_meta_detail="$pre_upgrade_meta_detail [current '$meta_name': status=$current_meta_status]"
+    fi
+done
+# 反向控制：不存在的名稱必須還原失敗，否則放寬過濾就成了「什麼都找得到」。
+# Negative control: a name that was never deleted must still fail, or a looser
+# filter would just be "finds everything".
+setup
+cd "$TEST_WORK_DIR" || true
+printf '%s\n' "DECOY" > 'pre\;up.txt'
+"$BETTER_RM" 'pre\;up.txt' >/dev/null 2>&1
+missing_restore_status=0
+"$BETTER_RM" --restore 'no-such-name.txt' >/dev/null 2>&1 || missing_restore_status=$?
+if [ "$missing_restore_status" -eq 0 ] || [ -e 'no-such-name.txt' ] || [ -e 'pre\;up.txt' ]; then
+    pre_upgrade_meta_ok=0
+    pre_upgrade_meta_detail="$pre_upgrade_meta_detail [negative control: status=$missing_restore_status]"
+fi
+if [ "$pre_upgrade_meta_ok" -eq 1 ]; then
+    test_pass "v2 舊編碼、舊版五欄原始位元組與現行格式，含 metacharacter 的名稱都還原成功"
+else
+    test_fail "含 metacharacter 的名稱無法還原：$pre_upgrade_meta_detail"
 fi
 
 test_item "長日誌的還原掃描不得退化（效能護欄）"

@@ -2,17 +2,17 @@
 
 這個檔案是給**下一個審查者**看的，不是給使用者看的。
 
-下面三項都經過實測、都是既有殘留、都刻意沒修。如果一次 review 又「發現」它們，
+下面四項都經過實測、都是既有殘留、都刻意沒修。如果一次 review 又「發現」它們，
 那是重複勞動——先讀這裡的理由，再決定要不要推翻它。
 
-每一項都有 `test-better-rm.sh` 裡的一個測試釘著，而且那個測試是**雙向**的：
+R1–R3 各有 `test-better-rm.sh` 裡的一個測試釘著，而且那個測試是**雙向**的：
 文字不見了會紅，**底下的程式碼事實變了也會紅**。第二半是重點——它逼著「修好了
 卻忘了刪這段文字」變成一次失敗，而不是一段悄悄過期的謊。
 
-This file is for the **next reviewer**, not for users. All three items below are
+This file is for the **next reviewer**, not for users. All four items below are
 measured, pre-existing, and deliberately unfixed. A review that "finds" them again
 is repeating work already done — read the reasoning first, then decide whether to
-overturn it. Each is pinned by a test in `test-better-rm.sh`, and the pin is
+overturn it. R1-R3 are each pinned by a test in `test-better-rm.sh`, and the pin is
 **two-way**: it fails if the text disappears, and it also fails if the underlying
 code fact changes. That second half is the point — it turns "fixed but forgot to
 delete this note" into a failure rather than a quietly stale claim.
@@ -167,3 +167,61 @@ commit **逐位元組相同**。閒置時兩邊都綠。
 **為什麼還沒修**：它在 pre-push gate 裡是真的負債（會隨機擋住推送），但正確修法
 是換成不看牆鐘的寫法（例如比較有／無 padding 的相對成本，或直接斷言解析複雜度
 上界），不是把 1000 改大——那只是把翻紅的負載門檻往上移。
+
+## R4 — carrier 的腳本從 pipe 或 process substitution 進來時，不會被掃描
+
+**2026-09-03 實測，全部放行**（走真正的 stdin 進入點，payload 是 touch 不是刪除，
+標記檔在 /bin/bash 3.2.57 與 5.3.15 下都出現，所以這些命令是真的會執行）：
+
+```
+echo "rm -rf /etc" | bash
+printf %s "rm -rf /etc" | sh
+echo rm -rf /etc | sudo bash
+echo "rm -rf /etc" | bash -s
+echo "rm -rf /etc" | tee /dev/null | bash
+echo "rm -rf /etc" | source /dev/stdin
+bash <(echo "rm -rf /etc")
+curl -sSL https://example.invalid/install.sh | bash
+```
+
+對照組：逐位元組等價的 heredoc 寫法 `cat <<EOF | bash` 是**拒絕**的，同一天新增的
+here-string 寫法 `bash <<< "rm -rf /etc"` 也已改成拒絕。差別只在腳本從哪裡進來。
+
+**為什麼沒修（這是一個政策決定，不是一次遺漏）**：
+
+1. **窄修法不成立。** 「carrier 在命令位置、沒有 -c、沒有 heredoc 內文、也沒有檔案
+   操作元時，就去掃前面 echo/printf 階段的字面字串操作元」——這抓得到上面前兩列，
+   卻放過 `cat f | bash`、`curl … | bash`、`bash < file`、`bash <&3`、
+   `python -c … | bash` 以及其他每一種產生器。它把一個開放家族裡的一種寫法收窄，
+   讀起來卻像「已修好」，那比不修更糟。它同時還會新擋掉 `echo "$cmd" | bash`
+   （動態字使巢狀命令不可知，而不可知的命令字會被假設成 rm），那是一個新的誤擋面。
+2. **成立的那條規則會擋掉本專案自己的安裝方式。** 「carrier 的腳本從這道閘門讀不到
+   的地方進來就一律拒絕」是唯一站得住腳的規則，而它會拒絕 README.md 記載的
+   `curl -sSL https://raw.githubusercontent.com/…/install.sh | bash`（含
+   `| bash -s -- -a claude` 的兩種變體）以及 `cat script.sh | bash`。這兩者今天都是
+   放行的。對一道已經接受數個 carrier 殘留的閘門而言，改成拒絕「掃不到的 stdin
+   腳本」是一次真正的姿態改變——那是使用者的決定，不是修 bug 的人的決定。
+3. **process substitution 是第二個機制**，`bash <(echo …)` 有它自己的誤擋面。
+
+**要什麼才能推翻**：使用者裁決要不要接受 (2) 那條規則的誤擋面。在那之前，這一條
+是**已揭露、未修**，而不是沒人看見。與 R1–R3 不同，這一條還沒有雙向釘——它釘不了，
+因為要釘的是一個尚未做成的決定。AGENTS.md 已記載的是 `-exec` 與 xargs 那一族
+（操作元從 stdin 來），這一條講的是不同的東西：**腳本本身**從 stdin 來。
+
+**R4 — a shell carrier whose script arrives on a pipe or a process substitution is
+not scanned.** All eight spellings above were measured ALLOW on 2026-09-03 through
+the real stdin entry point, with the deletion replaced by a touch so the marker
+file proves bash really runs them. The byte-equivalent heredoc form
+(`cat <<EOF | bash`) is refused, and the here-string form (`bash <<< "…"`) was
+changed to refuse on the same day; the only difference is where the script comes
+from. It is unfixed because the narrow patch is unsound — it would catch the
+literal-`echo` subset, leave `cat f | bash`, `curl … | bash`, `bash < file`,
+`bash <&3` and every other emitter open while reading as "fixed", and newly refuse
+`echo "$cmd" | bash` — while the rule that IS sound ("a carrier whose script this
+gate cannot read is refused") denies this repository's own documented install
+route, `curl -sSL … | bash` (README.md), and `cat script.sh | bash`. Denying
+unscannable stdin scripts is a genuine change of posture for a gate that already
+accepts several disclosed carrier residuals, so it is the user's call. Process
+substitution is a second mechanism with its own over-refusal surface. Unlike
+R1-R3 this item has no two-way pin, because what would have to be pinned is a
+decision nobody has made yet.

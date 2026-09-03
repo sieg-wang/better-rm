@@ -2642,12 +2642,30 @@ assert_file "the oversized runtime hook was actually published" \
 # reads as a failure whatever the file says. Measured while writing this test.
 # 用 grep -F 且直接比對檔案:共用 helper 會把 haystack 當 shell 參數傳並以 BRE 比對,
 # needle 裡的 [ ] 會靜默變成字元類,不論檔案內容為何都判失敗。
-if grep -qF 'hookArgs = ["-e", source]' "$INSTALLER"; then
+# Both anchors read the LIVE code and match a SPELLING rather than one string.
+# As fixed strings against the unfiltered file they had no teeth in either
+# direction, and both directions were measured: a true revert to the
+# pre-133e5c5 shape re-spelled as `hookArgs=["-e",source];` slipped past the
+# negative anchor, while the fixed line left behind as `// hookArgs =
+# [stagedPath];` still satisfied the positive one -- that combination is a
+# working installer on macOS (the ceiling it reintroduces is Linux-only) and it
+# passed this whole suite 280/0.
+# The -F to -E switch is safe HERE specifically: the reason -F was chosen (see
+# the note above) is that the shared assert helpers pass the haystack as a shell
+# argument and match with a BASIC regex; matching the FILE directly with grep -E
+# does not have that problem.
+# 兩個錨點都改成「讀活碼、比對拼法」而不是比對單一字串。原本的固定字串比對兩個方向都
+# 沒有牙齒,而且兩個方向都量過:真正回退成 `hookArgs=["-e",source];` 躲過否定錨點,
+# 而被註解掉的 `// hookArgs = [stagedPath];` 仍然滿足肯定錨點——這個組合在 macOS 上是
+# 一個能正常運作的安裝器(它重新引入的天花板只在 Linux 上),整套測試 280/0 全綠。
+# 從 -F 換成 -E 在「這裡」是安全的:當初選 -F 的理由(見上方註解)是共用 helper 會把
+# haystack 當 shell 參數傳、以 BRE 比對;直接對「檔案」用 grep -E 沒有那個問題。
+if grep -v '^[[:space:]]*//' "$INSTALLER" | grep -qE 'hookArgs[[:space:]]*=[[:space:]]*[[][[:space:]]*"-e"'; then
     fail "the probe does not pass candidate bytes through argv"
 else
     pass "the probe does not pass candidate bytes through argv"
 fi
-if grep -qF 'hookArgs = [stagedPath]' "$INSTALLER"; then
+if grep -v '^[[:space:]]*//' "$INSTALLER" | grep -qE 'hookArgs[[:space:]]*=[[:space:]]*[[][[:space:]]*stagedPath[[:space:]]*[]]'; then
     pass "the probe executes the held bytes as a file"
 else
     fail "the probe executes the held bytes as a file"

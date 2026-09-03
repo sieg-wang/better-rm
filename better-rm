@@ -175,6 +175,28 @@ encode_log_field() {
     printf '%s' "$value"
 }
 
+# 88e6611 之前的欄位編碼，只用於 --restore 的前置過濾，永遠不用於寫入。
+# 那一版只把反斜線加倍並轉義 | \n \r，沒有 \s \a \g \d。名稱同時含有一個反斜線與一個
+# ; & ` $ 時，它寫出來的欄位既不是原始字串、也不是現行編碼，於是前置過濾兩個 needle 都
+# 比不到而整行被跳過——垃圾桶副本還在，--restore 卻回報找不到，而那是唯一的取回路徑。
+# 這個函式是只讀的：它不改變任何新紀錄的寫法，只讓過濾多認得一種歷史寫法。
+# The pre-88e6611 field encoding. Used ONLY by the --restore pre-filter, never to
+# write. That revision doubled the backslash and escaped | \n \r, with no \s \a
+# \g \d, so for a name holding both a backslash and one of ; & ` $ the field it
+# wrote is neither the raw string nor the current encoding: both needles missed,
+# the line was skipped, and --restore reported NOT FOUND while the trash copy was
+# still sitting there -- with --restore the only way back. This function is
+# read-only: it changes nothing about how new records are written, it only lets
+# the filter recognise one more historical spelling.
+encode_legacy_log_field() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//|/\\p}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    printf '%s' "$value"
+}
+
 # 解碼 v2 日誌欄位，結果寫入 LOG_FIELD_DECODED
 # （不用命令替換回傳，否則結尾換行的檔名會被吃掉）
 # Decode a v2 log field into LOG_FIELD_DECODED; a command substitution would
@@ -1311,6 +1333,17 @@ restore_file() {
     local needle="${target_name#./}"
     local needle_encoded
     needle_encoded=$(encode_log_field "$needle")
+    # 第三種寫法：升級前（88e6611 之前）的編碼。放寬這個過濾是安全的，因為它只是「便宜的
+    # 前置排除」——通過的行仍然照原樣完整解析與比對，所以放寬只會多花時間，不可能還原到
+    # 錯的檔案。少了它，含反斜線又含 metacharacter 的舊紀錄會被靜默跳過。
+    # The third spelling: the pre-upgrade (pre-88e6611) encoding. Loosening this
+    # filter is safe by construction -- it is only a CHEAP PRE-REJECTION, and a
+    # line it lets through is still parsed and compared in full, so a looser
+    # filter can cost time but can never restore the wrong file. Without it a
+    # pre-upgrade record for a name holding a backslash AND a metacharacter is
+    # skipped in silence.
+    local needle_legacy
+    needle_legacy=$(encode_legacy_log_field "$needle")
     for log_file in "${log_files[@]}"; do
         lines=()
         if ! {
@@ -1328,7 +1361,7 @@ restore_file() {
             # 先做便宜排除（見上方說明）：兩種寫法都不含目標名稱就不可能匹配。
             # Cheap rejection first: a line holding neither spelling of the
             # target name cannot match, so it never needs parsing.
-            if [[ "$line" != *"$needle"* && "$line" != *"$needle_encoded"* ]]; then
+            if [[ "$line" != *"$needle"* && "$line" != *"$needle_encoded"* && "$line" != *"$needle_legacy"* ]]; then
                 continue
             fi
             # 解析日誌行：

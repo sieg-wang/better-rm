@@ -471,6 +471,51 @@ const blocked = [
   // 出現),沒有一條是推論來的。
   "git status # it's fine\n/bin/rm -rf /etc",
   "ls # don't\nrm -rf /etc",
+  // A LINE CONTINUATION before the comment. bash deletes the backslash-newline
+  // pair before it tokenises anything, so the '#' after it really is at the
+  // start of a word, really does open a comment, and the deletion on the line
+  // after that really runs. Two of the three scanners lost word-start across
+  // the pair -- shellWords' escaped branch, and both escape branches in
+  // commandSubstitutions, which 'continue' past the bottom-of-loop update -- so
+  // the '#' was read as ordinary text, the apostrophe in "it's" opened a quote
+  // that ran to the end of the INPUT, and the deletion was swallowed into it.
+  // That is the bypass the comment rule closed, reopened by two characters.
+  // '/bin/rm' also sidesteps the rm->better-rm alias, so both layers missed it.
+  // Measured 2026-09-03 with the deletion replaced by a touch: the marker file
+  // appeared under /bin/bash 3.2.57 and under 5.3.15 alike.
+  // 反斜線接換行是「行接續」,bash 在斷詞之前就把兩個字元一起刪掉,所以後面那個 '#' 真的
+  // 位在字首、真的會開啟註解,而再下一行的刪除指令真的會執行。三個掃描器裡有兩個在這個字
+  // 元對上弄丟了「字首」狀態,於是 '#' 被當成普通文字,"it's" 的單引號開啟了一路吃到輸入
+  // 結尾的引號狀態,刪除指令就被吞了進去——註解規則關上的那個繞過,被兩個字元重新打開。
+  "git status \\\n# it's fine\n/bin/rm -rf /etc",
+  "git status \\\n# it's fine\n/bin/rm -rf ~/.ssh",
+  // The commandSubstitutions sibling, in both spellings. A shellWords-only fix
+  // leaves these two ALLOWED, which is what makes them worth their lines.
+  // commandSubstitutions 那一側的同型站點(兩種寫法)。只修 shellWords 的話這兩列仍是放行。
+  "echo \\\n# don't\n$(rm -rf /etc)",
+  "echo \\\n# don't\n`rm -rf /etc`",
+  // ...and the other direction, which is what stops the fix from becoming
+  // "restore word-start after every continuation". A continuation INSIDE a word
+  // leaves the '#' in mid-word, where it is NOT a comment, so the ';'-separated
+  // deletion after it really runs -- marker file measured under both bashes.
+  // The double-quoted and closed-empty-quote spellings are the same rule from
+  // the other two directions: a '#' is not a comment in either place, and the
+  // word-start the backslash was standing at was already false in both.
+  // ...以及反方向的控制列,防止修法變成「每個行接續之後都把字首補回來」。字「裡面」的接續
+  // 讓 '#' 落在字中間,那不是註解,後面以 ';' 分隔的刪除真的會執行(兩個 bash 都測出標記
+  // 檔)。雙引號與空引號兩列是同一條規則的另外兩個方向。
+  "ls x\\\n#y ; rm -rf /etc",
+  "echo x\\\n#y $(rm -rf /etc)",
+  'echo "\\\n# $(rm -rf /etc)"',
+  "ls ''\\\n#; rm -rf /etc",
+  "ls \\\n\\\n# nope\nrm -rf /etc",
+  // readParenthesized already restores word-start across the pair, through its
+  // bottom-of-loop update. This row is the pin that says so: DENY before the fix
+  // and DENY after it, so a "make all three scanners match" edit that reached
+  // into this one as well would still have to keep it green.
+  // readParenthesized 本來就會在這個字元對之後補回字首(靠迴圈底部那一行)。這一列釘住
+  // 這件事:修法前後都必須是拒絕。
+  'echo $(true \\\n# x\nrm -rf /etc)',
   'ls # say "hi\nrm -rf /etc',
   "echo $(ls # it's\nrm -rf /etc)",
   // Inside double quotes shellWords never tokenises the interior, so this one
@@ -501,6 +546,60 @@ const blocked = [
   'echo x <<<"y"\nrm -rf /etc',
   "cat <<<z\n/bin/rm -rf /etc",
   "echo x <<<y\n\nrm -rf /etc",
+  // A here-STRING handed to a shell carrier IS that carrier's script. bash
+  // reads its stdin as the program, so `bash <<< "rm -rf /etc"` deletes exactly
+  // what the byte-identical heredoc spelling deletes -- and the heredoc spelling
+  // was already refused (the rows just above), while this one was ALLOWED. The
+  // operator reached the word stream as a redirection and nothing ever handed
+  // its operand back as code. Measured 2026-09-03 with the deletion replaced by
+  // a touch: `/bin/bash <<< "/usr/bin/touch <marker>"` created the marker under
+  // 3.2.57 and 5.3.15 alike, so the here-string really is the script bash runs.
+  // here-string 交給 shell carrier 的時候,它「就是」那個 carrier 的腳本:bash 把 stdin 當
+  // 程式讀,所以 `bash <<< "rm -rf /etc"` 刪掉的東西和逐位元組相同的 heredoc 寫法完全一樣
+  // ——而 heredoc 寫法(上面那幾列)早就被拒,這個寫法卻是放行。運算子只以重導向的身分進了
+  // 字流,沒有人把它的操作元當成程式碼交回去。
+  'bash <<< "rm -rf /etc"',
+  'sh <<<"rm -rf /etc"',
+  'dash <<< "rm -rf /etc"',
+  'zsh <<< "rm -rf /etc"',
+  'ksh <<< "rm -rf /etc"',
+  'fish <<< "rm -rf /etc"',
+  'bash -s <<< "rm -rf /etc"',
+  "bash <<< 'rm -rf /etc'",
+  'bash <<< rm\\ -rf\\ /etc',
+  'bash <<< "rm -rf ~/.ssh"',
+  // The wrappers unwrap into the same branch, so they are the cheap half.
+  // 這些 wrapper 會拆進同一個分支,是便宜的那一半。
+  'sudo bash <<< "rm -rf /etc"',
+  'env bash <<< "rm -rf /etc"',
+  'nohup bash <<< "rm -rf /etc"',
+  'timeout 5 bash <<< "rm -rf /etc"',
+  // ...and the expensive half: `source`/`.` are carriers that do NOT go through
+  // the shellCarriers branch, they go through the carrier-present body route.
+  // Their heredoc twins are already pinned above, so a fix that only taught the
+  // shellCarriers branch about '<<<' would leave these two open -- which is the
+  // whole reason they have their own lines.
+  // ...以及貴的那一半:`source`/`.` 是 carrier,但它們不走 shellCarriers 分支,而走
+  // carrier-present 的內文路徑。它們的 heredoc 雙胞胎上面已經釘住了,所以只教
+  // shellCarriers 分支認得 '<<<' 的修法會留下這兩列——這正是它們各佔一行的理由。
+  'source /dev/stdin <<< "rm -rf /etc"',
+  '. /dev/stdin <<< "rm -rf /etc"',
+  // The rm operand scan skips a redirection and its operand because that operand
+  // is a filename, not a target -- but '<<<' was missing from that list, so the
+  // here-string's operand was collected as a deletion target and
+  // `rm -rf ./build <<< /etc` was refused NAMING /etc, a path the command never
+  // touches (the allowed list holds that row). These two are the other side of
+  // that one-token change: an UNRESOLVABLE command word may itself be a carrier,
+  // so its here-string still has to be read as a script, and skipping the
+  // operand outright would have lost it. Both are DENY before the change and
+  // must stay DENY after it.
+  // rm 的操作元掃描會跳過重導向與它的操作元(那是檔名不是目標),但那份清單裡少了 '<<<',
+  // 於是 here-string 的操作元被當成刪除目標收走,`rm -rf ./build <<< /etc` 就以「/etc」
+  // 為由被拒——而那條命令根本不會碰 /etc(該列在 allowed 清單裡)。這兩列是那個單字元改動
+  // 的另一面:不可知的命令字本身可能就是 carrier,它的 here-string 仍必須當腳本讀,直接
+  // 跳過操作元就會把它弄丟。兩列在改動前後都必須是拒絕。
+  'CMD=bash; $CMD <<< "rm -rf /etc"',
+  '$(which bash) <<< "rm -rf /etc"',
   // ...and the interior is still scanned, so a substitution that really does
   // run inside an arithmetic expression is still refused. This is the row that
   // stops the arithmetic fix from becoming a hole.
@@ -800,11 +899,53 @@ const allowed = [
   'echo file#1 ; ls',
   'ls # rm -rf /etc',
   'ls\n# rm -rf /etc',
+  // The continuation's other half. bash deleted the pair, so these ARE comments
+  // and nothing after the '#' runs; refusing them was a FALSE denial. Measured
+  // 2026-09-03 with the deletion replaced by a touch: no marker file appeared
+  // under /bin/bash 3.2.57 or 5.3.15 for any of the four. This is the half that
+  // proves the fix is not "restore word-start and refuse more" -- all four are
+  // DENY before it and ALLOW after.
+  // 行接續的另一半。bash 刪掉了那個字元對,所以這些「是」註解,'#' 之後不會執行任何東西,
+  // 拒絕它們是誤擋(同一組 touch 探針在兩個 bash 下都沒有產生標記檔)。這也正是證明修法不是
+  // 「把字首補回來然後多擋一些」的那一半——這四列在修法之前全部是拒絕。
+  'true \\\n# ; rm -rf /etc',
+  'echo \\\n# $(rm -rf /etc)',
+  'echo \\\n# `rm -rf /etc`',
+  'ls \\\n# x; rm -rf /etc',
+  // A continuation inside a word is not a word boundary in either direction:
+  // `ls x\<nl>y` is the single word `xy`. These stay allowed for the same reason
+  // the blocked `ls x\<nl>#y ; rm ...` row stays blocked.
+  // 字「裡面」的接續兩邊都不是字界:`ls x\<換行>y` 是單一個字 `xy`。
+  'ls x\\\ny',
+  'echo a\\\nb',
+  "git status \\\n# it's fine",
   // Ordinary here-string use stays allowed: the operand is data for a command
   // that does not delete, exactly as before the fix.
   // 一般的 here-string 用法仍然放行:操作元是資料,而那個命令不會刪東西。
   'grep foo <<<"$var"',
   'echo x <<<y',
+  // ...and the carrier rows above must not turn every here-string into a
+  // refusal. A carrier's here-string is scanned as CODE, so a harmless script
+  // stays allowed and an unprotected target stays allowed; a here-string fed to
+  // a command that is not a carrier is still data and is not scanned at all.
+  // ...而上面那些 carrier 列不可以把每一個 here-string 都變成拒絕。carrier 的 here-string
+  // 是當「程式碼」掃的,所以無害的腳本照舊放行、目標不受保護也照舊放行;交給非 carrier 的
+  // here-string 仍然是資料,根本不會被掃。
+  'bash <<< "ls -la"',
+  'bash <<< "rm -rf ./build"',
+  'echo x <<<"rm -rf ./build"',
+  'echo x <<< /etc',
+  // `<<< /etc` feeds rm's STDIN, which rm never reads; it is not a deletion
+  // target and never was. Refusing it named a path the command does not touch,
+  // which is the worst kind of false denial -- it reads as if the gate had
+  // understood the command. The paired deny control is in the blocked list
+  // (`rm -rf /etc <<< ./build`), so this pair separates "skip the operator's
+  // operand" from "stop denying".
+  // `<<< /etc` 餵的是 rm 的 stdin,而 rm 從不讀 stdin;它不是刪除目標,從來都不是。拒絕它
+  // 等於指著一條那條命令根本不會碰的路徑,這是最糟的誤擋——看起來像是閘門讀懂了。成對的
+  // 拒絕控制列在 blocked 清單裡(`rm -rf /etc <<< ./build`)。
+  'rm -rf ./build <<< /etc',
+  'rmdir ./build <<< /etc',
   // ARITHMETIC expansion is not a command substitution. `$((` was read as `$(`
   // followed by a nested `(`, so the EXPRESSION was scanned as if the shell
   // were about to run it: a dynamic first token made the command word
@@ -1400,6 +1541,83 @@ for (const command of documentedAllowances) {
   const { status, stdout } = runHookOverStdin(claude(command));
   assert.equal(status, 0, `${command} (exit)`);
   assert.equal(stdout, '', `documented as allowed, but denied: ${command}`);
+  stdinChecks += 1;
+}
+
+// The line-continuation rows again, through the REAL stdin contract rather than
+// evaluate(). The tables above prove the parser; these prove the file that
+// every agent actually executes, which is the seam the bypass was found on.
+// 同樣那幾列,改走真正的 stdin 契約而不是 evaluate()。上面的表證明的是 parser,這裡證明的
+// 是每個 agent 真正執行的那個檔案——繞過就是在這個介面上被找到的。
+const continuationCommentBlocked = [
+  "git status \\\n# it's fine\n/bin/rm -rf /etc",
+  "git status \\\n# it's fine\n/bin/rm -rf ~/.ssh",
+  "echo \\\n# don't\n$(rm -rf /etc)",
+  "echo \\\n# don't\n`rm -rf /etc`",
+  "ls x\\\n#y ; rm -rf /etc",
+  "ls ''\\\n#; rm -rf /etc",
+];
+const continuationCommentAllowed = [
+  'true \\\n# ; rm -rf /etc',
+  'echo \\\n# $(rm -rf /etc)',
+  'ls \\\n# x; rm -rf /etc',
+  'ls x\\\ny',
+  "git status \\\n# it's fine",
+];
+for (const command of continuationCommentBlocked) {
+  const { status, stdout } = runHookOverStdin(claude(command));
+  assert.equal(status, 0, `${command} (exit)`);
+  let parsed = null;
+  try { parsed = JSON.parse(stdout); } catch (_) { parsed = null; }
+  assert.equal(
+    parsed?.hookSpecificOutput?.permissionDecision,
+    'deny',
+    `a line continuation must not hide the comment rule: ${JSON.stringify(command)} (stdout: ${JSON.stringify(stdout)})`
+  );
+  stdinChecks += 1;
+}
+for (const command of continuationCommentAllowed) {
+  const { status, stdout } = runHookOverStdin(claude(command));
+  assert.equal(status, 0, `${command} (exit)`);
+  assert.equal(stdout, '', `a real comment must stay allowed: ${JSON.stringify(command)}`);
+  stdinChecks += 1;
+}
+
+// The here-string carrier rows through the REAL stdin contract as well, for the
+// same reason: this is the file the agent runs.
+// here-string carrier 那幾列同樣走真正的 stdin 契約,理由相同:agent 跑的是這個檔案。
+const hereStringCarrierBlocked = [
+  'bash <<< "rm -rf /etc"',
+  'sh <<<"rm -rf /etc"',
+  'bash -s <<< "rm -rf /etc"',
+  "bash <<< 'rm -rf /etc'",
+  'bash <<< "rm -rf ~/.ssh"',
+  'sudo bash <<< "rm -rf /etc"',
+  'source /dev/stdin <<< "rm -rf /etc"',
+  '. /dev/stdin <<< "rm -rf /etc"',
+];
+const hereStringCarrierAllowed = [
+  'bash <<< "ls -la"',
+  'bash <<< "rm -rf ./build"',
+  'echo x <<<"rm -rf ./build"',
+  'grep foo <<<"$var"',
+];
+for (const command of hereStringCarrierBlocked) {
+  const { status, stdout } = runHookOverStdin(claude(command));
+  assert.equal(status, 0, `${command} (exit)`);
+  let parsed = null;
+  try { parsed = JSON.parse(stdout); } catch (_) { parsed = null; }
+  assert.equal(
+    parsed?.hookSpecificOutput?.permissionDecision,
+    'deny',
+    `a here-string is a carrier's script: ${JSON.stringify(command)} (stdout: ${JSON.stringify(stdout)})`
+  );
+  stdinChecks += 1;
+}
+for (const command of hereStringCarrierAllowed) {
+  const { status, stdout } = runHookOverStdin(claude(command));
+  assert.equal(status, 0, `${command} (exit)`);
+  assert.equal(stdout, '', `ordinary here-string use must stay allowed: ${JSON.stringify(command)}`);
   stdinChecks += 1;
 }
 

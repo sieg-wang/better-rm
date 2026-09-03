@@ -241,6 +241,19 @@ function shellWords(command) {
   // 整條以 ';' 分隔的刪除指令一起吞掉——重新打開了本檔早已關上的繞過。
   let atWordStart = true;
 
+  // Where the word-start flag stood when the BACKSLASH was read, so a
+  // backslash-newline can put it back. bash deletes that pair before it
+  // tokenises anything, so the two characters are not a word boundary and not
+  // part of a word either -- whatever came after them was at a word start
+  // exactly if the backslash itself was. Without this the pair silently cleared
+  // the flag, the '#' that followed stopped being a comment, and the odd
+  // apostrophe in `# it's fine` reopened the quote-to-end-of-input bypass the
+  // comment rule above exists to close.
+  // 記住讀到「反斜線」時字首旗標的狀態,好讓反斜線接換行把它還原。bash 在斷詞之前就把這
+  // 兩個字元刪掉,所以它們既不是字界也不屬於任何字:後面那個字元是否位在字首,完全等於這個
+  // 反斜線是否位在字首。少了這一行,這個字元對會默默清掉旗標,後面的 '#' 就不再是註解。
+  let escapedFromWordStart = false;
+
   // Whether the word at this index was written as an unquoted shell OPERATOR
   // rather than as text that happens to spell one. `;`, `\;` and `';'` all
   // tokenize to the same one-character word, and only the first of the three
@@ -289,6 +302,13 @@ function shellWords(command) {
       // `rm -rf \<nl>/etc` 直接穿過 agent 路徑上唯一的守衛。同一個誤讀也會反過來擋掉
       // 普通指令：續行被當成新命令，開頭是 "$HOME" 就成了不可知的執行檔。
       if (char !== '\n') word += char;
+      // A line continuation is deleted whole, so the word-start state the
+      // backslash stood at survives it. Only the newline spelling: `\x` really
+      // is part of a word, and restoring the flag there would make `ls x\#y`
+      // read as a comment when the shell reads it as one word.
+      // 行接續整組被刪掉,反斜線當時的字首狀態因此存活。只有換行這種寫法如此:`\x` 確實
+      // 屬於一個字,在那裡還原旗標會把 `ls x\#y` 誤讀成註解。
+      else atWordStart = escapedFromWordStart;
       escaped = false;
     } else if (quote === 'ansi-c') {
       if (char === "'") quote = '';
@@ -298,6 +318,7 @@ function shellWords(command) {
         index = decoded.end;
       } else word += char;
     } else if (char === '\\' && quote !== "'") {
+      escapedFromWordStart = wasAtWordStart;
       escaped = true;
     } else if (quote) {
       if (char === quote) quote = '';
@@ -546,16 +567,29 @@ function commandSubstitutions(command, noCommentSpans = []) {
   // "start of a word" is tracked explicitly instead of read off `word === ''`.
   // 與 tokenizer 相同的註解規則。這個掃描器沒有字的累加器，所以「字首」用旗標明確追蹤。
   let atWordStart = true;
+  // Same line-continuation rule as the tokenizer, and this scanner needs it for
+  // a second reason: both of its escape branches `continue`, which skips the
+  // bottom-of-loop update that would otherwise have set the flag from the
+  // newline. So the pair cleared word-start here too, and
+  // `echo \<nl># don't<nl>$(rm -rf /etc)` was ALLOWED even with the tokenizer
+  // half fixed -- measured. readParenthesized does not need it: its update at
+  // the bottom of the loop is reached, so the pair already sets the flag there.
+  // 與 tokenizer 相同的行接續規則,而且這個掃描器還多一個理由:它的兩個跳脫分支都
+  // `continue`,跳過了迴圈底部那一行——否則換行本來就會把旗標設起來。所以這裡的字元對同樣
+  // 會清掉字首,就算 tokenizer 那一半修好了,上面那條命令仍然放行(實測)。
+  let subEscapedFromWordStart = false;
 
   for (let i = 0; i < input.length; i += 1) {
     const char = input[i];
     const wasAtWordStart = atWordStart;
     atWordStart = false;
     if (escaped) {
+      if (char === '\n') atWordStart = subEscapedFromWordStart;
       escaped = false;
       continue;
     }
     if (char === '\\' && quote !== "'") {
+      subEscapedFromWordStart = wasAtWordStart;
       escaped = true;
       continue;
     }
@@ -1435,7 +1469,18 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
   // word stream at all; it sits beside it, addressed by the operator's index.
   // `<<` 與 `<<-` 形狀相同：運算子加操作元，而那個操作元是結束標記、不是路徑。它們帶出
   // 來的內文根本不在這串字裡，而是放在旁邊、用運算子的索引定址。
-  const redirectors = new Set(['<', '>', '<<', '<<-']);
+  // '<<<' belongs here for the same reason as '<<': it is an operator whose
+  // operand is not a path the command deletes. It fed rm's STDIN, which rm never
+  // reads, and collecting it as a target made `rm -rf ./build <<< /etc` refuse
+  // while NAMING /etc -- a path that command does not touch. It is safe to skip
+  // here specifically because the two carrier routes above now claim the same
+  // operand as a script, so it is not skipped everywhere, only in the scan that
+  // was reading it as a filename.
+  // '<<<' 屬於這裡,理由與 '<<' 相同:它是運算子,操作元不是那條命令會刪掉的路徑。它餵的是
+  // rm 的 stdin,而 rm 從不讀 stdin,把它當目標收走會讓 `rm -rf ./build <<< /etc` 以「/etc」
+  // 為由被拒——那條命令根本不碰 /etc。在這裡跳過是安全的,正因為上面兩條 carrier 路徑已經
+  // 把同一個操作元當成腳本接手了:它不是到處都被跳過,只在原本把它讀成檔名的那個掃描裡。
+  const redirectors = new Set(['<', '>', '<<', '<<-', '<<<']);
   // operator word index -> the heredoc body it introduced.
   const heredocBodies = new Map((words.heredocs || []).map((entry) => [entry.operatorIndex, entry.body]));
   const terminators = new Set([';', '&', '|', '(', ')', '\n']);
@@ -1510,10 +1555,27 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
       atCommandPosition = false;
     }
   }
+  // A here-string is the same shape as a heredoc body for this purpose, and it
+  // needs the same second route: `source /dev/stdin <<< "rm -rf /etc"` never
+  // reaches the shellCarriers branch (`source` is not one of them), so the arm
+  // added there does not cover it. Its heredoc twin was already refused here,
+  // which is what makes the gap visible: two spellings of one command, one
+  // refused and one allowed.
+  // here-string 在這裡與 heredoc 內文是同一種形狀,需要同一條第二路徑:
+  // `source /dev/stdin <<< "rm -rf /etc"` 根本不會走到 shellCarriers 分支(source 不在
+  // 那個集合裡),所以那邊新增的分支蓋不到它。它的 heredoc 雙胞胎在這裡早就被拒了。
+  const hereStringBodies = [];
+  for (let hi = 0; hi + 1 < words.length; hi += 1) {
+    if (operatorTokens[hi] && words[hi] === '<<<') hereStringBodies.push(words[hi + 1]);
+  }
   if (carrierPresent) {
     for (const entry of bodies) {
       if (depth >= 8) targets.push('/');
       else targets.push(...commandTargets(entry.body, depth + 1, true, expansionEnv));
+    }
+    for (const body of hereStringBodies) {
+      if (depth >= 8) targets.push('/');
+      else targets.push(...commandTargets(body, depth + 1, true, expansionEnv));
     }
   }
 
@@ -1822,6 +1884,23 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
       for (; i < words.length && !terminators.has(words[i]); i += 1) {
         const candidate = words[i];
         if (redirectors.has(candidate)) {
+          // ...but this loop also runs for an UNRESOLVABLE command word, and
+          // that word may be a shell carrier, in which case its here-string is
+          // the script -- the same rule the shellCarriers branch applies. Before
+          // '<<<' joined the skip list these operands were collected as targets
+          // and the whitespace arm below read them as commands, so
+          // `CMD=bash; $CMD <<< "rm -rf /etc"` was refused; skipping them
+          // outright would have turned that into an allow (measured). Only the
+          // here-string spelling: '<' and '<<' take a filename, not a script.
+          // ...但這個迴圈同時也服務「不可知的命令字」,而那個字可能就是 shell carrier,
+          // 那樣的話它的 here-string 就是腳本——與 shellCarriers 分支同一條規則。'<<<'
+          // 加進跳過清單之前,這些操作元會被當目標收走、再由下面那個空白字元的分支當成命令
+          // 讀,所以 `CMD=bash; $CMD <<< "rm -rf /etc"` 是拒絕;直接跳過會讓它變成放行
+          // (實測)。只針對 here-string:'<' 與 '<<' 接的是檔名,不是腳本。
+          if (unresolvedExecutable && candidate === '<<<' && i + 1 < words.length) {
+            if (depth >= 8) targets.push('/');
+            else targets.push(...commandTargets(words[i + 1], depth + 1, false, expansionEnv));
+          }
           // Skip the redirection and its filename operand (not an rm target),
           // but never skip a command terminator that follows a bare redirect.
           if (i + 1 < words.length && !terminators.has(words[i + 1])) i += 1;
@@ -1851,6 +1930,22 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
         // 內文唯一算「程式碼」的地方，也正是它被留在旁邊而不是丟掉的理由。
         if (heredocBodies.has(i)) {
           nestedCommands.push(heredocBodies.get(i));
+          continue;
+        }
+        // `bash <<< "rm -rf /etc"` has no -c either: the here-STRING is what
+        // bash reads on stdin, so it is the script, exactly like the heredoc
+        // body above. Measured with the deletion replaced by a touch: the
+        // marker appeared under /bin/bash 3.2.57, 5.3.15, `bash -s` and `sh`.
+        // It reaches this loop as an operator word because the tokenizer emits
+        // '<<<' as one -- the operatorTokens check is what keeps a literal
+        // `echo '<<<'` from being read as the operator.
+        // `bash <<< "rm -rf /etc"` 同樣沒有 -c:here-string 就是 bash 從 stdin 讀到的
+        // 東西,也就是腳本本身,與上面的 heredoc 內文完全同理(把刪除換成 touch 實測,
+        // 3.2.57、5.3.15、`bash -s`、`sh` 都產生了標記檔)。它以運算子字的身分進到這個
+        // 迴圈,而 operatorTokens 的檢查是防止字面的 `echo '<<<'` 被當成運算子。
+        if (operatorTokens[i] && words[i] === '<<<') {
+          if (i + 1 < words.length) nestedCommands.push(words[i + 1]);
+          i += 1;
           continue;
         }
         const option = words[i];
