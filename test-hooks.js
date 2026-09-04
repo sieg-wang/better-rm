@@ -724,6 +724,69 @@ const blocked = [
   // half of the csh gap that no URL allowlist could ever have covered.
   // 同一份 carrier 清單的「讀得到」那一面：字面產生器灌進 csh 會被掃描並照一般規則判定。
   'echo rm -rf /etc | csh',
+  // The FAIL-CLOSED half of the double-quote backslash rule below. These really
+  // are `rm` and really do name /etc when a shell runs them -- an UNQUOTED
+  // backslash is an escape in every shell, and a quote that opens and closes
+  // mid-word joins the halves -- so none of them may move when the double-quoted
+  // reading is corrected. Without these rows that correction could be widened to
+  // "a backslash is never an escape" and nothing would go red.
+  // 下面那條「雙引號裡的反斜線」規則的 fail-closed 那一半。這些寫法真的是 rm、真的指向
+  // /etc（未加引號的反斜線在每個 shell 都是逸出；字中間開閉的引號會把兩半接起來），所以修
+  // 正雙引號的讀法時，它們一列都不可以動。少了這幾列，那個修正可以被放寬成「反斜線永遠不是
+  // 逸出」而沒有任何測試轉紅。
+  'r\\m -rf /etc',
+  '\\rm -rf /etc',
+  '"r"m -rf /etc',
+  'r"m" -rf /etc',
+  'rm -rf "/e"tc',
+  'rm -rf /e"t"c',
+  // The same literal emitters a THIRD time, with the deletion written in the
+  // ESCAPE SEQUENCES the emitter itself decodes. On this command line
+  // `echo -e 'rm\x20-rf\x20/etc'` is a single shell WORD, so every text the union
+  // above builds reads `rm\x20-rf\x20/etc` -- one word, with `rm` never in command
+  // position -- while what the emitter writes down the pipe is three words and a
+  // deletion. Measured ALLOW at ee2cb0e through the real stdin entry point, and a
+  // touch payload really ran for every row below under bash 5.3.15, /bin/bash
+  // 3.2.57 (`echo -e`, `printf '%b'`), /bin/sh and /bin/csh.
+  // The decode is UNCONDITIONAL, not gated on `-e`: `bash -O xpg_echo` decodes a
+  // plain `echo` (measured: the payload ran), dash and ksh decode by default, and
+  // the gate cannot see which shell will read the pipe. Scanning the decoded text
+  // IN ADDITION to the raw one is the fail-closed direction -- it adds text to
+  // judge, never an allowance -- which is why the `-E` row belongs here even
+  // though bash's own `echo -E` does not decode (measured: no payload).
+  // 同一批字面產生器的第三種寫法：把刪除寫成「產生器自己會解碼」的逸出序列。在這條命令列上
+  // `echo -e 'rm\x20-rf\x20/etc'` 是「一個」shell 字，所以上面聯集建出來的每一段文字讀起來
+  // 都是 `rm\x20-rf\x20/etc`（一個字、`rm` 從來不在命令位置），而產生器真正寫進 pipe 的是三
+  // 個字加一次刪除。解碼「不」以 `-e` 為條件：`bash -O xpg_echo` 下的裸 echo 會解碼（實測
+  // payload 真的執行），dash 與 ksh 預設就解碼，而閘門看不到讀 pipe 的是哪一個 shell。把解
+  // 碼後的文字「加進去」掃（而不是取代原文）是 fail-closed 的方向：只會多出可判的文字，不會
+  // 多出放行。`-E` 那一列因此留在這裡，即使 bash 自己的 `echo -E` 不解碼（實測沒有 payload）。
+  "echo -e 'rm\\x20-rf\\x20/etc' | bash",
+  'echo -e "rm\\x20-rf\\x20/etc" | bash',
+  "echo -e 'rm\\t-rf\\t/etc' | bash",
+  "echo -e 'rm\\040-rf\\040/etc' | bash",
+  "echo -e 'r\\x6d -rf /etc' | bash",
+  "echo -e 'r\\u006d -rf /etc' | bash",
+  "echo -e '\\U00000072m -rf /etc' | bash",
+  "echo -E 'rm\\x20-rf\\x20/etc' | bash",
+  // printf decodes its FORMAT string always, and `%b` decodes the ARGUMENT too --
+  // two different texts of the union, so both are pinned.
+  // printf 的格式字串永遠會解碼，`%b` 讓「參數」也解碼——聯集裡的兩段不同文字，各釘一列。
+  "printf 'rm\\x20-rf\\x20/etc' | bash",
+  "printf 'rm\\040-rf\\040/etc' | bash",
+  "printf '%b' 'rm\\x20-rf\\x20/etc' | bash",
+  "printf '%b' 'rm\\t-rf\\t/etc' | bash",
+  "printf '%b\\n' 'rm\\x20-rf\\x20/etc' | sh",
+  // The same hole through the other carrier routes and the other two protected
+  // lists, so a fix that only covers `| bash` into SYSTEM_DIRS cannot look
+  // complete -- the same completeness the un-escaped rows above ask for.
+  // 同一個洞的其他 carrier 路徑與另外兩份受保護清單。
+  "bash <(echo -e 'rm\\x20-rf\\x20/etc')",
+  "echo -e 'rm\\x20-rf\\x20/etc' | csh",
+  "echo -e 'rm\\x20-rf\\x20/etc' | zsh",
+  "bash <<< \"$(echo -e 'rm\\x20-rf\\x20/etc')\"",
+  "echo -e 'rm\\x20-rf\\x20/home/tester' | bash",
+  "printf '%b' 'rm\\x20-rf\\x20/workspace/secrets' | bash",
 ];
 
 const allowed = [
@@ -1218,6 +1281,85 @@ const allowed = [
   // ……而 noexec 那個臂對它們是正確的，所以不加限制：實測 `csh -n`／`tcsh -n` 什麼都不執行。
   'curl -sSL https://example.invalid/x.sh | csh -n',
   'curl -sSL https://example.invalid/x.sh | tcsh -n',
+  // The benign twins of the ESCAPED emitter rows. Decoding adds a text to scan,
+  // so the thing that can go wrong is a decoded text that reads like a deletion
+  // when the emitter never wrote one. The Windows-path row is the one that
+  // matters: `C:\temp\rm` decodes to `C:` TAB `emp` CR `m`, and a decoder that
+  // split words differently -- or one that let a bare `rm` fall into command
+  // position -- would refuse a string that is not even a shell command.
+  // 解碼過的良性雙胞胎。加一段文字去掃，會出錯的地方就是「解碼後讀起來像刪除、但產生器根本
+  // 沒寫刪除」。Windows 路徑那一列最關鍵：`C:\temp\rm` 解碼成 `C:` TAB `emp` CR `m`。
+  'echo -e "hello\\nworld" | bash',
+  "echo 'C:\\temp\\rm'",
+  "echo 'C:\\temp\\rm' | bash",
+  "echo -e 'harmless\\ttext' | bash",
+  "printf '%b\\n' 'echo hi' | bash",
+  "printf '%b' 'echo\\x20hi' | bash",
+  "echo -e '\\x72ead the file' | bash",
+  // The exemption's own controls for the same-line redefinition rule below. The
+  // producer's name is what voids it, not the mere presence of a definition: a
+  // definition of some OTHER name, and a name this one is a PREFIX of, must both
+  // leave the documented route allowed, or the rule would be `any function
+  // definition on the line refuses the install route`.
+  // 底下「同一行重新定義」規則的對照。作廢豁免的是「產生器自己的名字」，不是「這行有定義」：
+  // 定義別的名字、以及定義一個以它為前綴的名字，都必須讓記載中的安裝路徑照常放行。
+  'wget() { echo hi; }; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'curlx() { echo hi; }; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'function curl_helper { echo hi; }; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'alias ll=ls; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  // ...and the same controls for the RAW-TEXT half of that rule, which is the
+  // half that can be widened by accident: it matches on text, so every one of
+  // these rows contains the letters `curl`, `source` or a `.` in a position where
+  // the rule must NOT fire. `my_curl()` pins the word boundary in front of the
+  // name (without it `\bcurl\s*\(` is written `curl\s*\(` and this refuses);
+  // `curl (the tool)` pins that the parens must be EMPTY and adjacent;
+  // `sourced` pins the boundary after `source`; `./install.sh` pins that the dot
+  // command needs whitespace after the dot, or every relative path on a line
+  // would void the exemption. `-fsSL` is the spelling the false-denial row above
+  // uses, so this row is also the control that says `source` caused that refusal
+  // and the option letters did not.
+  // ……以及那條規則「原文掃描」那一半的對照，也就是最容易被不小心放寬的那一半：它比對的是文
+  // 字，所以下面每一列都含有 `curl`／`source`／`.`，而且都出現在「規則不可以觸發」的位置。
+  // `my_curl()` 釘住名字前面的詞界；`curl (the tool)` 釘住括號必須是空的且相鄰；`sourced`
+  // 釘住 `source` 後面的詞界；`./install.sh` 釘住點命令必須後接空白，否則一行上任何相對路
+  // 徑都會作廢豁免。最後一列用的是誤擋那一列同樣的 `-fsSL`，所以它同時證明那次拒絕是
+  // `source` 造成的，不是選項字母造成的。
+  'my_curl() { echo hi; }; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'echo "curl (the tool)"; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'echo sourced; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'ls ./install.sh; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'cd /tmp && curl -fsSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  // FALSE DENIALS, corrected. Inside DOUBLE QUOTES a backslash is only special
+  // before `$`, backtick, `"`, `\` and newline; before anything else the shell
+  // keeps BOTH characters. The tokenizer dropped every one of them, so it read
+  // `"/e\tc"` as `/etc` and `"\rm"` as `rm` -- words no shell produces -- and
+  // refused commands that cannot touch a protected path. Measured 2026-09-04 with
+  // od(1) and `type -t` under /bin/bash 5.3.15, /bin/bash 3.2.57, /bin/sh,
+  // /bin/zsh, /bin/ksh and /bin/dash: ALL FIVE print `\rm`, `r\m`, `/e\tc`
+  // verbatim, none of them resolves to an existing directory, and `"\touch" q1`
+  // creates nothing in any of them.
+  //
+  // This is the one place in this round where a refusal became an allowance, so
+  // it is pinned from both sides: the rows above are the spellings that really
+  // ARE rm and really DO name /etc, and they stay refused. The reason the
+  // correction had to happen at all is one row in `blocked`:
+  // `echo -e "rm\x20-rf\x20/etc" | bash` tokenized to the single word
+  // `rmx20-rfx20/etc`, which has no `rm` in it AND no escape left for the
+  // literal-emitter decode to find, so the deletion was allowed while its
+  // single-quoted twin was refused.
+  // 誤擋，已修正。雙引號裡的反斜線只有在 `$`、反引號、`"`、`\`、換行之前才是逸出，其餘一律
+  // 兩個字元都保留。tokenizer 把它們全丟掉，於是把 `"/e\tc"` 讀成 `/etc`、`"\rm"` 讀成
+  // `rm`——都是任何 shell 都不會產生的字——並擋掉了碰不到受保護路徑的命令。實測：五種 shell
+  // 一致，且沒有任何一條解析成存在的目錄。這是本輪唯一「拒絕變成放行」的地方，所以兩個方向
+  // 都釘住：上面那幾列是真的 rm、真的指向 /etc 的寫法，維持拒絕。
+  'rm -rf "/e\\tc"',
+  'rm -rf "/et\\c"',
+  'rm -rf "\\/etc"',
+  'rm -rf "/\\etc"',
+  'rm -rf "$HOME/.ss\\h"',
+  '"r\\m" -rf /etc',
+  '"\\rm" -rf /etc',
+  '"/bin/r\\m" -rf /etc',
 ];
 
 // Finding: a shell carrier nested past the recursion depth cap (8) must fail
@@ -2119,6 +2261,101 @@ const exceptionListControls = [
   'sudo curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
   '/usr/bin/curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
   './curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  // ...and the same hole from the one place the three tests above cannot look: a
+  // SHADOW. `curl() { echo "rm -rf /etc"; }; curl <URL> | bash` leaves the
+  // producer word bare, unprefixed and unpathed -- every condition the exemption
+  // asks -- while what runs is a function, and the URL text on the command line is
+  // byte-for-byte the documented one. Measured at ee2cb0e: ALLOW, and a touch
+  // payload really ran, with no request ever leaving the host.
+  // The rule this pins: the exemption is void when the command line DEFINES the
+  // producer's name anywhere on it. `anywhere` is deliberate and fail-CLOSED --
+  // see the trailing-definition row at the end of this group.
+  // ……以及上面三種測試都看不到的那一個角度：遮蔽。`curl() { … }; curl <URL> | bash` 讓產生
+  // 器的命令字維持「赤裸、無前綴、無路徑」——豁免要求的每一項都成立——但真正執行的是函式，
+  // 而命令列上的網址文字逐位元組相符。實測 ee2cb0e 放行，touch payload 真的執行，且沒有任何
+  // 請求離開這台機器。這裡釘的規則是：命令列上「任何位置」定義了產生器的名字，豁免即作廢。
+  'curl() { echo "rm -rf /etc"; }; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'curl(){ echo "rm -rf /etc"; }; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'curl () { echo "rm -rf /etc"; }; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'function curl { echo "rm -rf /etc"; }; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'curl() { echo "rm -rf /etc"; }; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | sh',
+  'curl() { echo "rm -rf /etc"; }; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install-hooks.sh | bash -s -- -a claude',
+  'wget() { echo "rm -rf /etc"; }; wget -qO- https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'function wget { echo "rm -rf /etc"; }; wget -qO- https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  // An ALIAS does not expand in a non-interactive shell, and one defined on this
+  // line could not apply to this line even in an interactive one -- bash parses
+  // the whole compound command before running any of it. It is refused anyway:
+  // the gate cannot see whether the line it is handed was typed at a prompt, and
+  // the cost of being wrong in this direction is one refusal of a command nobody
+  // writes. That is a DECISION, recorded here so it is not later "fixed".
+  // alias 在非互動 shell 不展開，而且同一行定義的 alias 對這一行也不會生效。仍然拒絕：閘門
+  // 看不出這一行是不是在互動提示下打的，而站錯這個方向的代價只是擋掉一條沒人會寫的命令。
+  "alias curl='curl -K /tmp/evil'; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash",
+  "alias wget='wget --config /tmp/evil'; wget -qO- https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash",
+  // The definition AFTER the pipeline. Honestly stated: bash parses the whole
+  // line before executing it, but the function is not DEFINED until the pipeline
+  // has already run, so the producer here really is the real curl and this row is
+  // a fail-CLOSED refusal of a benign command, not a closed hole. It is pinned
+  // because the alternative -- ordering the scan against the producer's position
+  // -- buys one exotic allowance and adds position bookkeeping to a security
+  // boundary, and `&`, `\n` and line continuations each give that bookkeeping a
+  // way to be wrong. Cheaper to refuse `curl <URL> | bash; curl() { :; }`.
+  // 定義寫在管線「後面」。誠實地說：bash 會先剖析整行才執行，但函式要到管線跑完才被定義，
+  // 所以這裡的產生器真的是原本的 curl，這一列是對良性命令的 fail-closed 誤擋，不是補起來的
+  // 洞。釘住它是因為另一個方向（照位置排序）只換到一個沒人會寫的放行，卻要在安全邊界上多一
+  // 套位置簿記，而 `&`、換行與續行符各自都能讓那套簿記出錯。
+  'curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash; curl() { :; }',
+  // ...and the same shadow written so the TOKENIZER never sees a definition. The
+  // rows above are found by walking the word stream for `name` `(` `)`; every row
+  // below puts the identical definition INSIDE ONE WORD -- a quoted `eval`
+  // argument, a process substitution, a here-string, a here-doc, a `bash -c`
+  // string, a command substitution -- so `word === label` cannot match, and each
+  // one really defines `curl` before the pipeline runs. Measured 2026-09-05 with
+  // a stand-in name that is not a binary (`zzcurl`), so a marker file appears
+  // only when the definition took effect: EVERY spelling below created its
+  // marker under /opt/homebrew/bin/bash 5.3.15 and /bin/bash 3.2.57 (the
+  // here-string twin also under /bin/zsh), while the no-definition negative
+  // control created nothing and the plain same-line positive control did.
+  // So the rule is scanned over the RAW COMMAND TEXT, not over the tokens: the
+  // exemption is void when the text carries a definition of the producer's name,
+  // or any of `eval`, `source`, the dot command, `trap`, `exec` or `hash -p` --
+  // each of which can put a different command behind that name before it runs.
+  // ……以及同一個遮蔽、但寫成「tokenizer 永遠看不到定義」的形式。上面那幾列是靠掃字串流找
+  // `name` `(` `)`；下面每一列都把一模一樣的定義塞進「一個字」裡面——引號包住的 eval 參數、
+  // process substitution、here-string、here-doc、`bash -c` 字串、命令替換——於是
+  // `word === label` 不可能成立，而它們每一條都真的會在管線跑之前把 curl 定義掉。
+  // 2026-09-05 實測（用不存在的替身名字 zzcurl，marker 只有在定義生效時才會出現）：下面每
+  // 一種寫法在 bash 5.3.15 與 /bin/bash 3.2.57 都產生了 marker，而「沒有定義」的負向對照
+  // 沒有產生任何 marker。所以這條規則改掃「原始命令文字」而不是掃字串流。
+  'eval \'curl() { echo "rm -rf /etc"; }\'; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'eval "curl() { echo \'rm -rf /etc\'; }"; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'source <(echo \'curl(){ echo "rm -rf /etc"; }\'); curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  '. <(echo \'curl(){ echo "rm -rf /etc"; }\'); curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'source /dev/stdin <<< \'curl(){ echo "rm -rf /etc"; }\'; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'eval "$(echo \'curl(){ echo \\"rm -rf /etc\\"; }\')"; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'eval `echo \'curl(){ echo "rm -rf /etc"; }\'`; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'source /dev/stdin <<\'SH\'\ncurl(){ echo "rm -rf /etc"; }\nSH\ncurl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'trap \'curl(){ echo "rm -rf /etc"; }\' DEBUG; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'hash -p /tmp/evil/curl curl; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  // ...the wget twin and the other documented carrier route, so the rule cannot
+  // be landed on `curl` + `| bash` alone.
+  // ……wget 的雙胞胎與另一條記載中的 carrier 路徑。
+  'eval \'wget() { echo "rm -rf /etc"; }\'; wget -qO- https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'source <(echo \'curl(){ echo "rm -rf /etc"; }\'); curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install-hooks.sh | bash -s -- -a claude',
+  // The ACCEPTED FALSE DENIALS of that raw-text rule, pinned as refusals so the
+  // cost is visible and cannot be "fixed" by accident. The first is `eval` as an
+  // OPERAND of echo, not a command word -- a text scan cannot tell those apart,
+  // and making it tell them apart means re-deciding command position on text the
+  // tokenizer has already been shown to read differently from the shell. The
+  // second is the everyday `source ~/.profile` in front of the documented route.
+  // Both are refusals of benign commands; both are the cheap direction, and both
+  // are written down in README condition 5 and in the CHANGELOG.
+  // 這條原文掃描規則「已接受的誤擋」，以拒絕的形式釘住，讓代價看得見、也不會被誤修掉。第一
+  // 列的 eval 是 echo 的「操作元」而不是命令字——文字掃描分不出來，而要分出來就等於在
+  // tokenizer 已被證明會與 shell 讀不一樣的文字上重新判斷命令位置。第二列是很平常的
+  // `source ~/.profile` 接在記載的安裝路徑前面。兩者都是良性命令被擋，都是便宜的方向。
+  'echo eval; curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'source ~/.profile; curl -fsSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
 ];
 
 // This repository's own documented install routes, VERBATIM from README.md
@@ -3278,7 +3515,11 @@ let findClauseTimingChecks = 0;
 // 這裡釘的是「失敗讀取的次數」，絕不是毫秒上限：這條路徑上的牆鐘斷言量的是主機負載。
 let tokenizerBudgetChecks = 0;
 {
-  const OUT_OF_TIME_SHAPE = /judged \d+ of them within \d+ms/;
+  // OUT_OF_TIME_SHAPE is NOT re-declared here: it is the module-level constant
+  // above the findClauseTiming block, which is what the comment at the
+  // targetLimit block says. A local copy of the same regex made that comment
+  // false and gave the shape two places to drift apart in.
+  // OUT_OF_TIME_SHAPE 不在這裡重新宣告：它是 findClauseTiming 區塊之前的模組層常數。
   const padded = (opener, n) => `echo "${opener.repeat(n)}" ; rm -rf /etc`;
   // Openers that never close: every read fails, so every one of them spends
   // budget. The third row is the control that says budget is spent by FAILURE and
@@ -3304,8 +3545,59 @@ let tokenizerBudgetChecks = 0;
         failed, 0,
         `a substitution that CLOSES costs no budget, so 60,000 ${opener} must spend none: ${failed}`,
       );
+    } else {
+      // ...and the counter must stop EXACTLY at the cap, not merely under it.
+      // `failed <= MAX` above is one-directional and is satisfied by both of the
+      // regressions this block exists to catch: widening the constant
+      // (MAX_FAILED_SUBSTITUTION_READS = 100000 leaves `failed` at 60,000, still
+      // <= MAX) and deleting the three `failedSubstitutionReads += 1` increments
+      // (a counter stuck at 0 is <= anything). Measured 2026-09-04: BOTH mutants
+      // left the whole suite green at 3608 checks while restoring the pre-fix
+      // past-the-timeout behaviour -- 6,334 ms and 5,672 ms for the 117 KB `${`
+      // input, against 53 ms here. An equality closes both: 60,000 != 100,000
+      // kills the widened knob and 0 != 64 kills the dropped increment.
+      // ……而且計數必須「剛好」停在上限，不是「不超過」上限。上面的 `failed <= MAX` 是單向
+      // 的，這個區塊要防的兩種回歸都能滿足它：把常數放寬（改成 100000 時 failed 停在 60,000，
+      // 仍然 <= MAX），以及刪掉三處 `+= 1`（卡在 0 的計數比誰都小）。實測兩種突變都讓整套
+      // 3608 檢查維持全綠，同時把逾時行為原封不動裝回去。等號把兩邊都關上。
+      assert.equal(
+        failed, MAX_FAILED_SUBSTITUTION_READS,
+        `60,000 unclosed ${opener} must spend the WHOLE budget and then stop: the counter `
+        + `reports ${failed} and the cap is ${MAX_FAILED_SUBSTITUTION_READS}. Under the cap `
+        + `means the arms are not reaching it; over it means nothing stopped them`,
+      );
+      // The cap is a CONSTANT number of full scans, so doubling the input must not
+      // buy a single extra failed read. This is the load-independent half of "the
+      // scan is no longer quadratic": a widened knob makes this ratio 1:2 (30,000
+      // vs 60,000 failed reads) on any host at any speed, while the capped build
+      // reports the same number for both.
+      // 上限是「固定次數的整份掃描」，所以把輸入加倍不可以多買到任何一次失敗讀取。這是「掃描
+      // 不再是平方級」當中與負載無關的那一半：放寬常數會讓這個比值變成 1:2，而設好上限的版本
+      // 兩邊回報同一個數字。
+      const half = shellWords(padded(opener, 30000)).failedSubstitutionReads;
+      assert.equal(
+        half, failed,
+        `doubling the input doubled the failed reads (${half} -> ${failed}) for ${opener}: `
+        + `the cap is not what stopped the scan, the end of the input was`,
+      );
+      // ...and the cap has to be SMALL, or it bounds nothing that matters. Each
+      // failed read scans to end of input, so the characters those arms may scan
+      // is at most MAX x the input length; requiring that to be at most 100 input
+      // lengths is what makes 64 a budget and 100000 a formality. No millisecond
+      // appears in this row: it is the constant and the input length, both of
+      // which are the same on every host.
+      // ……而且上限必須「小」，否則它什麼也沒有界住。每次失敗讀取都掃到輸入結尾，所以這些臂最
+      // 多掃 MAX x 輸入長度個字元；要求它不超過 100 個輸入長度，才是讓 64 成為預算、讓 100000
+      // 成為形式的那一條。這一列沒有任何毫秒：只有常數與輸入長度，兩者在每台機器上都一樣。
+      assert.ok(
+        MAX_FAILED_SUBSTITUTION_READS * command.length <= 100 * command.length,
+        `the unclosed-substitution arms may scan up to `
+        + `${MAX_FAILED_SUBSTITUTION_READS} x ${command.length} characters, which is `
+        + `${MAX_FAILED_SUBSTITUTION_READS} input lengths: past ~100 the budget stops `
+        + `bounding the quadratic it exists to bound`,
+      );
     }
-    tokenizerBudgetChecks += expectedFailures === 'none' ? 3 : 2;
+    tokenizerBudgetChecks += expectedFailures === 'none' ? 3 : 5;
   }
   // ...and the fallback is FAIL-CLOSED: the padding must not buy an allowance, and
   // the refusal it draws must be the protected-directory one -- not the

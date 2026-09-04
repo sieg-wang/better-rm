@@ -235,6 +235,16 @@ check, which is why an exempted fetch may carry only options that cannot move it
   `curl … | bash -c "$(cat)"` 從 2026-09-04 起是拒絕的。
 - `… | xargs -I{} bash -c "{}"` 與 `… | xargs -0 bash -c`：`-c` 的命令字串是 xargs 從 pipe
   補上去的，這道閘門看到的 `-c` 後面根本沒有字。
+  **2026-09-05 補測，把這一族逐個拼法量清楚**（marker 檔，不是推論）：
+  `echo '<payload>' | xargs -0 bash -c`、`| xargs -0 sh -c`、`| xargs -0 -I{} bash -c '{}'`、
+  `| xargs -I{} sh -c '{}'` 四種**都真的執行**，而 hook 對四者都是**放行**——這不是解碼的問題，
+  連完全沒有逸出的 `echo 'rm -rf /etc' | xargs -0 bash -c` 也放行，而它旁邊的
+  `echo 'rm -rf /etc' | sh` 是拒絕的。相對地，**裸的 `| xargs bash -c`（沒有 `-0` 也沒有
+  `-I`）並不會執行 payload**：xargs 依空白切開，`touch` 變成 `-c` 的腳本、其餘變成 `$0`，
+  實測沒有產生 marker。所以這一族要寫成「`-0` 與 `-I{}` 的拼法」，不要寫成「xargs 全部」。
+  **在 ee2cb0e 與 2026-09-05 的工作樹上量到同一個結果，是既有行為**；2026-09-03 由使用者
+  裁決列為**本輪範圍外**（xargs 是「引數即程式碼」那一族的一員，與 R5-c 同源，要修就要整族
+  一起修，替 xargs 補特例會讓下一個人以為這一族已經處理過了）。
 - `bash <&3`——fd 3 由別處開啟，而且不是 process substitution 開的。
   `bash /dev/fd/3 3< <(curl …)` 與 `exec 3< <(curl …); bash /dev/fd/3` 那一族已於
   2026-09-04 納入。
@@ -258,7 +268,18 @@ carrier 自己的 here-string 與 heredoc 內文（`bash <<< "$(curl …)"`、`b
 看不見），2026-09-04 才補上。範圍外的部分改成下面那份逐列量過的清單，不再用「全部」這種詞。
 
 **R4-b — deliberately out of scope.** `bash < file`, `bash script.sh`,
-`bash -c "$(curl …)"`, `eval "$(curl …)"`, `… | xargs -I{} bash -c "{}"`,
+`bash -c "$(curl …)"`, `eval "$(curl …)"`, the `xargs` carrier family
+(`… | xargs -0 bash -c`, `| xargs -0 sh -c`, `| xargs -0 -I{} bash -c '{}'`,
+`| xargs -I{} sh -c '{}'` -- all four measured 2026-09-05 to really EXECUTE the
+piped payload and to be ALLOW, at ee2cb0e and on the current working tree alike,
+while the plain `echo 'rm -rf /etc' | sh` beside them is refused; the BARE
+`| xargs bash -c`, with neither `-0` nor `-I`, does NOT execute the payload --
+xargs splits on whitespace, so the first word becomes the `-c` script and the rest
+becomes `$0`, measured, no marker -- so this family is the `-0`/`-I{}` spellings,
+not "xargs" in general; adjudicated OUT OF SCOPE by the owner on 2026-09-03,
+because it is a member of the same "an argument is code" family as R5-c and a
+special case for `xargs` would leave the next reader believing the family was
+handled),
 `bash <&3`, and non-shell consumers such as `curl … | python3`. The decision named
 pipes and process substitutions, and the exemption mechanism is URL-shaped rather
 than path-shaped; folding in the file/fd family is a second, much larger posture
@@ -359,7 +380,7 @@ is the user's call, not a fixer's, and it is written here rather than shipped.
 ## R5-b — 產生器標籤取自 `path.basename()`，只有豁免那一支被收窄
 
 2026-09-04 起，`curl`／`wget` 的安裝路徑豁免要求產生器是「前面什麼都沒有、而且不帶路徑」的
-赤裸命令字（見 README「比對還有四個收窄條件」第 4 點）。**這個收窄只套用在豁免那一支**：
+赤裸命令字（見 README「比對還有五個收窄條件」第 4 點）。**這個收窄只套用在豁免那一支**：
 檔案裡其他地方（外殼拆解、carrier 判定）照舊用 `path.basename()` 比對名字，而在那些地方
 「名字對了就當成 shell」是 **fail-closed** 的方向——多認一個名字只會多一次拒絕，不會多一次
 放行——所以刻意不動。
@@ -370,3 +391,59 @@ BARE, unprefixed, unpathed producer word. That narrowing is deliberately confine
 the exemption: elsewhere in the file (wrapper unwrapping, carrier detection) a
 basename match is the FAIL-CLOSED direction -- recognising one more name costs a
 refusal, never an allowance -- so it is left as it is.
+
+## R5-c — `trap` 字串裡的命令完全不會被掃描（**OPEN，未修**）
+
+`trap 'rm -rf /etc' EXIT` 實測 **放行**，而且真的會在 shell 結束時執行；
+`trap 'echo -e rm -rf /etc | bash' EXIT` 同理。原因是 `trap` 的第一個引數在斷詞後是
+**一個字**，`rm` 從來不在命令位置上，而這個檔案裡沒有任何一支把「某些命令的某個引數其實是
+shell 程式碼」當成掃描來源。
+
+**這是既有行為，不是本輪造成的**：2026-09-04 在 campaign base 90ad891、HEAD 5bf41fe 與
+ee2cb0e 上三處量到同一個結果。刻意**不在 2026-09-04 這一輪修**：它是一個新的規則族
+（「引數即程式碼」的命令），至少還有 `eval`、`bash -c`、`sh -c`、`zsh -c`、`awk`／`perl`／
+`python -c`、`find -exec sh -c`、`xargs sh -c`、`ssh <host> '<cmd>'`、`watch`、`timeout … sh -c`
+與 `systemd-run` 同屬此族，而其中幾個（`bash -c`）本來就已經被別的規則掃到。要修就該一次把
+這一族的來源列出來、逐一量測哪些真的會執行，而不是替 `trap` 補一個特例——特例會讓下一個人
+以為這一族已經處理過了。
+
+**R5-c — a command inside a `trap` string is never scanned (OPEN).**
+`trap 'rm -rf /etc' EXIT` is measured **ALLOW** and really does run at shell exit, as is
+`trap 'echo -e rm -rf /etc | bash' EXIT`. `trap`'s first argument tokenizes to a single
+WORD, so `rm` is never in command position, and nothing in this file treats "this
+command's argument is shell code" as a scan source. PRE-EXISTING, not introduced here:
+measured identical at 90ad891, 5bf41fe and ee2cb0e. Deliberately NOT fixed in the
+2026-09-04 round -- it is a whole rule FAMILY (`eval`, `sh -c`, `awk`/`perl`/`python -c`,
+`find -exec sh -c`, `xargs sh -c`, `ssh host '<cmd>'`, `watch`, `timeout … sh -c`,
+`systemd-run`, several of which other rules already reach), and a special case for `trap`
+alone would leave the next reader believing the family was handled.
+
+
+## R5-d — 產生器名字被「行外」換掉：PATH 上先種一個 `curl`，或上一次呼叫留下的 `hash -p`
+
+README 收窄條件 5 從 2026-09-05 起掃的是**原始命令文字**，所以同一行上的
+`curl(){ … }`、`eval 'curl(){ … }'`、`source <(…)`、`. <(…)`、here-doc、`trap`、
+`hash -p …` 全部作廢豁免。**但那是「這一行看得到」的部分。**
+
+**看不到、也擋不住的**：`~/bin/curl`（或 PATH 上任何一個排在 `/usr/bin` 前面的目錄）先被
+種進一個可執行檔，然後才送出一條乾淨的 `curl -sSL <豁免網址> | bash`；或者在**前一次** Bash
+呼叫裡跑過 `hash -p /tmp/evil/curl curl`，而這一次的命令列上什麼都沒寫。兩者實測都會執行被
+種下去的那支程式，而這一行的文字與 README 記載的安裝路徑逐位元組相同。
+
+**這是文字閘門的定義域邊界，不是缺陷可以修掉的東西**：PreToolUse 只拿得到即將執行的那一行
+文字，拿不到 PATH 的內容、也拿不到上一個 shell 行程的 hash table（那個 shell 行程甚至還沒
+存在）。要涵蓋它得在執行時解析 `curl` 會落到哪個檔案，那是另一種閘門。寫在這裡，是為了不
+讓條件 5 讀起來像是「產生器一定是真正的 curl」的保證——它保證的只是「這一行沒有把它換掉」。
+
+**R5-d — the producer's name replaced from OFF the line: a `curl` planted on PATH, or a
+`hash -p` left behind by an earlier call.** Since 2026-09-05, README narrowing condition 5
+scans the RAW command text, so `curl(){ … }`, `eval 'curl(){ … }'`, `source <(…)`, `. <(…)`,
+a here-doc, `trap` and `hash -p` on the SAME line all void the exemption. What it cannot
+see: an executable planted at `~/bin/curl` (or anywhere on PATH ahead of `/usr/bin`) before
+an otherwise clean `curl -sSL <exempted URL> | bash`, or a `hash -p /tmp/evil/curl curl` run
+in an EARLIER Bash call with nothing on this line to show for it. Both really run the
+planted program while this line's text matches the documented install route byte for byte.
+This is the domain boundary of a text gate, not a defect to fix: PreToolUse is handed the
+line that is about to run and nothing else -- not the contents of PATH, not the hash table
+of a shell process that does not exist yet. Written down so condition 5 is not read as a
+promise that the producer IS the real curl; it promises only that this line did not replace it.

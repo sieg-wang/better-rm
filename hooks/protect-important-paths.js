@@ -342,7 +342,25 @@ function shellWords(command) {
         word += decoded.value;
         index = decoded.end;
       } else word += char;
-    } else if (char === '\\' && quote !== "'") {
+    } else if (
+      char === '\\' && quote !== "'"
+      // Inside DOUBLE QUOTES a backslash is only special before `$`, backtick,
+      // `"`, `\` and newline; before anything else bash keeps BOTH characters
+      // (measured with od(1) under bash 5.3.15 and /bin/bash 3.2.57:
+      // `printf "%s" "rm\x20-rf"` writes r m \ x 2 0 - r f). Treating every
+      // backslash as an escape here turned `echo -e "rm\x20-rf\x20/etc" | bash`
+      // into the single word `rmx20-rfx20/etc` -- a word the shell never
+      // produces, with no `rm` in it and no escape left for the decode above to
+      // find -- so the deletion was ALLOWED while the single-quoted twin next to
+      // it was refused (measured at ee2cb0e; a touch payload really ran).
+      // The comment on the continuation branch above is about `\` + NEWLINE,
+      // which really is deleted in both contexts; this is every OTHER character.
+      // 雙引號裡的反斜線只有在 `$`、反引號、`"`、`\`、換行之前才是逸出；其餘一律「兩個字元
+      // 都保留」（od(1) 實測，bash 5.3.15 與 /bin/bash 3.2.57 一致）。把它們全當逸出，會讓
+      // `echo -e "rm\x20-rf\x20/etc" | bash` 變成 shell 根本不會產生的單一個字
+      // `rmx20-rfx20/etc`：裡面沒有 rm，也沒有逸出序列可以給上面那層解碼看見。
+      && (quote !== '"' || input[index + 1] === undefined || '$`"\\\n'.includes(input[index + 1]))
+    ) {
       escapedFromWordStart = wasAtWordStart;
       escaped = true;
     } else if (quote) {
@@ -978,6 +996,58 @@ function hasUnresolvedTargetExpansion(isDynamic) {
 // `node -e` 的一個 argv 傳進去，而 spawn(2) 拒絕含 NUL 的引數：檔案裡真的放一個 NUL
 // 會讓 OpenCode runtime hook 驗不過，安裝程式於是發布 fail-closed 替代品，拒掉每一次工具呼叫。
 const UNRESOLVED_TARGET = '\u0000unresolved:';
+
+// What a LITERAL emitter writes down a pipe is not the text on the command line:
+// `echo -e 'rm\x20-rf\x20/etc'` is ONE shell word here and three words there, so
+// a gate that scans only the word it was handed reads `rm` as part of a single
+// operand and never as a command. Measured at ee2cb0e through the real stdin
+// entry point: twelve spellings ALLOWED, with a touch payload that really ran
+// under bash 5.3.15, /bin/bash 3.2.57, /bin/sh, zsh and /bin/csh.
+//
+// The decode is UNCONDITIONAL -- it is NOT gated on `echo -e`. Which shell reads
+// the pipe is not visible from here, dash's and ksh's echo decode by default,
+// `bash -O xpg_echo` makes bash's do it too (measured: the payload ran), and
+// printf decodes its FORMAT always and its `%b` ARGUMENTS as well. Being wrong
+// about the option costs a refusal; being wrong about the shell costs a deletion.
+//
+// The decoded text is ADDED to the scan set, never substituted for the raw one:
+// this hands the ordinary rules more text to judge, so it can only ever turn an
+// allowance into a refusal, never the reverse. `\\` is the FIRST alternative so
+// that `\\x20` stays two characters and does not become a space.
+// 字面產生器寫進 pipe 的東西，不等於命令列上的文字：`echo -e 'rm\x20-rf\x20/etc'` 在這裡是
+// 「一個」shell 字，在那裡是三個字。解碼刻意不以 `-e` 為條件：從這裡看不出讀 pipe 的是哪個
+// shell，dash 與 ksh 的 echo 預設就解碼，`bash -O xpg_echo` 讓 bash 的也解碼（實測 payload
+// 真的執行），而 printf 永遠解碼格式字串、`%b` 連參數一起解。判斷錯選項的代價是一次誤擋，
+// 判斷錯 shell 的代價是一次刪除。解碼後的文字是「加入」掃描集合而不是取代原文：這只會把放行
+// 變成拒絕，不會反過來。`\\` 放在第一個選項，好讓 `\\x20` 維持兩個字元、不要變成空白。
+const SHELL_ESCAPE = /\\(?:\\|x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|0[0-7]{0,3}|[0-7]{1,3}|[abefnrtv])/g;
+const ESCAPE_LETTERS = {
+  a: '\u0007', b: '\b', e: '\u001b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\',
+};
+function decodeShellEscapes(text) {
+  if (typeof text !== 'string' || text.indexOf('\\') === -1) return text;
+  return text.replace(SHELL_ESCAPE, (sequence) => {
+    const body = sequence.slice(1);
+    const head = body[0];
+    if (Object.prototype.hasOwnProperty.call(ESCAPE_LETTERS, head)) return ESCAPE_LETTERS[head];
+    if (head === 'x') return String.fromCharCode(parseInt(body.slice(1), 16));
+    if (head === 'u' || head === 'U') {
+      const point = parseInt(body.slice(1), 16);
+      // A lone surrogate or an out-of-range point cannot be spelled, and
+      // String.fromCodePoint throws on it: keep the raw text rather than let a
+      // hostile escape turn a refusal into a crash (the parse path exits 2, but
+      // this one runs inside evaluate() where a throw is not a decision).
+      // 孤立代理對或超出範圍的碼位拼不出來，String.fromCodePoint 會丟例外：保留原文，不要讓
+      // 一個惡意的逸出序列把「拒絕」變成「例外」。
+      if (!Number.isFinite(point) || point > 0x10ffff || (point >= 0xd800 && point <= 0xdfff)) return sequence;
+      return String.fromCodePoint(point);
+    }
+    // Octal, with or without the leading `0`: bash's `echo -e` spells it `\0nnn`
+    // and printf's FORMAT spells it `\nnn`, and both reach here.
+    // 八進位，帶不帶開頭的 `0` 都有：`echo -e` 寫 `\0nnn`，printf 的格式字串寫 `\nnn`。
+    return String.fromCharCode(parseInt(head === '0' ? body.slice(1) || '0' : body, 8));
+  });
+}
 
 // A shell carrier whose SCRIPT this gate could not read: it arrived on a pipe,
 // through a process substitution, or as the output of a command substitution
@@ -2235,6 +2305,125 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
     }
     return { index: -1, name: '', word: '', prefixed };
   };
+  // An exempted producer word is only the command the shell will run while
+  // nothing on this command line REDEFINES that name. `curl() { echo "rm -rf
+  // /etc"; }; curl -sSL <documented URL> | bash` satisfies every condition the
+  // exemption asks -- the word is bare, unprefixed, unpathed, the URL text is
+  // byte-for-byte the documented one -- and runs a function instead, with no
+  // request ever leaving the host (measured at ee2cb0e: ALLOW, touch payload ran).
+  // A definition is not a PREFIX, so `resolved.prefixed` cannot see it; it is a
+  // separate command on the same line.
+  //
+  // `anywhere on the line` is deliberate and fail-CLOSED. A definition written
+  // AFTER the pipeline does not shadow it -- bash parses the whole line first but
+  // defines the function only when it reaches that command -- so refusing
+  // `curl <URL> | bash; curl() { :; }` is a false denial. It is the cheaper error:
+  // ordering the scan against the producer's position puts position bookkeeping on
+  // a security boundary, and `&`, newlines and line continuations each give that
+  // bookkeeping a way to be wrong, in exchange for allowing a command nobody
+  // writes. An `alias` is refused on the same terms: it does not expand in a
+  // non-interactive shell and could not apply to its own line even in an
+  // interactive one, but this gate cannot see which of those it was handed.
+  // 被豁免的產生器命令字，只有在「這條命令列沒有重新定義那個名字」時，才真的是 shell 會執行
+  // 的東西。定義不是「前綴」，所以 `resolved.prefixed` 看不到它——它是同一行上的另一條命令。
+  // 「行上任何位置」是刻意的 fail-closed：寫在管線後面的定義其實遮蔽不了它，拒絕它是誤擋，
+  // 但這是比較便宜的錯——照位置排序等於在安全邊界上多一套位置簿記，而 `&`、換行與續行符各自
+  // 都能讓它出錯，換到的只是一條沒人會寫的命令的放行。alias 同理。
+  const definesName = (contextWords, contextOperators, label) => {
+    for (let k = 0; k < contextWords.length; k += 1) {
+      if (contextOperators[k]) continue;
+      const word = contextWords[k];
+      // `name() { … }`, `name () { … }` and `name(){ … }` all reach this
+      // tokenizer as the name followed by the operator words '(' and ')'.
+      // 這三種函式定義寫法在這個 tokenizer 都是「名字」後面接運算子字 '(' 與 ')'。
+      if (
+        word === label
+        && contextOperators[k + 1] && contextWords[k + 1] === '('
+        && contextOperators[k + 2] && contextWords[k + 2] === ')'
+      ) return true;
+      // `function name { … }` / `function name () { … }`.
+      if (word === 'function' && !contextOperators[k + 1] && contextWords[k + 1] === label) return true;
+      // `alias name=…`: this tokenizer keeps `name=value` as one word, so the
+      // assignment is found on the word itself rather than on a following '='.
+      // `alias name=…`：這個 tokenizer 把 `name=value` 留成一個字。
+      if (word === 'alias') {
+        for (let j = k + 1; j < contextWords.length && !contextOperators[j]; j += 1) {
+          if (contextWords[j].startsWith(`${label}=`)) return true;
+        }
+      }
+    }
+    return false;
+  };
+  // definesName() above walks TOKENS, so it only finds a definition the tokenizer
+  // emits as separate words. Put the identical definition inside ONE word and it
+  // is invisible: `eval 'curl(){ … }'`, `source <(echo 'curl(){ … }')`, `. <(…)`,
+  // `source /dev/stdin <<< '…'`, `source /dev/stdin << HEREDOC`, `eval "$(…)"`,
+  // ``eval `…` `` -- and every one of them really defines `curl` before the
+  // pipeline runs (measured 2026-09-05 with the stand-in name `zzcurl`, which is
+  // not a binary, so a marker file appears only when the definition took effect:
+  // all of them created their marker under bash 5.3.15 and /bin/bash 3.2.57, the
+  // here-string twin also under zsh, while the no-definition negative control
+  // created nothing and the plain same-line positive control did).
+  //
+  // So the same question is asked a SECOND time of the RAW COMMAND TEXT, which no
+  // word-splitting can hide anything from. Two shapes void the exemption:
+  //   (a) the producer's OWN name being defined -- `curl()`, `function curl`,
+  //       `alias curl=` -- or `hash -p`, which points a name at a chosen file;
+  //   (b) any of `eval`, `source`, the dot command, `trap`, `exec` appearing at
+  //       all, because each of them can put a different command behind that name
+  //       before it runs, and the definition text they carry is unreadable here.
+  // (a) is per-name on purpose: `wget(){ … }; curl <URL> | bash` must stay
+  // allowed, or the rule collapses into "any definition on the line refuses the
+  // documented route" (pinned by four controls in test-hooks.js `allowed`).
+  // (b) is NOT command-position aware, and cannot be: this is text, not tokens --
+  // the whole reason it exists. `echo eval; curl <URL> | bash` is therefore
+  // refused although `eval` is an operand there, and so is the everyday
+  // `source ~/.profile; curl -fsSL <URL> | bash`. Both are false denials of
+  // benign commands and both are ACCEPTED, pinned as refusals in
+  // exceptionListControls and written down in README condition 5: the cost is one
+  // refusal a user can work around by splitting the line, and the alternative is
+  // re-deciding command position on text the tokenizer has already been shown to
+  // read differently from the shell.
+  // definesName() 掃的是「字」，所以只找得到 tokenizer 會斷成獨立字的定義。把同一個定義塞
+  // 進一個字裡面它就看不見了，而那些寫法每一種都真的會在管線跑之前把 curl 定義掉（2026-09-05
+  // 用不存在的替身名字 zzcurl 實測，marker 只有在定義生效時才出現：全部都產生了 marker）。
+  // 因此同一個問題對「原始命令文字」再問一次——斷詞藏不住東西的地方。兩種形狀作廢豁免：
+  // (a) 產生器「自己的名字」被定義（`curl()`／`function curl`／`alias curl=`），或出現
+  //     `hash -p`（把一個名字指向指定檔案）；(b) 出現 `eval`、`source`、點命令、`trap`、
+  //     `exec` 任何一個，因為它們都能在名字執行前把別的東西塞到那個名字後面，而它們帶的定義
+  //     文字在這裡讀不到。(a) 刻意分名字：`wget(){ … }; curl <URL> | bash` 必須照常放行。
+  // (b) 刻意「不」判斷命令位置，也判斷不了：這裡是文字不是字串流，這正是它存在的理由。所以
+  // `echo eval; curl <URL> | bash` 會被擋（那裡的 eval 是操作元），`source ~/.profile;
+  // curl -fsSL <URL> | bash` 也會被擋。兩者都是良性命令的誤擋，而且都「已接受」：代價是一次
+  // 拒絕（把那一行拆開就能繞過），換到的是不必在「已被證明和 shell 讀法不同」的文字上重新判
+  // 斷命令位置。
+  const rawDefinesName = (raw, label) => {
+    const name = String(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b${name}\\s*\\(\\s*\\)`).test(raw)
+      || new RegExp(`\\bfunction\\s+${name}\\b`).test(raw)
+      || new RegExp(`\\balias\\s+${name}=`).test(raw)
+      || /\bhash\s+-p\b/.test(raw);
+  };
+  // The dot command needs its own shape: a bare `.` is in every relative path on
+  // every command line, so it counts only where a command word can stand (start
+  // of the text, or after `;`, `&`, `|`, `(`, `{` or whitespace -- and `\s`
+  // covers the newline) AND is followed by whitespace. `./install.sh` and
+  // `file.sh` therefore do not fire it (both pinned as allowances).
+  // 點命令要自己的形狀：裸 `.` 在每一條命令列的每一個相對路徑裡都有，所以只在「命令字站得住
+  // 的位置」而且「後面接空白」時才算。`./install.sh` 與 `file.sh` 因此不會觸發它。
+  const RAW_PRODUCER_INDIRECTION = /\beval\b|\bsource\b|\btrap\b|\bexec\b|(?:^|[;&|(\s{])\.\s/;
+  // Both scopes, because a producer can be classified out of a command
+  // substitution re-tokenized from a carrier's here-string: a definition in the
+  // OUTER line shadows it just as well as one in the inner text.
+  // 兩個範圍都掃：產生器可能是從 carrier here-string 裡重新斷詞出來的命令替換，而外層那一行
+  // 上的定義一樣遮蔽得到它。
+  const rawCommandText = String(command || '');
+  const producerNameShadowed = (context, label) => (
+    definesName(context.words, context.operatorTokens, label)
+    || definesName(words, operatorTokens, label)
+    || rawDefinesName(rawCommandText, label)
+    || RAW_PRODUCER_INDIRECTION.test(rawCommandText)
+  );
   // Three readable producers, and one refusal that is the default.
   const classifyProducer = (context, start, end) => {
     if (start >= end) return { kind: 'opaque', label: 'unknown' };
@@ -2344,16 +2533,29 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
         && argv[firstOperandIndex] !== '-'
       ) firstOperandIndex += 1;
       const emitted = argv.slice(firstOperandIndex);
-      return {
-        kind: 'literal',
-        label,
-        texts: [
-          argv.join(' '),
-          emitted.join(' '),
-          ...(label === 'printf' ? [emitted.slice(1).join(' ')] : []),
-          ...operands.filter((word) => /\s/.test(word)),
-        ],
-      };
+      const texts = [
+        argv.join(' '),
+        emitted.join(' '),
+        ...(label === 'printf' ? [emitted.slice(1).join(' ')] : []),
+        ...operands.filter((word) => /\s/.test(word)),
+      ];
+      // ...and a FOURTH scan, over the same texts with their backslash escapes
+      // DECODED (decodeShellEscapes, above). Every text above is the word as it
+      // stands on THIS command line; the emitter writes the decoded form down the
+      // pipe. `echo -e 'rm\x20-rf\x20/etc'` is one word here and `rm -rf /etc`
+      // there, so `rm` was never in command position in any text and the deletion
+      // was ALLOWED (measured at ee2cb0e through the real stdin entry point; a
+      // touch payload really ran under bash 5.3.15, /bin/bash 3.2.57, /bin/sh,
+      // zsh and /bin/csh). Added to the set, never substituted for it: a decode
+      // that guesses wrong must not be able to hide a deletion the raw text shows.
+      // ……再加第四種掃法：同一批文字，把反斜線逸出序列解碼過一次。上面每一段都是「這條命令列
+      // 上」的字，而產生器寫進 pipe 的是解碼後的形式。是「加入」集合而不是取代：解碼猜錯時，
+      // 不可以把原文看得見的刪除藏起來。
+      for (const text of texts.slice()) {
+        const decoded = decodeShellEscapes(text);
+        if (decoded !== text) texts.push(decoded);
+      }
+      return { kind: 'literal', label, texts };
     }
     // The option allowlist below exists because `--resolve`, `--proxy`,
     // `--unix-socket`, `-K` and `-o` move the fetch while the URL text stays the
@@ -2373,6 +2575,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
     if (
       (label === 'curl' || label === 'wget') && !dynamic && operands.length === 1
       && !resolved.prefixed && resolved.word === label
+      && !producerNameShadowed(context, label)
       && !/\.\.|%2e|%2f|%5c/i.test(operands[0])
       && PIPED_SCRIPT_EXCEPTIONS.some((prefix) => operands[0].startsWith(prefix))
       && options.every((option) => (
