@@ -1110,6 +1110,71 @@ const PIPED_SCRIPT_EXCEPTIONS = [
   'https://raw.githubusercontent.com/sieg-wang/better-rm/',
 ];
 
+// The exemption above has exactly ONE condition now, and this is it: the WHOLE
+// command line must be one of these documented install routes, byte for byte,
+// after trimming leading and trailing ASCII whitespace and collapsing runs of
+// spaces and tabs. Nothing else may be on the line -- no prefix (`cd ... &&`,
+// `if ...; then`, an assignment, a wrapper), no suffix (`; ...`, `&& ...`,
+// `| ...`, a `#` comment), no newline anywhere inside it, no quoting beyond what
+// is written here, and no alternate spelling of the same route (a different
+// option order or a different case is NOT this line). Everything else falls
+// through to the unscannable piped-script refusal.
+// WHY A WHOLE LINE INSTEAD OF A SET OF CONDITIONS: three rounds of this gate
+// tried to enumerate the ways a line can put something else behind `curl`, and
+// every round was defeated by a spelling nobody had enumerated -- the last by
+// in-word quote removal, `e''val 'c''url() { ... }'; <route>`, which the shell
+// rebuilds into `eval` and `curl` while the raw bytes contain neither (measured
+// 2026-09-05 through the real stdin entry point: it really defines the function
+// and really runs the replacement under bash 5.3.15 and /bin/bash 3.2.57). A
+// whole-line literal cannot be defeated that way, and not because a longer list
+// of shapes was found: any character an attacker adds is a character that stops
+// the line from BEING this line, so the class is closed by construction rather
+// than by enumeration. The cost is stated rather than discovered -- prefixes,
+// suffixes, comments and reordered options are now refused, and the way through
+// is to run the route on a line of its own.
+// 上面那條豁免現在只有一個條件，就是這個：整條命令列必須逐位元組等於下列其中一條記載中的
+// 安裝路徑（先去掉前後的 ASCII 空白，再把連續的空白／tab 併成一個空格）。行上不可以有別的
+// 東西——前面不行（`cd … &&`、`if …; then`、變數指派、包裝命令），後面也不行（`; …`、
+// `&& …`、`| …`、`#` 註解），中間不可以有換行，不可以有這裡沒寫的引號，也不接受同一條路徑
+// 的其他寫法（選項順序或大小寫不同，就不是這一行）。其餘一律落回「讀不到的 piped script」。
+// 為什麼是「整行」而不是一組條件：這道閘門用三輪去列舉「一行上有多少種方法把別的東西塞到
+// curl 後面」，每一輪都被一種沒被列舉到的寫法打穿，最後一次是「字裡面的引號消去」
+// （`e''val 'c''url() { … }'; <路徑>`）——shell 會把它還原成 eval 與 curl，而原始位元組裡
+// 兩者都不存在（2026-09-05 走真正的 stdin 入口實測：函式真的被定義、替身真的被執行，
+// bash 5.3.15 與 /bin/bash 3.2.57 皆然）。整行字面比對打不穿這一點，而且理由不是「找到了
+// 更長的形狀清單」：攻擊者多加的任何一個字元，都是讓這一行不再是這一行的字元，所以這一類是
+// 「由構造上」關掉的，不是靠列舉關掉的。代價寫在這裡而不是留給人踩：前綴、後綴、註解、選項
+// 換順序從此都被拒絕，繞法是把那條路徑單獨寫成一行。
+// This array and README.md's 「允許的 piped installer 清單」 block are ONE list in
+// two places: test-hooks.js reads the README and fails if they differ, so a
+// widening here that is not written down goes red, and so does a README edit
+// that is not implemented.
+// 這個陣列與 README.md 的「允許的 piped installer 清單」是同一份清單的兩個副本：
+// test-hooks.js 會去讀 README 比對，兩邊不一致就轉紅——在這裡放寬而沒有寫進文件會紅，
+// 在文件上寫了而沒有實作也會紅。
+const CANONICAL_INSTALL_LINES = [
+  'curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'wget -qO- https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh | bash',
+  'curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install-hooks.sh | bash -s -- -a claude',
+  'curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install-hooks.sh | bash -s -- -a claude --global',
+];
+
+// Trim and collapse ASCII space, tab, CR and LF only -- deliberately NOT
+// String.trim(), which also eats U+00A0 and the other Unicode spaces. A trailing
+// non-breaking space is a character the shell KEEPS, so `... | bash\u00a0` names
+// a command word that does not exist; folding it away here would exempt a line
+// this list does not hold. Interior newlines are not collapsed either, so
+// `curl ... |\nbash` is not this line.
+// 只處理 ASCII 的 space／tab／CR／LF，刻意不用 String.trim()（它連 U+00A0 之類都會吃掉）。
+// 尾端的 non-breaking space 是 shell 會留下來的字元，`… | bash\u00a0` 指的是一個不存在的
+// 命令字；在這裡把它折掉，等於豁免一條清單上沒有的行。中間的換行也不會被併掉。
+const isCanonicalInstallLine = (raw) => CANONICAL_INSTALL_LINES.includes(
+  String(raw || '')
+    .replace(/^[ \t\r\n]+/, '')
+    .replace(/[ \t\r\n]+$/, '')
+    .replace(/[ \t]+/g, ' ')
+);
+
 // Deny-by-default option allowlists for an exempted fetch. An option that is
 // NOT on these lists makes the producer unreadable again, which is the
 // fail-closed direction: a curl option added upstream cannot silently join the
@@ -1849,15 +1914,64 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
   let carrierPresent = bodiesAreCodeFromCaller;
   if (!carrierPresent) {
     let atCommandPosition = true;
+    // `afterEnv` is the same env(1)-versus-shell distinction the executable walk
+    // makes below: BEFORE any wrapper, an assignment prefix must be a shell
+    // IDENTIFIER (`FOO%%=1 bash -c '...'` runs nothing -- bash reports
+    // `FOO%%=1: command not found`, measured), but AFTER `env` any word with an
+    // `=` is an assignment and the shell behind it really runs. Without this,
+    // `env "F-O=1" bash <<'EOF' ... EOF` stopped the walk at the odd name, no
+    // carrier was seen, and the heredoc body was read as data -- measured
+    // 2026-09-05, the body's touch marker was created (both for `bash` and for
+    // `bash -s`) while the hook allowed the line.
+    // `afterEnv` 就是底下那個「env(1) 不是 shell」的區分：在任何包裝命令之前，指派前綴必須
+    // 是 shell 識別字（`FOO%%=1 bash -c '…'` 什麼都不會跑，bash 會說
+    // `FOO%%=1: command not found`，實測），但在 `env` 之後，任何含 `=` 的字都是指派，它後
+    // 面的 shell 是真的會跑的。少了這一條，`env "F-O=1" bash <<'EOF' … EOF` 會在那個怪名字
+    // 上停住、看不到 carrier、heredoc 內文被當成資料——2026-09-05 實測，內文的 touch marker
+    // 真的被建立（`bash` 與 `bash -s` 都是），而 hook 放行了那一行。
+    let afterEnv = false;
     for (const word of words) {
-      if (separators.has(word)) { atCommandPosition = true; continue; }
+      if (separators.has(word)) { atCommandPosition = true; afterEnv = false; continue; }
       if (!atCommandPosition) continue;
       const name = path.basename(word);
       if (carriers.has(name)) { carrierPresent = true; break; }
-      if (transparent.has(name) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
+      if (transparent.has(name)) { if (name === 'env') afterEnv = true; continue; }
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
+      if (afterEnv && !word.startsWith('-') && word.includes('=')) continue;
       atCommandPosition = false;
     }
   }
+
+  // `env -S "<string>"` is env parsing its own arguments a second time, not a
+  // shell parsing a command line, and the difference is the same one as above:
+  // inside that string too, ANY word containing `=` is an assignment and the
+  // first word without one is the command. Re-tokenizing the string as a SHELL
+  // line gets the identifier spellings right by accident (a shell also skips
+  // `FOO=1` as a prefix) and the odd ones wrong: re-read as a shell line,
+  // `env -S "FOO%%=1 rm -rf /etc"` has `FOO%%=1` in command position, so `rm`
+  // never is, and the line was ALLOWED. Measured 2026-09-05 with touch markers:
+  // `FOO%%=1`, `F-O=1` and `FOO.BAR=1` all really ran the command under BSD env
+  // and under GNU coreutils 9.11 env. The stripped text is ADDED to the scan and
+  // never substituted for it, for the same reason the emitter scans are additive:
+  // a strip that guesses wrong must not be able to hide what the raw text shows.
+  // `env -S "<字串>"` 是 env 再解析一次「自己的參數」，不是 shell 在解析命令列，差別跟上面
+  // 那條一樣：那個字串裡面，只要一個字含 `=` 就是指派，第一個沒有 `=` 的字才是命令。把它當
+  // shell 那樣重新斷詞，識別字寫法會「碰巧」對（shell 同樣會跳過 `FOO=1` 前綴），怪名字就錯
+  // 了：`env -S "FOO%%=1 rm -rf /etc"` 當 shell 讀時 `FOO%%=1` 站在命令位置，`rm` 就永遠不在
+  // 命令位置，於是放行。2026-09-05 用 touch marker 實測：`FOO%%=1`、`F-O=1`、`FOO.BAR=1` 在
+  // BSD env 與 GNU coreutils 9.11 env 上都真的把命令跑掉了。剝掉指派之後的文字是「加入」掃描
+  // 而不是取代原文，理由與產生器那四種掃法相同：剝錯的時候，不可以把原文看得見的東西藏起來。
+  const envSplitStringTargets = (splitString) => {
+    const text = String(splitString || '');
+    if (!text) return;
+    if (depth >= 8) { targets.push('/'); return; }
+    targets.push(...commandTargets(text, depth + 1, false, expansionEnv));
+    const parts = text.trim().split(/\s+/);
+    let p = 0;
+    while (p < parts.length && !parts[p].startsWith('-') && parts[p].includes('=')) p += 1;
+    const stripped = parts.slice(p).join(' ');
+    if (p > 0 && stripped) targets.push(...commandTargets(stripped, depth + 1, false, expansionEnv));
+  };
   // A here-string is the same shape as a heredoc body for this purpose, and it
   // needs the same second route: `source /dev/stdin <<< "rm -rf /etc"` never
   // reaches the shellCarriers branch (`source` is not one of them), so the arm
@@ -1959,35 +2073,52 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
         i += 1;
         while (i < words.length) {
           const option = words[i];
-          if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(option)) {
+          // env(1) is not the shell: it takes ANY word containing `=` as an
+          // assignment, whatever the name looks like, and the first word without
+          // one is the command. Testing for a shell IDENTIFIER here stopped the
+          // walk at the odd name, so the command word was never found and
+          // `env "FOO%%=1" rm -rf /etc` was ALLOWED while env really kept the
+          // variable and really ran the rm. Measured 2026-09-05 with touch
+          // markers on BOTH implementations this repository runs on -- macOS BSD
+          // env and GNU coreutils 9.11 env (the ubuntu CI runner's) -- for
+          // `FOO%%=1`, `F-O=1`, `FOO.BAR=1`, `1FOO=1` and `FOO BAR=1`: all ten
+          // executed and all ten kept the variable. The one difference is the
+          // EMPTY name `=1`: GNU env accepts it and execs, BSD env refuses with
+          // `setenv =1: Invalid argument` and never execs. Counting it as an
+          // assignment is the fail-closed side of that difference -- the gate
+          // then finds the command word and judges it on the platform where it
+          // runs, and over-denies on the platform where it would not have run.
+          // A word starting with `-` is still an OPTION, not an assignment, so
+          // `--split-string=...` keeps its own branch below.
+          // env(1) 不是 shell：只要一個字裡面有 `=`，不管名字長什麼樣，它都當成變數指派，
+          // 而第一個沒有 `=` 的字就是命令。這裡原本比對的是「shell 識別字」，於是走訪在那個
+          // 怪名字上停住、命令字永遠找不到，`env "FOO%%=1" rm -rf /etc` 就被放行了——而 env
+          // 真的把那個變數留著、真的執行了 rm。2026-09-05 用 touch marker 在本 repo 會跑到
+          // 的兩種實作上實測（macOS 的 BSD env 與 ubuntu runner 的 GNU coreutils 9.11）：
+          // `FOO%%=1`、`F-O=1`、`FOO.BAR=1`、`1FOO=1`、`FOO BAR=1` 十次全部執行、十次都留下
+          // 變數。唯一的差別是「空名字」`=1`：GNU env 收下並執行，BSD env 直接報
+          // `setenv =1: Invalid argument` 而不執行。把它也算成指派，是這個差異的 fail-closed
+          // 那一邊——閘門因此會找到命令字、在真的會跑的平台上正確判定，而在不會跑的平台上多擋
+          // 一次。以 `-` 開頭的字仍然是選項不是指派，所以 `--split-string=…` 走它自己的分支。
+          if (!option.startsWith('-') && option.includes('=')) {
             i += 1;
           } else if (option === '--') {
             i += 1;
             break;
           } else if (option === '-S' || option === '--split-string') {
-            const splitString = words[i + 1] || '';
-            if (depth >= 8) targets.push('/');
-            else if (splitString) targets.push(...commandTargets(splitString, depth + 1, false, expansionEnv));
+            envSplitStringTargets(words[i + 1] || '');
             i += 2;
           } else if (option.startsWith('--split-string=')) {
-            const splitString = option.slice('--split-string='.length);
-            if (depth >= 8) targets.push('/');
-            else if (splitString) targets.push(...commandTargets(splitString, depth + 1, false, expansionEnv));
+            envSplitStringTargets(option.slice('--split-string='.length));
             i += 1;
           } else if (option.startsWith('-S') && option.length > 2) {
-            const splitString = option.slice(2);
-            if (depth >= 8) targets.push('/');
-            else targets.push(...commandTargets(splitString, depth + 1, false, expansionEnv));
+            envSplitStringTargets(option.slice(2));
             i += 1;
           } else if (/^-[iv]*S.+/.test(option)) {
-            const splitString = option.replace(/^-[iv]*S/, '');
-            if (depth >= 8) targets.push('/');
-            else targets.push(...commandTargets(splitString, depth + 1, false, expansionEnv));
+            envSplitStringTargets(option.replace(/^-[iv]*S/, ''));
             i += 1;
           } else if (/^-[iv]*S$/.test(option)) {
-            const splitString = words[i + 1] || '';
-            if (depth >= 8) targets.push('/');
-            else if (splitString) targets.push(...commandTargets(splitString, depth + 1, false, expansionEnv));
+            envSplitStringTargets(words[i + 1] || '');
             i += 2;
           } else if (/^-[iv]*[uPCa]$/.test(option)) {
             i += 2;
@@ -2572,8 +2703,43 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
     // 用同樣的方式搬動抓取，而且永遠不會進到 `options`（填它的掃描從命令字之後才開始），所以
     // 豁免要求產生器前面什麼都沒有。`resolved.word === label` 是另一半：label 來自
     // path.basename()，少了它，任何叫做 `curl` 的執行檔都會繼承豁免。
+    // isCanonicalInstallLine() is the whole rule (see CANONICAL_INSTALL_LINES),
+    // and `depth === 0` is what makes "the whole command line" mean the line the
+    // user actually typed. At depth > 0 the text being judged is something this
+    // gate RECONSTRUCTED -- a heredoc body, an emitter's output, the argument of
+    // `bash -c`, an `env -S` string -- and a route that is only canonical after
+    // that reconstruction is a route somebody else assembled. Measured
+    // 2026-09-05: `BASH_ENV=/tmp/evil.sh bash -c '<canonical route>'` really runs
+    // the planted file's definition and was ALLOWED while its non-exempt twin was
+    // refused, i.e. the exemption was what let it through; with this clause the
+    // inner text is judged like any other unreadable piped script. The cost is
+    // that `bash -c '<canonical route>'` and `echo '<canonical route>' | bash`
+    // are refused too -- neither is a documented route, and the documented one is
+    // to type the route itself.
+    // isCanonicalInstallLine() 就是全部的規則（見 CANONICAL_INSTALL_LINES），而 `depth === 0`
+    // 是讓「整條命令列」真的等於「使用者打的那一行」的那一半。depth > 0 時被判的文字是這道
+    // 閘門自己「重建」出來的——heredoc 內文、產生器的輸出、`bash -c` 的參數、`env -S` 字串
+    // ——而一條要靠重建才變成記載路徑的路徑，是別人組出來的。2026-09-05 實測：
+    // `BASH_ENV=/tmp/evil.sh bash -c '<記載路徑>'` 真的會執行被植入檔案裡的定義，而它放行、
+    // 非豁免的雙胞胎被拒——也就是放行的原因就是豁免；加上這一條之後，內層文字就跟其他讀不到
+    // 的 piped script 一樣被判。代價是 `bash -c '<記載路徑>'` 與 `echo '<記載路徑>' | bash`
+    // 也會被拒——兩者都不是記載中的路徑，而記載中的做法就是直接打那條路徑本身。
+    // Everything below it is now UNREACHABLE BY CONSTRUCTION -- a line that is
+    // byte-equal to a canonical route cannot carry a prefix, a second operand, a
+    // non-allowlisted option, a `..`, or a redefinition of the producer's name,
+    // because every one of those is a character the canonical line does not have.
+    // They are kept as defence in depth, and their controls are kept in
+    // test-hooks.js: they are what still refuses if this line is ever widened
+    // back into a set of conditions, and deleting a guard because today's rule
+    // makes it redundant is how the redundancy stops being true.
+    // isCanonicalInstallLine() 就是全部的規則（見 CANONICAL_INSTALL_LINES）。它底下每一個
+    // 條件現在都「在構造上」到不了——逐位元組等於記載路徑的一行，不可能同時帶著前綴、第二個
+    // 操作元、白名單外的選項、`..`，或把產生器的名字重新定義掉，因為那每一樣都是這一行沒有
+    // 的字元。留著它們是縱深防禦，測試也照留：萬一哪天這條規則又被放寬回「一組條件」，擋下來
+    // 的就是它們；而「今天用不到就刪掉」正是讓那個「用不到」不再成立的做法。
     if (
-      (label === 'curl' || label === 'wget') && !dynamic && operands.length === 1
+      depth === 0 && isCanonicalInstallLine(rawCommandText)
+      && (label === 'curl' || label === 'wget') && !dynamic && operands.length === 1
       && !resolved.prefixed && resolved.word === label
       && !producerNameShadowed(context, label)
       && !/\.\.|%2e|%2f|%5c/i.test(operands[0])
@@ -3419,16 +3585,20 @@ function unscannableScriptDenial(shape, isCopilot, isAntigravity, isCursor, isGr
     + `（這不是說它一定會刪，是說這道閘門讀不到）。規則：unscannable piped script。`
     + `繞法：先存成檔案再讀過執行（curl -o install.sh <url> && bash install.sh），`
     + `或把命令寫成字面的 <shell> -c '<命令>'。`
-    + `若這是一條你信任的安裝路徑，把它的網址前綴加進 hooks/protect-important-paths.js 的`
-    + ` PIPED_SCRIPT_EXCEPTIONS —— 那份清單比對的是命令列上的網址文字，不是身分驗證。`;
+    + `若這是一條你信任的安裝路徑，把「整條命令列」加進 hooks/protect-important-paths.js 的`
+    + ` CANONICAL_INSTALL_LINES（豁免比對的是一整行，前後多一個字都不算），`
+    + `它的網址前綴同時要在 PIPED_SCRIPT_EXCEPTIONS 上 —— 這兩份清單比對的都是命令列上的`
+    + `文字，不是身分驗證。`;
   const en = `Refused to run: this command feeds a script into a shell through a pipe or a process`
     + ` substitution (${shape}), and this gate cannot read that script before it runs, so it cannot tell`
     + ` whether the script removes a protected directory (this does not say that it does; it says this`
     + ` gate could not read it). Rule: unscannable piped script.`
     + ` Workaround: save it to a file and read it first (curl -o install.sh <url> && bash install.sh),`
     + ` or spell the command literally as <shell> -c '<command>'. If this is an install route you trust,`
-    + ` add its URL prefix to PIPED_SCRIPT_EXCEPTIONS in hooks/protect-important-paths.js -- that list`
-    + ` matches the URL TEXT on the command line and is not an identity check.`;
+    + ` add the WHOLE command line to CANONICAL_INSTALL_LINES in hooks/protect-important-paths.js (the`
+    + ` exemption matches a whole line, so one extra character before or after it is a different line),`
+    + ` and its URL prefix must also be on PIPED_SCRIPT_EXCEPTIONS -- both lists match TEXT on the`
+    + ` command line and neither is an identity check.`;
   return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
 }
 

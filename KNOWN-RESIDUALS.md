@@ -380,14 +380,17 @@ is the user's call, not a fixer's, and it is written here rather than shipped.
 ## R5-b — 產生器標籤取自 `path.basename()`，只有豁免那一支被收窄
 
 2026-09-04 起，`curl`／`wget` 的安裝路徑豁免要求產生器是「前面什麼都沒有、而且不帶路徑」的
-赤裸命令字（見 README「比對還有五個收窄條件」第 4 點）。**這個收窄只套用在豁免那一支**：
+赤裸命令字（見 README「允許的 piped installer 清單」一節；2026-09-05 起那些收窄條件仍在
+程式碼與測試裡，但在整行比對之下已經到不了）。**這個收窄只套用在豁免那一支**：
 檔案裡其他地方（外殼拆解、carrier 判定）照舊用 `path.basename()` 比對名字，而在那些地方
 「名字對了就當成 shell」是 **fail-closed** 的方向——多認一個名字只會多一次拒絕，不會多一次
 放行——所以刻意不動。
 
 **R5-b — the producer label still comes from `path.basename()` everywhere except
 the exemption.** Since 2026-09-04 the curl/wget install-route exemption requires a
-BARE, unprefixed, unpathed producer word. That narrowing is deliberately confined to
+BARE, unprefixed, unpathed producer word (see README's 「允許的 piped installer 清單」
+section; since 2026-09-05 that narrowing is unreachable behind the whole-line rule, and
+kept as defence in depth). It is deliberately confined to
 the exemption: elsewhere in the file (wrapper unwrapping, carrier detection) a
 basename match is the FAIL-CLOSED direction -- recognising one more name costs a
 refusal, never an allowance -- so it is left as it is.
@@ -421,14 +424,20 @@ alone would leave the next reader believing the family was handled.
 
 ## R5-d — 產生器名字被「行外」換掉：PATH 上先種一個 `curl`，或上一次呼叫留下的 `hash -p`
 
-README 收窄條件 5 從 2026-09-05 起掃的是**原始命令文字**，所以同一行上的
-`curl(){ … }`、`eval 'curl(){ … }'`、`source <(…)`、`. <(…)`、here-doc、`trap`、
-`hash -p …` 全部作廢豁免。**但那是「這一行看得到」的部分。**
+2026-09-05 起，豁免的條件是**整條命令列逐位元組等於 `CANONICAL_INSTALL_LINES` 上的一行**，
+而且必須是使用者自己打的那一行（`depth === 0`）。因此「這一行看得到」的每一種替換都不再是
+問題：`curl(){ … }`、`eval 'curl(){ … }'`、`e''val 'c''url(){ … }'`、`source <(…)`、
+`. <(…)`、here-doc、`trap`、`hash -p …`、`export PATH=…; <豁免路徑>`、
+`BASH_ENV=<檔> bash -c '<豁免路徑>'`、`FPATH=<目錄> zsh -c 'autoload -Uz curl; <豁免路徑>'`、
+`enable -f <物件> curl; <豁免路徑>`——每一種都在行上多了字元，所以那一行就不是清單上的行了。
+（前四種在 2026-09-04 的版本上實測會執行；中間三種是 2026-09-05 補測的 NOTE-B，同樣會執行。）
 
-**看不到、也擋不住的**：`~/bin/curl`（或 PATH 上任何一個排在 `/usr/bin` 前面的目錄）先被
-種進一個可執行檔，然後才送出一條乾淨的 `curl -sSL <豁免網址> | bash`；或者在**前一次** Bash
-呼叫裡跑過 `hash -p /tmp/evil/curl curl`，而這一次的命令列上什麼都沒寫。兩者實測都會執行被
-種下去的那支程式，而這一行的文字與 README 記載的安裝路徑逐位元組相同。
+**看不到、也擋不住的，是「上一次呼叫」留下的東西**：`~/bin/curl`（或 PATH 上任何一個排在
+`/usr/bin` 前面的目錄）先被種進一個可執行檔，然後才送出一條乾淨的
+`curl -sSL <豁免網址> | bash`；或者在**前一次** Bash 呼叫裡跑過
+`hash -p /tmp/evil/curl curl`、`export BASH_ENV=<檔>`、`export FPATH=<目錄>`，而這一次的
+命令列上什麼都沒寫。這些實測都會執行被種下去的那支程式，而這一行的文字與 README 記載的安裝
+路徑逐位元組相同。
 
 **這是文字閘門的定義域邊界，不是缺陷可以修掉的東西**：PreToolUse 只拿得到即將執行的那一行
 文字，拿不到 PATH 的內容、也拿不到上一個 shell 行程的 hash table（那個 shell 行程甚至還沒
@@ -436,14 +445,52 @@ README 收窄條件 5 從 2026-09-05 起掃的是**原始命令文字**，所以
 讓條件 5 讀起來像是「產生器一定是真正的 curl」的保證——它保證的只是「這一行沒有把它換掉」。
 
 **R5-d — the producer's name replaced from OFF the line: a `curl` planted on PATH, or a
-`hash -p` left behind by an earlier call.** Since 2026-09-05, README narrowing condition 5
-scans the RAW command text, so `curl(){ … }`, `eval 'curl(){ … }'`, `source <(…)`, `. <(…)`,
-a here-doc, `trap` and `hash -p` on the SAME line all void the exemption. What it cannot
-see: an executable planted at `~/bin/curl` (or anywhere on PATH ahead of `/usr/bin`) before
-an otherwise clean `curl -sSL <exempted URL> | bash`, or a `hash -p /tmp/evil/curl curl` run
-in an EARLIER Bash call with nothing on this line to show for it. Both really run the
+`hash -p` or a `BASH_ENV` left behind by an earlier call.** Since 2026-09-05 the exemption
+requires the WHOLE command line to be byte-equal to a line in `CANONICAL_INSTALL_LINES` and
+to be the line the user typed (`depth === 0`), so every ON-LINE replacement stopped
+mattering: `curl(){ … }`, `eval 'curl(){ … }'`, `e''val 'c''url(){ … }'`, `source <(…)`,
+`. <(…)`, a here-doc, `trap`, `hash -p`, `export PATH=…; <route>`,
+`BASH_ENV=<file> bash -c '<route>'`, `FPATH=<dir> zsh -c 'autoload -Uz curl; <route>'` and
+`enable -f <obj> curl; <route>` each add characters to the line, so the line is no longer
+that line. (The first four were measured executing against the 2026-09-04 build; the three
+environment plants are NOTE-B, measured 2026-09-05, and execute too.) What it cannot
+see is what an EARLIER call left behind: an executable planted at `~/bin/curl` (or anywhere
+on PATH ahead of `/usr/bin`) before an otherwise clean `curl -sSL <exempted URL> | bash`, or
+a `hash -p /tmp/evil/curl curl`, `export BASH_ENV=<file>` or `export FPATH=<dir>` run in an
+EARLIER Bash call with nothing on this line to show for it. Both really run the
 planted program while this line's text matches the documented install route byte for byte.
 This is the domain boundary of a text gate, not a defect to fix: PreToolUse is handed the
 line that is about to run and nothing else -- not the contents of PATH, not the hash table
 of a shell process that does not exist yet. Written down so condition 5 is not read as a
 promise that the producer IS the real curl; it promises only that this line did not replace it.
+
+## R5-8 家族（同一行把產生器換掉）— 2026-09-05 **由構造上關閉**，留作紀錄
+
+這一條不是殘留，是**已關閉項目的紀錄**，放在這裡是因為它前後改過三次，而每一次都留下一份
+「已經修好了」的說明。
+
+R5-8 指的是「一條命令列在豁免的 `curl`／`wget` 之前，先把那個名字換成別的東西」。三輪都用
+同一種方法處理它——**列舉**：先是斷詞看得到的定義（`curl(){ … }`、`function curl`、
+`alias curl=`、`hash -p`），再是原始文字裡的 `eval`／`source`／點命令／`trap`／`exec`。
+每一輪都關掉了自己列舉的那些，然後被下一種沒被列舉到的寫法打穿；最後一次是
+**字裡面的引號消去**（`e''val 'c''url() { … }'`）：原始位元組裡兩個關鍵字都不存在，斷詞後
+那個定義又是一個字，兩種掃法都看不到，而 shell 會把兩者還原。
+
+**2026-09-05 改成整行字面比對之後，這一類不再需要列舉**：豁免只在「整條命令列逐位元組等於
+`CANONICAL_INSTALL_LINES` 上的一行、而且是使用者自己打的那一行」時成立，所以任何替換都必須
+在行上多寫字元，而多寫的每一個字元都會讓這一行不再是清單上的行。**代價**列在 README 的
+「允許的 piped installer 清單」一節與 `test-hooks.js` 的 `wholeLineRuleCosts`：十七條原本
+放行的寫法從此拒絕。**還沒關掉的是「行外」那一半**，見上面的 R5-d。
+
+**R5-8 family (replacing the producer from the same line) — CLOSED BY CONSTRUCTION on
+2026-09-05, kept as a record.** Not a residual: a record, kept because this rule was
+rewritten three times and each round left behind a paragraph saying it was fixed. R5-8 is
+"a command line replaces the exempted `curl`/`wget` name before it runs". Three rounds
+attacked it by ENUMERATION -- first the definitions word-splitting can see, then
+`eval`/`source`/dot/`trap`/`exec` in the raw text -- and each round closed what it had
+listed and was defeated by a spelling nobody had listed, last by in-word quote removal
+(`e''val 'c''url() { … }'`), which is invisible to both scans and rebuilt by the shell.
+Since the exemption became a whole-line literal match on the line the user typed, the class
+needs no enumeration: any replacement must add characters, and any added character stops
+the line from being the listed line. The cost is listed in README's 「允許的 piped
+installer 清單」 section and in `wholeLineRuleCosts`. The OFF-line half is still open: R5-d.
