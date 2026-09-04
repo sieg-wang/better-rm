@@ -322,6 +322,74 @@ function shellWords(command) {
       escaped = true;
     } else if (quote) {
       if (char === quote) quote = '';
+      // A `$(` inside DOUBLE QUOTES opens a command substitution, and bash parses
+      // its body in a FRESH quoting context: the `"` in
+      // `echo "T: $(echo a | sed "s|$X/||")"` OPENS a new quote, it does not close
+      // the outer one. Without this branch the tokenizer closed the outer quote
+      // there, believed it was back at top level for the rest of the
+      // substitution, and read the `|` inside `s|$X/||` as a real pipeline
+      // operator -- so `$X/` became the receiving end of a pipe, the R4
+      // dynamic-carrier arm fired on it, and an ordinary sed one-liner was
+      // REFUSED with `unresolvable pipe target ($X/)` (measured 2026-09-04
+      // through the live stdin contract; the same command without the outer
+      // `"$( … )"` was allowed). `V=1; echo "$(printf "%s|%s" "$V" y)"` and
+      // `echo "n=$(ls | wc -l) $(echo "a|$X")"` were refused the same way.
+      // The body is consumed with the SAME readParenthesized() the top-level
+      // `$(` branch uses -- it already honours nesting and quotes -- so the
+      // substitution lands in the word it sits in, exactly like its unquoted
+      // twin, and commandSubstitutions() scans it from there. A regex over the
+      // raw text would have to re-answer "which quote am I in", which is the
+      // question this branch exists to answer.
+      // 雙引號裡的 `$(` 開啟命令替換，而 bash 解析它的內文時是「全新的引號脈絡」：
+      // `echo "T: $(echo a | sed "s|$X/||")"` 裡那個 `"` 是「開啟」新引號，不是關掉外層的。
+      // 少了這個分支，tokenizer 會在那裡把外層引號關掉、以為自己回到了頂層，於是把
+      // `s|$X/||` 裡的 `|` 當成真正的管線運算子——`$X/` 成了管線接收端，R4 的動態 carrier
+      // 分支就對它開火，一條普通的 sed 被以 `unresolvable pipe target ($X/)` 擋掉。
+      // 內文用的是頂層 `$(` 分支同一個 readParenthesized()（它本來就處理巢狀與引號），
+      // 所以替換會落在它所屬的那個字裡，與沒有外層引號的雙胞胎一致。
+      else if (quote === '"' && char === '$' && input[index + 1] === '(') {
+        const substitution = readParenthesized(input, index + 1);
+        wordHasDynamicExpansion = true;
+        if (substitution) {
+          word += input.slice(index, substitution.end + 1);
+          index = substitution.end;
+        } else {
+          // Unbalanced '(': keep the old character-by-character behaviour, the
+          // same fallback the top-level branch takes.
+          word += char;
+        }
+      }
+      // The same fresh-context rule for the other two substitution spellings that
+      // can hold a quote of their own. `${x:-"a|$X"}` and the backtick form were
+      // measured refused (2026-09-04) for exactly the reason `$( … )` was: the
+      // inner `"` closed the OUTER quote, the rest was read at top level, and a
+      // '|' inside it became a pipeline. A fix that closed only `$( … )` would
+      // have left two siblings of the same defect open -- and `$(( … ))` needs no
+      // branch of its own, because readParenthesized already matches its
+      // parentheses from the first one.
+      // 另外兩種「裡面可以自帶引號」的替換寫法，同一條規則。只修 `$( … )` 會留下同一個缺陷
+      // 的兩個兄弟站點。`$(( … ))` 不需要自己的分支：readParenthesized 從第一個括號起就會
+      // 把巢狀括號配對完。
+      else if (quote === '"' && char === '$' && input[index + 1] === '{') {
+        const braced = readBraced(input, index + 1);
+        wordHasDynamicExpansion = true;
+        if (braced !== null) {
+          word += input.slice(index, braced + 1);
+          index = braced;
+        } else {
+          word += char;
+        }
+      }
+      else if (quote === '"' && char === '`') {
+        const backquoted = readBackquoted(input, index);
+        wordHasDynamicExpansion = true;
+        if (backquoted !== null) {
+          word += input.slice(index, backquoted + 1);
+          index = backquoted;
+        } else {
+          word += char;
+        }
+      }
       else {
         if (quote === '"' && (char === '$' || char === '`')) {
           wordHasDynamicExpansion = true;
@@ -489,6 +557,50 @@ function shellWords(command) {
 // Find the ')' that closes the '(' at openIndex, honouring nesting and quotes.
 // Shared by the tokenizer and the substitution scanner so both agree on where a
 // command substitution ends.
+// Where the '}' that closes the '${' at openIndex sits, honouring nesting, quotes
+// and backslashes; null if it never closes. Used only from inside a double quote,
+// where the body may carry a quote of its own (`"${x:-"a|b"}"`) and reading that
+// quote as the end of the OUTER one is the defect this exists to stop.
+// `${` 的收尾 '}' 在哪裡（處理巢狀、引號、反斜線）；沒有收尾就回 null。
+function readBraced(input, openIndex) {
+  let depth = 1;
+  let innerQuote = '';
+  let innerEscaped = false;
+  for (let i = openIndex + 1; i < input.length; i += 1) {
+    const char = input[i];
+    if (innerEscaped) {
+      innerEscaped = false;
+    } else if (char === '\\' && innerQuote !== "'") {
+      innerEscaped = true;
+    } else if (innerQuote) {
+      if (char === innerQuote) innerQuote = '';
+    } else if (char === '"' || char === "'") {
+      innerQuote = char;
+    } else if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return null;
+}
+
+// Where the '`' that closes the one at openIndex sits. A backquoted substitution
+// ends at the next backslash-free backtick -- it does not nest -- so this is a
+// scan, not a depth count. null if it never closes.
+// 反引號替換在「下一個未被反斜線跳脫的反引號」結束（不巢狀），沒有收尾就回 null。
+function readBackquoted(input, openIndex) {
+  for (let i = openIndex + 1; i < input.length; i += 1) {
+    if (input[i] === '\\') {
+      i += 1;
+      continue;
+    }
+    if (input[i] === '`') return i;
+  }
+  return null;
+}
+
 function readParenthesized(input, openIndex) {
   let depth = 1;
   let innerQuote = '';
