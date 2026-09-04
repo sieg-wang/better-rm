@@ -378,6 +378,16 @@ export BETTER_RM_PROTECTED_DIRS="$HOME/work/secrets:$HOME/vault"
 工具呼叫 cwd 的 `.ssh`。這一點對 `/etc` 也一樣（`cd / && rm -rf etc`），不是這兩項特有的，
 也不是本次新增的。
 
+**`cd` 不是唯一的換目錄寫法。** env(1) 自己就有：BSD env 的 `env -C <dir> …`（本機
+`env` 的 usage 行就寫著 `[-C workdir]`）與 GNU env 的 `env --chdir=<dir> …` 都會在執行
+命令前換掉工作目錄，於是 `env -C / rm -rf etc`、`env --chdir=/ rm -rf etc` 與上面那條
+`cd / && rm -rf etc` 是同一件事、同樣不會被擋。閘門會把這兩個選項連同它的值一起跳過，
+但不會把那次 chdir 接進判定裡，所以相對路徑仍然是對著本次工具呼叫的 cwd 解讀的。
+（2026-09-05 用 mkdir marker 實測：BSD env 吃 `-C`、GNU env 吃 `--chdir=`，兩者都真的
+在目標目錄裡建出了檔案；BSD env 不認 `--chdir=` 這個寫法。）絕對路徑的操作元不受影響
+——`env -C /tmp rm -rf /etc` 照樣被拒——以名字認定的項目也一樣，例如
+`env -C / rm -rf .git`。要它照一般規則被判定，就把目標寫成字面的絕對路徑。
+
 ### 專案目錄
 
 - `.git` - Git 版本控制目錄（任何位置的 .git 目錄），**以及它底下的一切**

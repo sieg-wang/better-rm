@@ -93,6 +93,56 @@ const blocked = [
   'env FOO=1 source /dev/stdin <<< \'rm -rf /etc\'',
   'sudo env "F-O=1" rm -rf /etc',
   'env "F-O=1" env "B.Z=2" rm -rf /etc',
+  // env -S PLUS THE ARGV AFTER IT (r5-fix-better-rm-5). `-S` does not introduce
+  // a self-contained command: env SPLITS the string and inserts the words into
+  // its OWN argument list in place of the option, so whatever follows `-S` on
+  // the command line are that command's operands. Judging the string alone
+  // stopped at the option boundary and never saw the operand -- which is where
+  // the path is -- so every row here was ALLOWED at e5c8c6c while env really ran
+  // the deletion. Measured 2026-09-05 with mkdir markers on BOTH implementations
+  // this repository runs on, macOS BSD env (usage: `env [-0iv] [-C workdir]
+  // [-P utilpath] [-S string] [-u name] ...`) and GNU coreutils 9.11 env, the
+  // ubuntu runner's: all eight shapes executed on both, sixteen for sixteen, and
+  // `env -S 'FOO=1 /usr/bin/env' | grep -c '^FOO=1'` is 1 on both, so the
+  // assignment inside the string is really kept. The reconstruction is judged as
+  // env's ARGV rather than as a shell line, which is what makes the `-u X rm`
+  // rows work: read as a shell line, `-u` stands in command position and `rm`
+  // never does.
+  // env -S 再加上它後面的 argv（r5-fix-better-rm-5）。`-S` 帶出來的不是一條獨立的命令：env
+  // 會把那個字串拆開、插回它自己的參數表取代該選項，所以命令列上跟在 `-S` 後面的字就是那個
+  // 命令的操作元。只判斷字串本身會停在選項邊界，永遠看不到操作元——而路徑正好在那裡——於是
+  // 下面每一列在 e5c8c6c 都被放行，而 env 真的把刪除跑掉了。2026-09-05 用 mkdir marker 在本
+  // repo 會跑到的兩種實作上實測（macOS BSD env 與 ubuntu runner 的 GNU coreutils 9.11
+  // env）：八種形狀十六次全部執行，且兩邊 `env -S 'FOO=1 /usr/bin/env' | grep -c '^FOO=1'`
+  // 都是 1。重組出來的文字是當成 env 的 argv 判定而不是當成 shell 命令列，`-u X rm` 那幾列
+  // 靠的就是這一點：當成 shell 命令列讀時，站在命令位置的是 `-u`，`rm` 永遠不是。
+  "env -S 'FOO=1 rm' -rf /etc",
+  "env -S 'rm' -rf /etc",
+  "env -S '-u X rm' -rf /etc",
+  "env -S 'FOO=1 rm -rf' /etc",
+  "env -S 'FOO%%=1 rm' -rf /etc",
+  "env -S '-i rm' -rf /etc",
+  "env -S 'rm' -rf /workspace/secrets",
+  // every spelling of the option the walk accepts, each reaching the same helper
+  // 走訪接受的每一種選項寫法，全部通到同一個 helper
+  "env --split-string='rm' -rf /etc",
+  "env --split-string 'rm' -rf /etc",
+  'env -Srm -rf /etc',
+  "env -iS 'rm' -rf /etc",
+  'env -iSrm -rf /etc',
+  // options INSIDE the string with no trailing argv at all: the same walk gap,
+  // reached without the boundary being crossed
+  // 選項整個在字串裡、後面完全沒有 argv：同一個走訪缺口，不必跨過邊界就到得了
+  "env -S '-u X rm -rf /etc'",
+  // the wrapper chains, which is where a fix that only covered the bare spelling
+  // would have stopped
+  // 包裝鏈——只修裸寫法的修復會停在這裡
+  "sudo env -S 'rm' -rf /etc",
+  "env A=1 env -S 'rm' -rf /etc",
+  // a shell carrier split ACROSS the -S boundary: `bash -c` inside the string,
+  // the script it runs outside it
+  // shell carrier 被 `-S` 邊界切開：`bash -c` 在字串裡，它要跑的腳本在外面
+  "env -S 'bash -c' 'rm -rf /etc'",
   // ...and the identifier-named twins of the same rows, which were already
   // refused: they are the control that says the widening above is what changed
   // the odd-name rows, and not something else in the env walk.
@@ -858,6 +908,32 @@ const allowed = [
   "env -S \"bash -c 'rm -rf build'\"",
   "env -ivS\"bash -c 'rm -rf build'\"",
   "env -iu HOME bash -c 'rm -rf build'",
+  // The positive controls for the `-S` + trailing-argv rows in `blocked`
+  // (r5-fix-better-rm-5). Appending the argv must not turn the option into a
+  // refusal of its own: what decides is still the command the reconstruction
+  // names and the path it is handed. A reader keeps its operands, including a
+  // protected one -- reading /etc is not removing it -- and a removal aimed
+  // somewhere unprotected stays ordinary.
+  // `blocked` 裡那些「-S 加上後面 argv」的正向對照（r5-fix-better-rm-5）。把 argv 接上去
+  // 不可以讓這個選項本身變成一種拒絕：決定的仍然是重組出來的那條命令叫什麼、拿到哪條路徑。
+  // 讀取類命令保留它的操作元（包含受保護的那條——讀 /etc 不是刪 /etc），刪除類指向沒受保護
+  // 的地方就仍然是普通命令。
+  "env -S 'FOO=1 ls' -la",
+  "env -S 'echo hi' there",
+  "env -S 'ls' -la /etc",
+  "env -S 'cat' /etc/hosts",
+  "env -S 'rm' -rf ./tmp-in-cwd",
+  "env -S 'FOO=1 rm' -rf ./tmp-in-cwd",
+  // A CHILD of a protected directory is not itself protected, so this matches
+  // its own twin `rm -rf "/etc/my dir"` -- which is the point of the row: the
+  // reconstruction must reproduce the operand, not invent a stricter verdict
+  // for it. Its negative twin, a protected directory whose NAME contains a
+  // space, is pinned separately below (a bare join would split it in two).
+  // 受保護目錄底下的「子項」本身不受保護，所以這一列與它的雙胞胎 `rm -rf "/etc/my dir"`
+  // 相同——這正是這一列的用意：重組必須「還原」那個操作元，而不是替它發明一個更嚴格的裁決。
+  // 它的反向雙胞胎（名字裡含空白的受保護目錄）在下面另外釘住：直接用空白接起來會把它切成兩半。
+  'env -S \'rm\' -rf "/etc/my dir"',
+  'rm -rf "/etc/my dir"',
   "bash -c 'if true; then rm -rf build; fi'",
   "bash -c 'if rm -rf build; then true; fi'",
   "bash -c 'for x in a; do rm -rf build; done'",
@@ -1408,6 +1484,23 @@ for (let depthLevel = 0; depthLevel < 10; depthLevel += 1) {
   deeplyNestedCarrier = `bash -c ${JSON.stringify(deeplyNestedCarrier)}`;
 }
 blocked.push(deeplyNestedCarrier);
+
+// The same cap on the `env -S` recursion, which now recurses once MORE per
+// level than it used to (the reconstruction is re-scanned as env's argv), so
+// the arm that pushes '/' past the cap is the only thing keeping deep nesting
+// fail-closed. Ten levels is past the cap of 8; nine is the first level that
+// reaches it, and deleting the '/' push allows every level from there up while
+// eight and below stay refused for the ordinary reason -- which is what makes
+// this row a test of the CAP and not of the walk.
+// `env -S` 遞迴的同一道上限。它現在每一層比以前多遞迴一次（重組出來的文字要再當成 env 的
+// argv 掃一遍），所以「超過上限就推 '/'」那一臂是深層巢狀維持 fail-closed 的唯一依靠。十層
+// 已超過上限 8；第九層是第一個碰到上限的層數，把那個 '/' 拿掉之後，第九層以上全部會被放行，
+// 而八層以下仍因一般理由被拒——這正是這一列測的是「上限」而不是走訪本身的原因。
+let deeplyNestedEnvSplit = 'rm -rf /etc';
+for (let depthLevel = 0; depthLevel < 10; depthLevel += 1) {
+  deeplyNestedEnvSplit = `env -S '${deeplyNestedEnvSplit.replace(/'/g, "'\\''")}'`;
+}
+blocked.push(deeplyNestedEnvSplit);
 
 // This repository carries TWO protected-path lists: better-rm's PROTECTED_DIRS
 // and this hook's SYSTEM_DIRS. Only the first was updated when the macOS entries
@@ -3596,6 +3689,33 @@ let variableResolutionChecks = 0;
     );
     variableResolutionChecks += 2;
   }
+
+  // A protected directory whose NAME contains a space, reached through
+  // `env -S` (r5-fix-better-rm-5). The words that follow `-S` have already had
+  // their quotes removed by the tokenizer, so the reconstruction has to put
+  // quoting back before re-reading them: joined bare, `/workspace/my secrets`
+  // becomes the two words `/workspace/my` and `secrets`, neither of which is
+  // protected, and the removal is allowed. This is the only row that separates
+  // re-quoting from plain concatenation -- with a space-free path both spellings
+  // agree -- so it is the one that goes red if the quoting is dropped. The twin
+  // WITHOUT env -S is asserted beside it, so a failure here says the env path
+  // lost the operand and not that the directory was never protected.
+  // 名字裡含空白的受保護目錄，經由 `env -S` 抵達（r5-fix-better-rm-5）。跟在 `-S` 後面的字
+  // 早就被斷詞器拿掉引號了，所以重組時必須把引號補回去再重讀：直接用空白接起來，
+  // `/workspace/my secrets` 會變成 `/workspace/my` 與 `secrets` 兩個字，兩個都不受保護，刪除
+  // 就被放行。這是唯一能把「重新加引號」與「直接串接」分開的一列——路徑裡沒有空白時兩種寫法
+  // 結果相同——所以引號一旦被拿掉，紅的就是它。旁邊釘上沒有 env -S 的雙胞胎，這樣這裡轉紅時
+  // 說的是「env 這條路徑把操作元弄丟了」，而不是「這個目錄根本沒被保護」。
+  const spacedProtected = { BETTER_RM_PROTECTED_DIRS: '/workspace/my secrets' };
+  assert.equal(
+    decisionFor('rm -rf "/workspace/my secrets"', spacedProtected), 'deny',
+    'a protected directory whose name contains a space is protected without env -S',
+  );
+  assert.equal(
+    decisionFor('env -S \'rm\' -rf "/workspace/my secrets"', spacedProtected), 'deny',
+    'env -S must reproduce a spaced operand instead of splitting it into two unprotected words',
+  );
+  variableResolutionChecks += 2;
 }
 
 // The out-of-time refusal, by shape. `unjudgeableDenial`

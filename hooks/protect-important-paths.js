@@ -1961,16 +1961,83 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
   // 命令位置，於是放行。2026-09-05 用 touch marker 實測：`FOO%%=1`、`F-O=1`、`FOO.BAR=1` 在
   // BSD env 與 GNU coreutils 9.11 env 上都真的把命令跑掉了。剝掉指派之後的文字是「加入」掃描
   // 而不是取代原文，理由與產生器那四種掃法相同：剝錯的時候，不可以把原文看得見的東西藏起來。
-  const envSplitStringTargets = (splitString) => {
+  // What `-S` splits into does not stand alone: env INSERTS those words into its
+  // own argument list in place of the option, so the words that follow `-S` on
+  // the real command line are the split command's OPERANDS. Judging the string
+  // by itself stops at that boundary, and the operands -- which is where the
+  // path is -- were never seen: `env -S 'rm' -rf /etc`, `env -S 'FOO=1 rm' -rf
+  // /etc` and `env -S '-u X rm' -rf /etc` were all ALLOWED while env really ran
+  // the deletion. Measured 2026-09-05 with mkdir markers on BOTH implementations
+  // this repository runs on -- macOS BSD env (whose usage line is
+  // `env [-0iv] [-C workdir] [-P utilpath] [-S string] [-u name] ...`) and GNU
+  // coreutils 9.11 env, the ubuntu runner's: all eight shapes below executed on
+  // both, sixteen for sixteen, and `env -S 'FOO=1 /usr/bin/env' | grep -c
+  // '^FOO=1'` = 1 on both, so the assignment inside the string is really kept.
+  // The reconstruction is scanned as env's ARGV -- literally by prefixing `env`
+  // -- rather than as a shell line, because that is what it is: the walk above
+  // then applies env's own rules (any word with `=` is an assignment, options
+  // take their values, `--` ends them) instead of the shell's, which is the
+  // difference that leaves `-u X rm` with `-u` in command position when a shell
+  // reads it. Each appended word is re-quoted so re-tokenizing reproduces it
+  // exactly: `words` has already had its quotes removed, so joining them bare
+  // would re-split any operand containing a space and lose it -- measured, with
+  // a protected directory named `/workspace/my secrets`, which a bare join turns
+  // into the two unprotected words `/workspace/my` and `secrets` and allows.
+  // This scan is ADDED to the two above and never substituted for them, for the
+  // same reason they are additive.
+  // `-S` 拆出來的那些字並不是獨立的一條命令：env 會把它們「插回自己的參數表」取代該選項，
+  // 所以命令列上跟在 `-S` 後面的字，就是那個命令的操作元。只判斷字串本身會停在這個邊界上，
+  // 而路徑正好在外面，於是 `env -S 'rm' -rf /etc`、`env -S 'FOO=1 rm' -rf /etc`、
+  // `env -S '-u X rm' -rf /etc` 全部被放行，而 env 真的把刪除跑掉了。2026-09-05 用 mkdir
+  // marker 在本 repo 會跑到的兩種實作上實測（macOS BSD env 與 ubuntu runner 的 GNU
+  // coreutils 9.11 env）：下面八種形狀十六次全部執行，且兩邊
+  // `env -S 'FOO=1 /usr/bin/env' | grep -c '^FOO=1'` 都是 1。重組出來的文字是當成 env 的
+  // 「argv」來掃（直接前綴一個 `env`）而不是當成 shell 命令列，因為它本來就是 argv：上面
+  // 那段走訪會套用 env 自己的規則（含 `=` 就是指派、選項吃掉自己的值、`--` 結束選項），
+  // 而不是 shell 的規則——`-u X rm` 被 shell 讀時 `-u` 會站在命令位置，差別就在這裡。
+  // 每個附加的字都重新加引號，好讓重新斷詞完全還原：`words` 的引號早就被拿掉了，直接用空白
+  // 接起來會把 `"/etc/my dir"` 重新拆開，也會讓加了引號的 `';'` 把掃描截斷。這一掃是「加入」
+  // 上面兩掃而不是取代它們，理由與它們是加法的理由相同。
+  const envArgvWordLiteral = (word) => `'${String(word).replace(/'/g, "'\\''")}'`;
+  const envSplitStringTargets = (splitString, argvAfter = []) => {
     const text = String(splitString || '');
-    if (!text) return;
+    if (!text && argvAfter.length === 0) return;
     if (depth >= 8) { targets.push('/'); return; }
-    targets.push(...commandTargets(text, depth + 1, false, expansionEnv));
+    if (text) targets.push(...commandTargets(text, depth + 1, false, expansionEnv));
     const parts = text.trim().split(/\s+/);
     let p = 0;
     while (p < parts.length && !parts[p].startsWith('-') && parts[p].includes('=')) p += 1;
     const stripped = parts.slice(p).join(' ');
     if (p > 0 && stripped) targets.push(...commandTargets(stripped, depth + 1, false, expansionEnv));
+    const asEnvArgv = ['env', text, ...argvAfter.map(envArgvWordLiteral)]
+      .filter((piece) => piece !== '')
+      .join(' ');
+    targets.push(...commandTargets(asEnvArgv, depth + 1, false, expansionEnv));
+  };
+  // The words that follow the `-S` option, up to the end of this simple command.
+  // `separators` alone is what the enclosing walk (`while (i < words.length &&
+  // !separators.has(words[i]))` just below) and both rm operand scans use to
+  // decide where a simple command ends, so this stops exactly where they do.
+  // That shared rule treats a QUOTED separator-shaped word as a separator too,
+  // which is a real pre-existing gap -- `rm -rf ';' /etc` yields no targets and
+  // is ALLOWED with no env(1) involved at all -- but it is one property of the
+  // whole gate, not of this reconstruction, and reading `operatorTokens` here
+  // alone would fork the convention without closing anything: the operand scan
+  // truncates on the same word a moment later. Measured: making this site read
+  // `operatorTokens` changes no row of the 47-row env probe and no row of the
+  // 823-row corpus. Reported as a finding instead of patched here.
+  // 跟在 `-S` 選項後面、到這條簡單命令結束為止的那些字。外層走訪（緊接在下面那句
+  // `while (i < words.length && !separators.has(words[i]))`）與兩處 rm 操作元掃描，判斷
+  // 簡單命令在哪裡結束用的都是 `separators` 本身，所以這裡停的位置與它們完全一致。那條共用
+  // 規則會把「加了引號、長得像分隔符」的字也當成分隔符，這確實是既有的缺口——`rm -rf ';'
+  // /etc` 掃不出任何目標、而且完全沒有 env(1) 也一樣被放行——但那是整道閘門的性質，不是這段
+  // 重組的性質；只在這裡改讀 `operatorTokens` 會分岔慣例卻關不掉任何東西：操作元掃描下一步
+  // 就會在同一個字上截斷。實測：這一處改讀 `operatorTokens`，47 列 env 探針與 823 列語料
+  // 都沒有任何一列改變。因此列為 finding 回報，不在這裡就地修補。
+  const envArgvAfter = (from) => {
+    const rest = [];
+    for (let k = from; k < words.length && !separators.has(words[k]); k += 1) rest.push(words[k]);
+    return rest;
   };
   // A here-string is the same shape as a heredoc body for this purpose, and it
   // needs the same second route: `source /dev/stdin <<< "rm -rf /etc"` never
@@ -2106,19 +2173,19 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
             i += 1;
             break;
           } else if (option === '-S' || option === '--split-string') {
-            envSplitStringTargets(words[i + 1] || '');
+            envSplitStringTargets(words[i + 1] || '', envArgvAfter(i + 2));
             i += 2;
           } else if (option.startsWith('--split-string=')) {
-            envSplitStringTargets(option.slice('--split-string='.length));
+            envSplitStringTargets(option.slice('--split-string='.length), envArgvAfter(i + 1));
             i += 1;
           } else if (option.startsWith('-S') && option.length > 2) {
-            envSplitStringTargets(option.slice(2));
+            envSplitStringTargets(option.slice(2), envArgvAfter(i + 1));
             i += 1;
           } else if (/^-[iv]*S.+/.test(option)) {
-            envSplitStringTargets(option.replace(/^-[iv]*S/, ''));
+            envSplitStringTargets(option.replace(/^-[iv]*S/, ''), envArgvAfter(i + 1));
             i += 1;
           } else if (/^-[iv]*S$/.test(option)) {
-            envSplitStringTargets(words[i + 1] || '');
+            envSplitStringTargets(words[i + 1] || '', envArgvAfter(i + 2));
             i += 2;
           } else if (/^-[iv]*[uPCa]$/.test(option)) {
             i += 2;

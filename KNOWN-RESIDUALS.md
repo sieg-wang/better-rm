@@ -494,3 +494,74 @@ Since the exemption became a whole-line literal match on the line the user typed
 needs no enumeration: any replacement must add characters, and any added character stops
 the line from being the listed line. The cost is listed in README's 「允許的 piped
 installer 清單」 section and in `wholeLineRuleCosts`. The OFF-line half is still open: R5-d.
+
+## R5-e — env(1) 的 `-C` / `--chdir` 換掉工作目錄，判定卻仍對著呼叫端的 cwd（**OPEN，僅記錄**）
+
+與 README「同樣要說清楚**沒有**涵蓋的部分」那一段講的 `cd <dir> && rm -rf <相對路徑>` 是
+**同一個性質**，只是換一個到達方式：env(1) 自己就能換工作目錄。
+
+- BSD env（macOS，本機 usage 行即為 `env [-0iv] [-C workdir] [-P utilpath] [-S string]
+  [-u name] ...`）：`env -C / rm -rf etc`
+- GNU coreutils env（ubuntu runner 與所有 Linux 使用者）：`env --chdir=/ rm -rf etc`
+
+`hooks/protect-important-paths.js` 把 `-C` / `--chdir` 放在 `optionsWithValue` 裡，走訪會把
+選項連同它的值一起跳過，但沒有任何地方把那次 chdir 接進判定，於是相對操作元仍然是對著本次
+工具呼叫的 cwd 解讀的。2026-09-05 用 mkdir marker 實測：兩種拼法都真的在目標目錄裡建出了
+檔案（BSD env 不認 `--chdir=`，GNU env 兩種都認）。
+
+**為什麼只記錄、不修**：這道閘門從頭到尾都不模擬 `cd`——hook 自己的註解就寫著「沒有任何地方
+把 `cd` 串進去」（`unknownDenial` 上方那段）。單獨替 env 的 `-C` 建一套 cwd 模型，會做出一個
+只對 env 這一條路徑成立、對 `cd` 這條更常見的路徑不成立的判定，也就是把同一個性質分岔成兩種
+行為。要修就要整道閘門一起有 cwd 模型，那是另一個題目、另一次裁決。
+
+**沒有被打穿的部分**：絕對路徑的操作元照舊被判定（`env -C /tmp rm -rf /etc` 是拒絕），以
+「名字」認定的項目也照舊（`env -C / rm -rf .git` 是拒絕，因為 `.git` 比對的是路徑元件而不是
+解析後的絕對路徑）。被漏掉的只有「相對操作元 + 換過的工作目錄」這一個組合。
+
+**R5-e — env(1)'s `-C` / `--chdir` changes the working directory while the verdict is still
+taken against the caller's cwd (OPEN, recorded only).** The same property as the
+`cd <dir> && rm -rf <relative>` limitation README already documents, reached through env(1)
+instead of `cd`: `env -C / rm -rf etc` on BSD env (macOS, whose own usage line lists
+`[-C workdir]`) and `env --chdir=/ rm -rf etc` on GNU coreutils env (the ubuntu runner's and
+every Linux user's). Both were measured executing inside the chdir target on 2026-09-05 with
+mkdir markers; BSD env does not accept the `--chdir=` spelling. The walk puts `-C`/`--chdir`
+in `optionsWithValue` and skips the option with its value without modelling the chdir, so a
+relative operand is resolved against the tool call's cwd. NOT FIXED deliberately: this gate
+models no `cd` at all -- the hook's own comment above `unknownDenial` says nothing threads a
+`cd` through it -- so building a cwd model for env's `-C` alone would fork one property into
+two behaviours, strict on the env spelling and silent on the far commoner `cd` one. A cwd
+model belongs to the whole gate and is a separate decision. Not reached: absolute operands
+are still judged (`env -C /tmp rm -rf /etc` is refused) and name-matched entries still are
+too (`env -C / rm -rf .git` is refused, because `.git` is matched as a path component and not
+as a resolved absolute path). Only "relative operand plus a changed working directory" is.
+
+## R5-f — 加了引號、長得像分隔符的操作元會截斷 rm 的操作元掃描（**OPEN，僅記錄**）
+
+`rm -rf ';' /etc` 掃不出任何目標，因此被放行；`rm ';' -rf /etc` 同樣。`;`、`\;`、`';'` 斷詞
+後是同一個單字元字，而 rm 的操作元掃描（`hooks/protect-important-paths.js` 兩處
+`for (; i < words.length && !separators.has(words[i]); i += 1)`）與外層的包裝走訪問的都是
+`separators` 本身，不看「這個字是不是寫成未加引號的運算子」——那個旗標（`operatorTokens`）
+存在，但目前只有 find 那一支在用，而它的註解正是為了這個分別而寫的。
+
+真正會發生的事：`;` 只是 rm 的另一個操作元，rm 會試著刪掉名為 `;` 的檔案**以及** `/etc`。
+
+**與 env 無關**：完全不用 env 也到得了（上面兩條就是），所以這不是 `env -S` 那條路徑的性質，
+而是整道閘門共用的一條規則的性質。r5-fix-better-rm-5 在新增 `envArgvAfter()` 時刻意跟著這條
+共用規則走，而不是只在那一個新站點改讀 `operatorTokens`：實測那樣改，47 列 env 探針與 886 列
+語料都沒有任何一列改變（因為操作元掃描下一步就會在同一個字上截斷），等於分岔了慣例卻沒關掉
+任何東西。要修就要把 `separators` 與 `operatorTokens` 的分工在整道閘門一次講清楚。
+
+**R5-f — a quoted separator-shaped operand truncates the rm operand scan (OPEN, recorded
+only).** `rm -rf ';' /etc` yields no targets and is allowed; so does `rm ';' -rf /etc`. `;`,
+`\;` and `';'` tokenize to the same one-character word, and both rm operand scans (the two
+`for (; i < words.length && !separators.has(words[i]); i += 1)` loops) and the wrapper walks
+ask `separators` alone, without consulting whether the word was WRITTEN as an unquoted
+operator -- the `operatorTokens` flag exists for exactly that distinction but only the find
+branch reads it. What really happens: `;` is just another operand, and rm tries to remove a
+file named `;` AND `/etc`. Reachable with no env(1) involved, so it is a property of a rule
+the whole gate shares, not of the `env -S` path. r5-fix-better-rm-5 deliberately followed the
+shared rule in its new `envArgvAfter()` rather than reading `operatorTokens` at that one new
+site: measured, that change moves no row of the 47-row env probe and no row of the 886-row
+corpus, because the operand scan truncates on the same word a moment later -- it would fork
+the convention without closing anything. Fixing it means settling the division of labour
+between `separators` and `operatorTokens` across the whole gate at once.
