@@ -2204,12 +2204,12 @@ const nestedSubstitutionQuoteBlocked = [
   // lines removed from readBraced, hooks/protect-important-paths.js:575-576):
   // the inner `"}"` is misread, `readBraced` returns the WRONG `}`, and the
   // carrier after the substitution is cut off the parse -- these two rows flip
-  // from deny to allow while the rest of the 3442-check suite stays green, so
+  // from deny to allow while the rest of the 3445-check suite stays green, so
   // nothing else pins the step. Both really execute under bash 5.3 (marker-file
   // checked): the first via a bare `;`, the second via a pipe into `bash -c`.
   // readBraced() 自己追蹤引號，`${…}` 內文裡的 `"` 才不會被讀成內文本身提早找到收尾的
   // `}`。少了這道追蹤，內文裡的 `"}"` 會被讀錯，readBraced 回傳錯的 `}`，替換後面的
-  // carrier 就被切出解析範圍——這兩列在拿掉之後從拒絕變放行，而整套 3442 項測試仍是綠
+  // carrier 就被切出解析範圍——這兩列在拿掉之後從拒絕變放行，而整套 3445 項測試仍是綠
   // 的，代表沒有別的測試釘住這一步。
   'echo "${x:-"}"}"; rm -rf /etc',
   'echo "${x:-"}"}" | bash -c "rm -rf /etc"',
@@ -3086,15 +3086,102 @@ let targetLimitChecks = 0;
     word.includes('#') ? word.replace('#', String(k)) : word
   )).join(' ');
 
-  // A budget is not a count: many CHEAP targets are still judged to the end and
-  // allowed. 20,000 of them cost about 340 ms here, and a count cap set anywhere
-  // near a safe time would have refused every one of these commands.
-  // 時間預算不是數量上限：很多「便宜」的目標照樣判到最後並放行。這裡 20,000 個約 340 ms，而
-  // 任何設在安全時間附近的數量上限都會把這種命令整條擋掉。
+  // The hook's own judging budget. It is not exported, so it is spelled here and
+  // pinned to the hook's own refusal text by the symlinkFlood row below: if
+  // hooks/protect-important-paths.js:3029 `const JUDGING_BUDGET_MS = 2000` moves,
+  // that row names the mismatch instead of this block silently sizing itself
+  // against a number the gate no longer uses.
+  // 這道閘門自己的判定預算。它沒有被 export，所以在這裡寫一份，並由下面 symlinkFlood 那一列
+  // 拿 hook 自己的拒絕訊息把它釘住：常數改了，那一列會指名不一致，而不是讓這一段拿一個閘門
+  // 已經不用的數字去算尺寸。
+  const JUDGING_BUDGET_MS = 2000;
+
+  // A budget is not a COUNT cap, and that property splits in two -- only one half
+  // survives a slow host, so it is two rows.
+  //
+  // (a) 20,000 cheap targets must never be refused FOR BEING 20,000 OF THEM. The
+  //     only refusal this command may ever draw is the out-of-time one, which
+  //     names the total and the budget. That is load-INDEPENDENT: a count cap, a
+  //     protected-directory claim and an unresolved-variable claim each fail this
+  //     row on any host at any speed, because each produces a different message.
+  // (b) ...and on a host that can afford it they really are judged to the end and
+  //     ALLOWED. That half cannot be load-independent, so its count is DERIVED
+  //     from a calibration measured in THIS process, sized to spend at most a
+  //     quarter of the budget.
+  //
+  // Why it is two rows and not one `verdict !== 'deny'`: the single row was
+  // exactly that, and it went red on the fork's ubuntu runner at 3f38bd3 --
+  // `20,000 ordinary targets are judged, not refused (2099.891944ms)` -- reporting
+  // the gate's CORRECT fail-closed refusal as a defect, on a commit whose diff
+  // cannot reach this path (it adds three branches inside the double-quote arm of
+  // the tokenizer; these operands carry no quote). Measured 2026-09-04, medians of
+  // 10 runs through evaluate() in a fresh process: 20,000 targets cost 235.75 ms at
+  // 0b97f8c and 226.32 ms at 3f38bd3, and the same test file swapped onto either
+  // hook measures 1,234 ms vs 1,208 ms IN THIS PROCESS -- no regression either way.
+  // What was wrong was the headroom: the in-file figure below used to say "about
+  // 340 ms", which is what this command costs in a fresh process that runs nothing
+  // else; inside the full suite it costs 1,265 ms of JUDGING (plus 26 ms of
+  // commandTargets, which is outside the budget -- the deadline is set after it,
+  // hooks/protect-important-paths.js:3207-3208). 1,265 against 2,000 is 1.6x, and
+  // the runner is about 1.6x this Mac. A row decided by that margin reports load,
+  // not correctness.
+  // 為什麼拆成兩列，而不是一句 `verdict !== 'deny'`：本來就是那一句，而它在 fork 的 ubuntu
+  // runner 上於 3f38bd3 翻紅——把閘門「正確的」fail-closed 拒絕當成缺陷回報，而那個 commit
+  // 的 diff 根本走不到這條路徑（它加的三個分支都在 tokenizer 的雙引號臂裡，這些操作元沒有
+  // 引號）。實測：新行程裡 20,000 個目標 0b97f8c 是 235.75 ms、3f38bd3 是 226.32 ms；同一份
+  // 測試檔換掛兩個 hook，在「整套測試的行程裡」是 1,234 ms 對 1,208 ms——兩邊都沒有回歸。
+  // 真正的問題是餘裕：原本註解寫的「約 340 ms」是「只跑這一條的新行程」的數字，在整套測試
+  // 的行程裡光判定就要 1,265 ms（另加 26 ms 的 commandTargets，那段不算在預算內，deadline
+  // 在它之後才設）。1,265 對 2,000 是 1.6 倍，而 runner 大約就是這台 Mac 的 1.6 倍。
+  // Two regexes, because row (a) and the symlinkFlood row below ask different
+  // questions. (a) asks WHICH refusal this is, and must not care what the budget
+  // is set to -- tying its tolerance to the number would turn a deliberate budget
+  // change into a false "the gate refused 20,000 cheap targets" report. The
+  // symlinkFlood row asks whether the number the gate NAMES is the one this block
+  // sized itself against, which is the pin that keeps the constant above honest.
+  // `unjudgeableDenial` (hooks/protect-important-paths.js:3037-3053) is the only
+  // producer of this wording, so the shape identifies the refusal on its own.
+  // 兩個 regex，因為 (a) 與下面 symlinkFlood 問的是不同的問題。(a) 問「這是哪一種拒絕」，
+  // 不該在意預算被設成多少——把它的容忍綁在數字上，會讓一次刻意的預算調整變成一則
+  // 「閘門擋掉了 20,000 個便宜目標」的假回報。symlinkFlood 那一列問的才是「閘門說出來的
+  // 數字，是不是這一段拿去算尺寸的那一個」，那才是釘住上面那個常數的東西。
+  const OUT_OF_TIME_SHAPE = /judged \d+ of them within \d+ms/;
+  const OUT_OF_TIME_BUDGET = new RegExp(`judged \\d+ of them within ${JUDGING_BUDGET_MS}ms`);
   const manyCheap = time(`rm -f ${operands(20000, '/workspace/project/pad-#')}`);
+  assert.ok(
+    manyCheap.verdict !== 'deny' || OUT_OF_TIME_SHAPE.test(manyCheap.reason),
+    `20,000 ordinary targets may draw no refusal but the out-of-time one -- not a `
+    + `count cap, not a protected path, not an unresolved variable `
+    + `(${manyCheap.ms}ms, verdict ${manyCheap.verdict}): `
+    + `${manyCheap.reason.slice(0, 200)}`,
+  );
+  targetLimitChecks += 1;
+
+  // The half that has to be earned: cheap targets are judged TO THE END and
+  // allowed. The count comes from a calibration in this same process, so a host
+  // four times slower than the one that ran the calibration still gets a green
+  // row -- the count shrinks with the host instead of the assertion turning into
+  // a coin flip. The floor keeps the row meaningful rather than vacuous on a
+  // pathological host: at 500 targets the projected cost only reaches the budget
+  // if a single cheap target costs 4 ms, which is 40x the fork's ubuntu runner
+  // (2,099 ms / 20,000 = 0.105 ms) and 380x this Mac inside this suite.
+  // 必須「賺到」的那一半：便宜的目標是判到最後並且放行。數量由同一個行程裡的校準算出來，
+  // 所以比校準機器慢四倍的主機照樣是綠的——縮的是數量，不是把斷言變成擲硬幣。下限是為了
+  // 讓這一列在極慢的主機上仍然有意義而不是空過。
+  const CALIBRATION_COUNT = 2000;
+  const calibration = time(`rm -f ${operands(CALIBRATION_COUNT, '/workspace/project/pad-#')}`);
+  const perTargetMs = Math.max(calibration.ms, 0.001) / CALIBRATION_COUNT;
+  const judgedToEndCount = Math.max(500, Math.min(
+    20000,
+    Math.floor((JUDGING_BUDGET_MS / 4) / perTargetMs),
+  ));
+  const judgedToEnd = time(`rm -f ${operands(judgedToEndCount, '/workspace/project/pad-#')}`);
   assert.notEqual(
-    manyCheap.verdict, 'deny',
-    `20,000 ordinary targets are judged, not refused (${manyCheap.ms}ms)`,
+    judgedToEnd.verdict, 'deny',
+    `${judgedToEndCount} ordinary targets -- sized from a ${calibration.ms.toFixed(0)}ms `
+    + `calibration of ${CALIBRATION_COUNT} to spend at most a quarter of the `
+    + `${JUDGING_BUDGET_MS}ms budget -- are judged to the end and allowed, but this `
+    + `took ${judgedToEnd.ms}ms and answered: ${judgedToEnd.reason.slice(0, 200)}`,
   );
   targetLimitChecks += 1;
 
@@ -3111,6 +3198,20 @@ let targetLimitChecks = 0;
   // 回答」。
   const symlinkFlood = time(`rm -rf ${operands(120000, `${box}/link`)} /etc`);
   assert.equal(symlinkFlood.verdict, 'deny', '120,000 symlink targets followed by /etc is refused');
+  // This ceiling is deliberately left ABSOLUTE where the two rows above were made
+  // load-independent, and here is the measurement that says it may be: the answer
+  // is the hook's FIXED budget, plus what the host needs to BUILD the targets,
+  // plus at most one target's overrun -- and only the last two scale with the
+  // host. Measured 2026-09-04 in this suite: 2,538 ms total, of which
+  // commandTargets is 489 ms. So 538 ms is host-dependent against 962 ms of
+  // slack -- 2.8x, where manyCheap had 1.6x and went red on the runner. The raw
+  // 2,538/3,500 ratio LOOKS tighter than that row and is not, because 2,000 of
+  // those milliseconds do not move when the host gets slower. Do not re-derive
+  // this every round; measure the split before changing the number.
+  // 這個上限刻意維持絕對值（上面兩列則改成不看牆鐘），依據是實測的拆解：回答時間 = 閘門
+  // 「固定的」預算 + 主機建目標的成本 + 至多一個目標的超出，而只有後兩項會隨主機變慢。
+  // 2026-09-04 在本套測試裡實測：總共 2,538 ms，其中 commandTargets 佔 489 ms——會隨主機
+  // 變動的只有 538 ms，餘裕 962 ms，2.8 倍；manyCheap 只有 1.6 倍，而它在 runner 上翻紅了。
   assert.ok(
     symlinkFlood.ms < 3500,
     `120,000 symlink targets answered in ${symlinkFlood.ms}ms, and the live hook timeout is 5,000ms`,
@@ -3126,8 +3227,10 @@ let targetLimitChecks = 0;
     `the refusal names the total target count: ${symlinkFlood.reason.slice(0, 160)}`,
   );
   assert.ok(
-    /judged \d+ of them within 2000ms/.test(symlinkFlood.reason),
-    'the refusal says how many targets it judged and inside what budget',
+    OUT_OF_TIME_BUDGET.test(symlinkFlood.reason),
+    `the refusal says how many targets it judged and inside what budget, and the `
+    + `budget it names is the ${JUDGING_BUDGET_MS}ms the rows above sized themselves `
+    + `against: ${symlinkFlood.reason.slice(0, 200)}`,
   );
   assert.ok(
     !/Refused to remove protected directory/.test(symlinkFlood.reason),
