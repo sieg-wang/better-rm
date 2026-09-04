@@ -535,7 +535,7 @@ are still judged (`env -C /tmp rm -rf /etc` is refused) and name-matched entries
 too (`env -C / rm -rf .git` is refused, because `.git` is matched as a path component and not
 as a resolved absolute path). Only "relative operand plus a changed working directory" is.
 
-## R5-f — 加了引號、長得像分隔符的操作元會截斷 rm 的操作元掃描（**OPEN，僅記錄**）
+## R5-f — 加了引號、長得像分隔符的操作元會截斷 rm 的操作元掃描 — 2026-09-05 **CLOSED**，留作紀錄
 
 `rm -rf ';' /etc` 掃不出任何目標，因此被放行；`rm ';' -rf /etc` 同樣。`;`、`\;`、`';'` 斷詞
 後是同一個單字元字，而 rm 的操作元掃描（`hooks/protect-important-paths.js` 兩處
@@ -551,8 +551,8 @@ as a resolved absolute path). Only "relative operand plus a changed working dire
 語料都沒有任何一列改變（因為操作元掃描下一步就會在同一個字上截斷），等於分岔了慣例卻沒關掉
 任何東西。要修就要把 `separators` 與 `operatorTokens` 的分工在整道閘門一次講清楚。
 
-**R5-f — a quoted separator-shaped operand truncates the rm operand scan (OPEN, recorded
-only).** `rm -rf ';' /etc` yields no targets and is allowed; so does `rm ';' -rf /etc`. `;`,
+**R5-f — a quoted separator-shaped operand truncates the rm operand scan — CLOSED
+2026-09-05, kept as a record.** `rm -rf ';' /etc` yields no targets and is allowed; so does `rm ';' -rf /etc`. `;`,
 `\;` and `';'` tokenize to the same one-character word, and both rm operand scans (the two
 `for (; i < words.length && !separators.has(words[i]); i += 1)` loops) and the wrapper walks
 ask `separators` alone, without consulting whether the word was WRITTEN as an unquoted
@@ -565,3 +565,79 @@ site: measured, that change moves no row of the 47-row env probe and no row of t
 corpus, because the operand scan truncates on the same word a moment later -- it would fork
 the convention without closing anything. Fixing it means settling the division of labour
 between `separators` and `operatorTokens` across the whole gate at once.
+
+**2026-09-05 已修（r5-fix-better-rm-6）**：分工寫成一個地方——`operatorAt(index, set)`，就在
+`operatorTokens` 取進作用域的下一行——並由 12 個「把一個字判成運算子」的站點共同讀它：rm／
+rmdir／無法解析命令字的操作元掃描與它的 redirector 臂、find 的搜尋根掃描、三處「跳到命令結
+尾」的臂、carrier 走訪、包裝走訪、以及 `envArgvAfter`。實測 931 列語料在修前修後判定與拒絕
+文字逐位元組相同。
+
+**Closed 2026-09-05 (r5-fix-better-rm-6)**: the division of labour is written down in one
+place — `operatorAt(index, set)`, on the line after `operatorTokens` comes into scope — and
+read by the 12 sites that classify a word as an operator. Measured: 931 corpus rows keep
+byte-identical verdicts and refusal text.
+
+## R5-10b — env(1) 的 `-S` 字串曾用 shell 的規則切開 — 2026-09-05 **CLOSED**，留作紀錄
+
+`env -S 'rm\_-rf' /etc` 與 `env -S 'rm # x' -rf /etc` 都真的會跑 `rm -rf /etc`（2026-09-05 用
+marker 目錄在 macOS BSD env 與 GNU coreutils 9.11 env 上實測，兩邊一致），而重組把原始 `-S`
+字串原封不動接回一條命令列、交給 **shell** 的斷詞器重切，於是 `rm\_-rf` 變回單一個字
+`rm_-rf`（不是命令），`rm # x` 則在 `#` 上把重組截斷、丟掉它本來要接上去的那些操作元。
+
+現在改成先用 env 自己的規則切（`\_` 會切開、字首 `#` 是註解、引號成組、`\c` 提早結束、
+`\f\n\r\t\v` 與 `\\ \# \$ \' \"` 是字面），再把每個字用既有的 `envArgvWordLiteral` 重新加引號，
+與 `-S` 後面那些字走同一條路。五種 `-S` 拼法共用同一個 helper，所以一處改動全部覆蓋。
+
+**Closed 2026-09-05 (r5-fix-better-rm-6).** The `-S` string is now split by env(1)'s own
+rules and each word re-quoted with the existing `envArgvWordLiteral`, i.e. treated exactly
+the way the words after `-S` already are. All five `-S` spellings share the one helper.
+
+## R5-g — 這一輪刻意留下的三件事（**OPEN，僅記錄**）
+
+**(1) find `-exec` 子句的終止符沒有接上 `operatorAt`。** 只有 `;` 與 `+` 會終止 `-exec` 子句
+（POSIX），所以跳脫或加引號的 `|`、`&`、`(` 真的會結束 find 對子句的讀取——實測 BSD find 回
+`-exec: no terminating ";" or "+"`、exit 1、什麼都沒刪。把這一處接上會把 `test-hooks.js` 裡
+`find /etc -exec cat {} '|' -delete` 那三列變成誤擋。r5-better-rm-f 的修復計畫要求「為了一致
+性」連這裡一起改，這裡刻意不照做，理由如上。連帶：
+`find . -name x -exec rm -rf ';' /etc \;` 仍然 ALLOW，而實測它什麼都不刪（find 把那個加引號
+的 `;` 當成自己的 `-exec` 終止符）。
+
+**(2) `controlWords` 那四個站點沒有接上 `operatorAt`。** `rm -rf '{' /etc`、`rm -rf '}' /etc`
+本來就是 DENY，接上它是另一個問題、要另一組對照，不在這一輪。
+
+**(3) 巢狀掃描的去重只認得「重複」的文字。** 記住的是「同一段文字在同一個 depth 掃過了」，所
+以 `env -S` 那種每層文字都相同的巢狀從 87,381 次掃描收斂成 17 次；但一段每層子文字都不同的巢
+狀仍然是每層 4 倍，上限是 depth 8（4^8）。實測目前沒有這種形狀：八層的良性列現在是 2 個目
+標、0.3 ms，而十萬字元、八層、包著 `rm -rf /etc` 的攻擊者版本在修前 120 秒內沒有任何答案、修
+後約 55 ms（suite 內；獨立行程約 90 ms）拒絕。真要封死就要「總掃描次數上限 + fail closed」，那是另一個決定。
+
+**R5-g — three things this round deliberately left (OPEN, recorded only).**
+**(1)** The find `-exec` clause terminator is NOT gated on `operatorAt`: only `;` and `+`
+terminate an `-exec` clause (POSIX), so an escaped or quoted `|`, `&` or `(` really does end
+find's read — measured, BSD find answers `-exec: no terminating ";" or "+"`, exits 1 and
+removes nothing, and gating it turned the three `find /etc -exec cat {} '|' -delete` rows
+into refusals of a command that deletes nothing. The r5-better-rm-f fix plan asked for this
+site "for consistency"; it is deliberately not followed. Consequence:
+`find . -name x -exec rm -rf ';' /etc \;` stays ALLOW, and measured it removes nothing.
+**(2)** The four `controlWords` sites are not gated: `rm -rf '{' /etc` and `rm -rf '}' /etc`
+are already DENY, and gating them is a separate question with its own controls.
+**(3)** The nested-scan dedup recognises REPEATED text only. A nesting whose sub-texts are
+all distinct is still 4x per level, bounded by the depth-8 cap (4^8). No such shape is known
+today: the eight-level benign row is 2 targets and 0.3 ms, and a 100 KB eight-level attacker
+version around `rm -rf /etc` went from no answer within 120 s to a refusal in about 55 ms in-suite (≈90 ms as a fresh process). Closing
+that would need a total-nested-scan cap that fails closed — a separate decision.
+
+## R5-h — `env -S` 的失敗即關閉會誤擋三種寫法（**OPEN，僅記錄，代價已知**）
+
+為了不猜，`-S` 字串出現下列任一情形就拒絕，即使它其實無害：含 `$`（會展開，值要到執行時才知
+道）、含沒有建模的反斜線跳脫（含**單引號裡的任何反斜線**——實測兩種實作在單引號裡會處理
+`\\` 卻不處理 `\_`，同一組引號裡兩種答案，不是這道閘門扛得住的規則）、雙引號裡的 `\c`（沒有
+實測過）、以及引號沒有收掉。已知代價：`env -S 'rm\ -rf' /etc` 從 ALLOW 變成 DENY（實測它兩種
+實作都跑不起來，所以只是誤擋，不是漏擋）。
+
+**R5-h — the `env -S` fail-closed over-refuses three spellings (OPEN, recorded, cost known).**
+An `-S` string containing a `$`, a backslash escape this gate does not model (including ANY
+backslash inside single quotes — measured, both implementations process `\\` there but not
+`\_`), a `\c` inside double quotes, or an unclosed quote is refused even when it is harmless.
+Known cost: `env -S 'rm\ -rf' /etc` moved from ALLOW to DENY; measured, that spelling runs on
+neither implementation, so this is an over-refusal, not a missed one.

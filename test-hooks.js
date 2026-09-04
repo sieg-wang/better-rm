@@ -1831,6 +1831,197 @@ for (const wrapPastCap of recursionCapWrappers) {
   allowed.push(insideCapBenign);
 }
 
+// A QUOTED operator is an operand, not an operator (r5-fix-better-rm-6, R5-f).
+//
+// `;` `\;` and `';'` all tokenize to the same one-character word, and every scan
+// that decides where a simple command ends asked only what the word SPELLS. So
+// one quoted character in front of the target defeated the whole gate: measured
+// 2026-09-05 on the live hook through the real stdin contract, `rm -rf ';' /etc`
+// was ALLOWED, and executed with a real /bin/rm against a sandboxed protected
+// directory it removed the target (rc 0 -- `;` does not exist, and `-f`
+// swallows that error). Nine one-character spellings reached it, through two
+// different arms: `;` `&` `|` `(` `)` are members of `terminators`, so the
+// operand scan simply stopped and collected nothing; `>` `<` `<<` are members of
+// `redirectors`, whose arm skips the operator AND the word after it -- which is
+// the target. It needed no env(1), no carrier, no variable and no wrapper, and
+// it survived `sudo` and `--`.
+// The tokenizer has always recorded the difference: `operatorTokens[i]` is true
+// only for a word written as a BARE shell operator. These rows are what says the
+// gate now reads it. The controls below carry the other half -- an operator that
+// really IS one must keep ending the command, and a quoted one must stay an
+// ordinary operand rather than becoming a refusal of its own.
+// 加了引號的運算子是「操作元」，不是運算子（r5-fix-better-rm-6，R5-f）。
+// `;`、`\;`、`';'` 斷詞後是同一個單字元字，而每一處判斷「簡單命令在哪結束」的掃描都只問這個
+// 字「長什麼樣」。於是目標前面加一個帶引號的字元就打穿了整道閘門：2026-09-05 用真正的 stdin
+// 契約對 live hook 實測，`rm -rf ';' /etc` 被放行；拿真的 /bin/rm 對著沙箱裡的受保護目錄執
+// 行，目標真的被刪掉（rc 0——`;` 不存在，而 `-f` 把那個錯誤吞掉了）。九種單字元拼法經由兩條
+// 不同的臂到達：`;` `&` `|` `(` `)` 屬於 `terminators`，操作元掃描直接停下、什麼都沒收；
+// `>` `<` `<<` 屬於 `redirectors`，那條臂會跳過運算子「以及它後面那個字」——被跳過的正是目
+// 標。它不需要 env(1)、不需要 carrier、不需要變數、不需要任何包裝，而且穿得過 `sudo` 與 `--`。
+// 斷詞器一直都記著這個差別：`operatorTokens[i]` 只有在該字是「裸的 shell 運算子」時才為真。
+// 這些列說的就是「閘門現在會讀它」。下面的對照組扛另一半：真的是運算子的那個必須照舊結束命
+// 令，而加了引號的那個必須留成普通操作元，而不是變成另一種拒絕。
+blocked.push(
+  "rm -rf ';' /etc",
+  "rm -rf '|' /etc",
+  "rm -rf '&' /etc",
+  "rm -rf '(' /etc",
+  "rm -rf ')' /etc",
+  "rm -rf '>' /etc",
+  "rm -rf '<' /etc",
+  "rm -rf '<<' /etc",
+  // The backslash must be REAL, for the reason the -exec rows above spell out:
+  // '\;' in a JS string collapses to ';', which is the bare operator and would
+  // pass with the bug live.
+  // 反斜線必須是真的：JS 字串裡的 '\;' 會塌成 ';'，那是裸運算子，缺陷還在時也會通過。
+  'rm -rf \\; /etc',
+  'rm -rf \\| /etc',
+  'rm -rf "|" /etc',
+  // The operator BEFORE the options, which truncated the scan before it saw any
+  // operand at all. On GNU rm (the ubuntu runner) this really removes the target
+  // because GNU permutes options; on BSD rm it does not, which is why the row is
+  // pinned by the hook's verdict and not by an execution.
+  // 運算子寫在選項「前面」，掃描在看到任何操作元之前就被截斷。在 GNU rm（ubuntu runner）上
+  // 這真的會刪掉目標（GNU 會重排選項），BSD rm 不會——所以這一列釘的是 hook 的判定。
+  "rm ';' -rf /etc",
+  "rm -rf -- ';' /etc",
+  "sudo rm -rf ';' /etc",
+  "rm -rf ';' '/etc'",
+  "rm -rf '&&' '||' ';' /etc",
+  "rm -rf ';' .git",
+  "rm -rf ';' ~/.ssh",
+  "rm -rf ';' /workspace/secrets",
+  // Through the env -S reconstruction: the words after `-S` are collected by the
+  // same end-of-command rule, so this one only closes once that walk reads
+  // `operatorTokens` too.
+  // 經由 env -S 重組：`-S` 後面的字用的是同一條「命令到此結束」的規則，所以這一列要等那段
+  // 走訪也讀 operatorTokens 才會關上。
+  "env -S 'rm' ';' -rf /etc",
+);
+// The controls. Half of them were ALREADY refused before this change and are
+// here so a failure names which half moved: `&&` `||` `;;` `2>` `>>` `{` `}`
+// `2>&1` are in NEITHER set, so they were always collected as ordinary operands
+// and the target behind them was always seen -- that asymmetry is the proof that
+// set membership, not quoting, was what decided.
+// 對照組。其中一半在這次修改之前就已經被拒絕，放在這裡是為了讓失敗能指出「動的是哪一半」：
+// `&&` `||` `;;` `2>` `>>` `{` `}` `2>&1` 兩個集合都不屬於，所以它們一直都被當成普通操作元、
+// 後面的目標一直都看得見——這個不對稱正是「決定權在集合成員資格、不在引號」的證明。
+blocked.push(
+  "rm -rf /etc ';'",
+  "rm -rf '&&' /etc",
+  "rm -rf ';;' /etc",
+  "rm -rf '2>' /etc",
+  "rm -rf '>>' /etc",
+  "rm -rf '{' /etc",
+  "rm -rf '}' /etc",
+  "rm -rf '2>&1' /etc",
+  'rm -rf build; rm -rf /etc',
+  'ls > out; rm -rf /etc',
+);
+// A quoted operator must become an ORDINARY OPERAND, which means an unprotected
+// one is still allowed: without these rows the change above would also pass if
+// it had simply started refusing every command containing a quoted `;`.
+// The `\;` that closes a find -exec clause is the one every shell user writes,
+// and it must stay an operand of find rather than a refusal.
+// 加了引號的運算子必須變成「普通操作元」，所以不受保護的那個仍要放行：少了這些列，上面那個
+// 改動就算變成「凡是含加引號 `;` 的命令一律拒絕」也會通過。收掉 find -exec 子句的 `\;` 是
+// 每個 shell 使用者都會寫的東西，必須留在 find 的操作元裡，不能變成拒絕。
+allowed.push(
+  "echo ';'",
+  'find . -name x -exec rm {} \\;',
+  "rm -rf ./build ';'",
+  "rm -rf ';' ./build",
+  'rm -rf build > /dev/null',
+  // The same rule read in the OTHER direction, and the only rows in this change
+  // that move a verdict from deny to allow. A quoted `;` between a wrapper and
+  // `rm` is the wrapper's COMMAND WORD, and no shell will run it -- so these
+  // commands delete nothing, and refusing them was an over-refusal that the old
+  // reading produced by splitting the line at a `;` the shell never split at.
+  // Measured 2026-09-05 with a real /bin/bash against a throwaway directory
+  // holding a marker file: every row here left the directory in place
+  // (`nice`/`env` exit 127 `command not found`, `echo` exits 0 having printed),
+  // while the positive controls `true ; rm -rf <dir>` and `rm -rf <dir>` -- the
+  // same shapes with a BARE separator -- removed it. `sudo ';' rm -rf /etc`,
+  // `command ';' rm ...` and `xargs ';' rm ...` are the same mechanism and moved
+  // the same way; they are not pinned here because this suite must not run sudo.
+  // 同一條規則反過來讀，也是這次改動裡唯一「從拒絕變成放行」的幾列。包裝命令與 `rm` 之間那
+  // 個加了引號的 `;` 是「包裝命令要執行的命令字」，沒有任何 shell 會執行它——所以這些命令什
+  // 麼都不會刪，拒絕它們是誤擋，來自舊讀法在一個 shell 根本沒有斷開的 `;` 上把命令列切開。
+  // 2026-09-05 用真的 /bin/bash 對著放了 marker 檔的拋棄式目錄實測：這裡每一列目錄都還在
+  // （`nice`/`env` 以 127 command not found 結束、`echo` 印完以 0 結束），而正對照
+  // `true ; rm -rf <dir>` 與 `rm -rf <dir>`（同樣形狀但分隔符是裸的）把目錄刪掉了。
+  // `sudo ';' rm -rf /etc`、`command ';' rm …`、`xargs ';' rm …` 機制相同、動向相同，不釘在
+  // 這裡是因為這套測試不該跑 sudo。
+  "nice ';' rm -rf /etc",
+  "env ';' rm -rf /etc",
+  "echo x ';' rm -rf /etc",
+);
+
+// env(1)'s -S string has its OWN grammar, and the shell's is not it
+// (r5-fix-better-rm-6, R5-10b). The reconstruction added at b4a2f71 spliced the
+// raw -S string back into a line and let the SHELL lexer re-split it. env does
+// not split like a shell:
+//   `\_`  is a space that SPLITS the string into two words
+//   `#` at the start of a word begins a comment that runs to the end of the
+//        string, while the argv AFTER -S still follows
+//   `${VAR}` is EXPANDED
+// while the shell lexer reads `rm\_-rf` as the single word `rm_-rf` (not a
+// command at all) and truncates the reconstruction at the `#`, dropping the very
+// operands the reconstruction exists to append.
+// Measured 2026-09-05 with marker directories on BOTH implementations this
+// repository runs on -- macOS BSD env and the ubuntu runner's GNU coreutils
+// 9.11 env -- and the two agree on every rule: `mkdir\_-p <dir>` and
+// `mkdir # x -p <dir>` both create the directory; `mkdir#x`, `mkdir\ -p` and
+// `mkdir\t-p` create nothing; `${VAR} -p <dir>` creates it (so a `$` really is
+// expanded); `\c` ends the string early; quotes group.
+// env(1) 的 -S 字串有自己的文法，而那不是 shell 的文法（r5-fix-better-rm-6，R5-10b）。
+// b4a2f71 加的重組把原始 -S 字串原封不動接回一條命令列，讓 shell 的斷詞器重新切它。env 不是
+// 那樣切的：`\_` 是「會切開」的空白；`#` 在字首開始註解、一路吃到字串結尾，而 -S 後面的
+// argv 照樣接著；`${VAR}` 會被展開。shell 斷詞器則把 `rm\_-rf` 讀成單一個字 `rm_-rf`（根本
+// 不是命令），而且在 `#` 上把重組截斷，丟掉的正是重組本來要接上去的那些操作元。
+// 2026-09-05 用 marker 目錄在本 repo 會跑到的兩種實作上實測（macOS BSD env 與 ubuntu runner
+// 的 GNU coreutils 9.11 env），每一條規則兩邊都一致。
+blocked.push(
+  "env -S 'rm\\_-rf' /etc",
+  "env -S 'rm\\_-rf\\_/etc'",
+  "env -S '\\_rm' -rf /etc",
+  "env -S 'FOO=1\\_rm' -rf /etc",
+  "env -S 'rm\\_-rf' /workspace/secrets",
+  "env -S'rm\\_-rf' /etc",
+  "env -S 'rm\\_-rf' ~/.ssh",
+  "env -S 'env\\_-S\\_rm' -rf /etc",
+  "env -S 'bash\\_-c' 'rm -rf /etc'",
+  "env -S 'rm # x' -rf /etc",
+  "env -S 'rm # x' -rf /workspace/secrets",
+  "env -S 'FOO=1 rm # x' -rf /etc",
+  "env --split-string='rm # x' -rf /etc",
+  "sudo env -S 'rm # x' -rf /etc",
+  // Fail closed: a `$` is expanded by env, an escape this gate does not model
+  // could mean anything, and an unbalanced quote is not a string env would
+  // accept. None of these can be split with confidence, so none of them is
+  // answered with an allow.
+  // 失敗即關閉：`$` 會被 env 展開、沒有建模的跳脫可能是任何東西、引號沒收掉的字串 env 自己
+  // 也不會接受。這些都沒辦法有把握地切開，所以一律不放行。
+  "env -S '${X:-rm}' -rf /etc",
+  "env -S '${X}' -rf /etc",
+  "env -S 'rm\\ -rf' /etc",
+  "env -S \"rm -rf '/etc\" x",
+);
+// The other half: -S strings that are ORDINARY. Without these the change above
+// would also pass if it had simply started refusing every `env -S`.
+// `printf %s\_x` is decided by the rule and pinned here: `\_` splits, so the
+// words are `printf`, `%s`, `x` -- a printf, not a removal.
+// 另一半：普通的 -S 字串。少了這些列，上面的改動就算變成「凡是 env -S 一律拒絕」也會通過。
+// `printf %s\_x` 由規則決定並釘在這裡：`\_` 會切開，所以三個字是 `printf`、`%s`、`x`，
+// 那是一個 printf，不是刪除。
+allowed.push(
+  "env -S 'FOO=1 ls' -la",
+  "env -S 'echo hello world'",
+  "env -S 'printf %s\\_x'",
+  "env -S 'ls\\_-la'",
+  "env -S 'ls # nothing here' -la",
+);
+
 for (const command of blocked) {
   const result = evaluate(claude(command), env);
   assert.equal(result?.hookSpecificOutput?.permissionDecision, 'deny', command);
@@ -4166,6 +4357,127 @@ let targetLimitChecks = 0;
   fs.rmSync(box, { recursive: true, force: true });
 }
 
+// What a NESTED scan costs, pinned as a COUNT and not as a clock (r5-fix-better-rm-6).
+//
+// The env -S walk reads the SAME inner text three times -- the string itself,
+// the string with leading assignments stripped, and the string re-prefixed as
+// env's own argv -- and the operand scan reads it a fourth time. Nested, that is
+// 4^depth scans of byte-identical texts, and every one of them pushed its copy
+// of the targets up into the top-level list. Measured 2026-09-05 at b4a2f71 with
+// node 22.17.0: the eight-level `insideCapBenign` row built 30 lines above cost
+// 87,381 scans and produced 65,536 copies of ONE target for five of the seven
+// wrappers, which took 1,024 ms to judge on arm64 and 1,461 ms on x86_64
+// (Rosetta) in a fresh process. Inside THIS suite the x86_64 run crossed the
+// hook's 2,000 ms judging budget -- the gate answered `judged 64800 of 65536` --
+// so `rm -rf build` was allowed on this Mac (arm64) and REFUSED on the
+// ubuntu-24.04 runner (x86_64). CI red at b4a2f71, this file's line 1869.
+//
+// This row is a COUNT on purpose, and it is what makes the `allowed` row above
+// load-INDEPENDENT: a wall-clock assertion here would go red or green according
+// to how fast the host is, which is exactly the failure it is here to prevent.
+// The number of targets a walk collects is a property of the walk; it is the
+// same on every host, and it is the thing that was wrong.
+// The ceiling is 16 against a measured 2 so an honest extra branch does not turn
+// this row red, and it is still far under the blowup it exists to catch: 4^depth
+// passes 16 at three levels of nesting, five levels before the cap.
+// 巢狀掃描的「成本」，用數量而不是時鐘釘住（r5-fix-better-rm-6）。
+// env -S 的走訪會把同一段內層文字讀三次（字串本身、去掉開頭指派後的字串、重新前綴成 env 自
+// 己 argv 的字串），操作元掃描再讀第四次。層層相疊就是 4^depth 次「位元組完全相同」的掃描，
+// 而每一次都把自己那份目標副本往上推進最上層清單。2026-09-05 在 b4a2f71 用 node 22.17.0 實
+// 測：上面 30 行建出來的八層 `insideCapBenign`，七個包裝中有五個產生 87,381 次掃描與
+// 65,536 份「同一個」目標；單跑一條的新行程裡，判定在 arm64 要 1,024 ms、在 x86_64
+// （Rosetta）要 1,461 ms。放進「這一整套測試」的行程，x86_64 那一輪越過了 hook 的 2,000 ms
+// 判定預算——閘門回答 `judged 64800 of 65536`——於是 `rm -rf build` 在這台 Mac（arm64）被放
+// 行、在 ubuntu-24.04（x86_64）runner 上被拒絕。b4a2f71 的 CI 紅在本檔 1869 行。
+// 這一列刻意用「數量」，而這正是讓上面那一列不再看主機快慢的東西：在這裡寫牆鐘斷言，紅綠就
+// 由主機速度決定，而那正是它要防的失效本身。走訪收了幾個目標是走訪自己的性質，每台機器都一
+// 樣，也正是當初壞掉的東西。上限取 16（實測值是 2），讓一個誠實的新分支不會把這列弄紅，同時
+// 離它要抓的爆炸還很遠：4^depth 三層就超過 16，離上限還有五層。
+let nestedScanCostChecks = 0;
+{
+  const NESTED_TARGET_CEILING = 16;
+  for (const [index, wrapPastCap] of recursionCapWrappers.entries()) {
+    let insideCapBenign = 'rm -rf build';
+    for (let depthLevel = 0; depthLevel < 8; depthLevel += 1) {
+      insideCapBenign = wrapPastCap(insideCapBenign);
+    }
+    const collected = commandTargets(insideCapBenign, 0, false, null);
+    assert.ok(
+      collected.length <= NESTED_TARGET_CEILING,
+      `wrapper ${index} nested 8 deep around one \`rm -rf build\` collected `
+      + `${collected.length} targets, ceiling ${NESTED_TARGET_CEILING}: repeated scans of `
+      + `identical text are being counted again instead of recognised`,
+    );
+    nestedScanCostChecks += 1;
+  }
+
+  // The other half, and the one the cap exists for: the ATTACKER's version of
+  // the same nesting. A hundred kilobytes of it must still draw an answer, and
+  // the answer must be the refusal -- a PreToolUse hook that outruns its 5,000 ms
+  // timeout makes no decision and does not block the command, so "slow" here is
+  // "absent". Measured at b4a2f71 this row produced no answer at all within
+  // 120 seconds (killed); with repeated scans recognised it answers in about 55 ms in-suite (≈90 ms as a fresh process) on
+  // arm64. The ceiling is an absolute 3,000 ms rather than a derived one for the
+  // same reason the symlinkFlood row above keeps an absolute ceiling: what is
+  // being asserted is that the gate ANSWERS, and the margin against the live
+  // timeout is two orders of magnitude, not a factor of two.
+  // The spelling is the one CI went red on; the count row above covers all seven.
+  // 另一半，也是上限存在的理由：同一種巢狀的「攻擊者版本」。十萬字元的它必須還是問得出答案，
+  // 而答案必須是拒絕——PreToolUse hook 跑贏自己的 5,000 ms 逾時就不會做出任何裁決、也不會擋
+  // 下命令，所以這裡的「慢」等於「不存在」。b4a2f71 實測：這一列 120 秒內完全沒有答案（被
+  // 砍掉）；認得出重複掃描之後，arm64 上 suite 內約 55 ms（獨立行程約 90 ms）回答。上限用絕對的 3,000 ms 而不是推算值，理
+  // 由與上面 symlinkFlood 保留絕對上限相同：這裡斷言的是「閘門到底有沒有回答」，而對 live 逾
+  // 時的餘裕是兩個數量級，不是兩倍。拼法取 CI 翻紅的那一種；七種都由上面那一列涵蓋。
+  let heavy = `rm -rf /etc ${'x'.repeat(100000)}`;
+  for (let depthLevel = 0; depthLevel < 8; depthLevel += 1) {
+    heavy = `env -S ${JSON.stringify(heavy)}`;
+  }
+  assert.ok(heavy.length > 100000, `the nested attacker row is ${heavy.length} bytes`);
+  const heavyStarted = process.hrtime.bigint();
+  const heavyResult = evaluate(claude(heavy), env)?.hookSpecificOutput;
+  const heavyMs = Number(process.hrtime.bigint() - heavyStarted) / 1e6;
+  assert.equal(
+    heavyResult?.permissionDecision, 'deny',
+    `a 100 KB command nested 8 deep around \`rm -rf /etc\` is refused (${heavyMs}ms)`,
+  );
+  assert.ok(
+    heavyMs < 3000,
+    `a 100 KB command nested 8 deep answered in ${heavyMs}ms, and the live hook `
+    + `timeout is 5,000ms -- a timed-out hook blocks nothing`,
+  );
+  nestedScanCostChecks += 3;
+}
+
+// The env -S refusals, by name (r5-fix-better-rm-6, R5-10b). The blocked rows
+// above only ask "is this one of the two removal refusals", which a gate that had
+// simply started refusing every `env -S` would also satisfy. These three say
+// WHICH answer each string gets: the one it cannot split names the rule it could
+// not model, the one it CAN split is refused for the path it found, and an
+// ordinary -S string is not refused at all.
+// env -S 的那些拒絕，逐項指名（r5-fix-better-rm-6，R5-10b）。上面那些 blocked 列只問「是不是
+// 那兩種刪除拒絕之一」，而一個「凡是 env -S 一律拒絕」的閘門也會通過。這三列說的是「每一種
+// 字串各自得到哪一個答案」：切不開的那個要指名沒能建模的規則、切得開的那個要以它找到的路徑
+// 為由被拒、而普通的 -S 字串根本不該被拒。
+let envSplitStringChecks = 0;
+{
+  const answer = (command) => evaluate(claude(command), env)?.hookSpecificOutput?.permissionDecisionReason || '';
+  assert.match(
+    answer("env -S '${X}' -rf /etc"),
+    /cannot determine how env -S splits its string, because it contains a \$ expansion/,
+    'an -S string carrying an expansion is refused as unsplittable, and says so',
+  );
+  assert.match(
+    answer("env -S 'rm\\_-rf' /etc"),
+    /Refused to remove protected directory: \/etc/,
+    'an -S string this gate CAN split is refused for the path it found, not as unsplittable',
+  );
+  assert.equal(
+    evaluate(claude("env -S 'FOO=1 ls' -la"), env), null,
+    'an ordinary -S string is not refused at all',
+  );
+  envSplitStringChecks += 3;
+}
+
 let deviceChecks = 0;
 {
   const box = fs.realpathSync(fs.mkdtempSync(`${os.tmpdir()}/better-rm-hook-device-`));
@@ -4440,7 +4752,7 @@ async function runOpenCodePluginChecks() {
 // 否則「沒跑到」會看起來是綠的。
 process.exitCode = 1;
 runOpenCodePluginChecks().then((pluginChecks) => {
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + findClauseTimingChecks + tokenizerBudgetChecks + variableResolutionChecks + targetLimitChecks + pipedScriptChecks + pluginChecks}`);
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + findClauseTimingChecks + tokenizerBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks}`);
   process.exitCode = 0;
 }).catch((error) => {
   console.error(error && error.stack ? error.stack : error);

@@ -1080,6 +1080,25 @@ const UNSCANNABLE_SCRIPT = '\u0000unscannable:';
 // PIPED_SCRIPT_EXCEPTIONS，是在描述一條他沒有寫的命令、並給他一個幫不上忙的旋鈕。
 const UNREADABLE_PIPE_TARGET = '\u0000pipe-target:';
 
+// An `env -S` string this gate could not split the way env(1) splits it, with the
+// same discipline as the sentinels above (r5-fix-better-rm-6, R5-10b). env's -S
+// grammar is small but it is NOT the shell's, and three of its rules decide
+// whether a removal is there at all: `\\_` is a space that SPLITS, `#` at the
+// start of a word comments out the rest of the string, and `${VAR}` is expanded
+// (all three measured on macOS BSD env and GNU coreutils 9.11 env, which agree).
+// The first two are modelled. Expansion cannot be: the value is not known before
+// the command runs, and `env -S '${X}' -rf /etc` is a removal exactly when X says
+// so. Same for an escape this gate does not model and for a quote that is never
+// closed -- in both cases the words are a guess, and a guess is not an answer.
+// 一段這道閘門沒辦法照 env(1) 的規則切開的 `-S` 字串，與上面幾個 sentinel 同一套規矩
+// （r5-fix-better-rm-6，R5-10b）。env 的 -S 文法很小，但它不是 shell 的文法，而其中三條
+// 規則直接決定「有沒有刪除」：`\\_` 是「會切開」的空白、`#` 在字首把字串剩下的部分變成註
+// 解、`${VAR}` 會被展開（三條都在 macOS BSD env 與 GNU coreutils 9.11 env 上實測，兩者一
+// 致）。前兩條有建模，展開不可能建模：值要到執行時才知道，而 `env -S '${X}' -rf /etc` 是
+// 不是刪除完全由 X 決定。沒有建模的跳脫、以及沒有收掉的引號也一樣——切出來的字都是猜的，
+// 而猜不是答案。
+const UNJUDGEABLE_ENV_S = '\u0000env-s:';
+
 // The install routes exempted from the rule above, as raw URL text prefixes.
 // Every entry is scheme + host + owner/repo and MUST end with '/': a bare host
 // would except every repository on that host, a scheme-less entry would match
@@ -1808,16 +1827,132 @@ function declaredLink(value, cwd, home, extraDirs) {
   return null;
 }
 
+// The scans this walk has already done for THIS top-level command, keyed by the
+// three things that decide a scan's answer: the text, the depth it is read at
+// (the depth cap is part of the answer) and whether the caller is handing it a
+// shell body. `expansionEnv` is not in the key -- it is threaded through every
+// recursive call unchanged, so it is the same object for the whole invocation;
+// the memo records the one it was built for and refuses to answer for any other,
+// so a future caller that threads a different environment gets a real scan
+// rather than a stale one.
+// WHY IT EXISTS, with the measurement: the env -S walk below re-reads the SAME
+// inner text three times (the string itself, the string with leading assignments
+// stripped, and the string re-prefixed as env's own argv), and the operand scan
+// reads it once more -- four scans of one text per level. Nested, that is 4^depth
+// scans of texts that are byte-identical, so `env -S "env -S \"... rm -rf build\""`
+// eight levels deep produced 87,381 scans and 65,536 copies of ONE target.
+// Measured 2026-09-05 with node 22.17.0 on this Mac: 65,536 targets cost 1,024 ms
+// of judging on arm64 and 1,461 ms on x86_64 (Rosetta) in a fresh process, and
+// inside the full suite the x86_64 run crossed the 2,000 ms JUDGING_BUDGET_MS --
+// `judged 64800 of 65536` -- so a BENIGN `rm -rf build` was refused as
+// unjudgeable on the ubuntu-24.04 runner (x86_64) and allowed on this Mac
+// (arm64). That is a fail-closed direction bug, but it is still the gate giving
+// two different answers to one command because of how fast the host is.
+// Deduplicating is not a heuristic: a repeated scan of the same text at the same
+// depth is the same pure computation, and judging the same target twice cannot
+// find anything the first judgement did not. 87,381 scans collapse to 17 and the
+// cost becomes linear in the nesting depth.
+// The arrays handed back are shared, so no caller may mutate one; every call
+// site spreads the result into its own `targets` and none does.
+// 這一次頂層命令裡「已經掃過」的結果，鍵是決定答案的三件事：文字、讀它時的 depth（深度上限
+// 也是答案的一部分）、以及呼叫端是否把它當成 shell 內文交過來。`expansionEnv` 不在鍵裡——它
+// 在每一次遞迴呼叫都原封不動傳下去，整趟就是同一個物件；memo 記下自己是為哪一個建的，換了
+// 別的就不作答，改走真正的掃描，未來有人改傳別的環境也不會拿到過期答案。
+// 為什麼要有它（附實測）：下面 env -S 的走訪會把「同一段內層文字」讀三次（字串本身、去掉開
+// 頭指派後的字串、重新前綴成 env 自己 argv 的字串），操作元掃描再讀一次——一層四次。層層相
+// 疊就是 4^depth 次「位元組完全相同」的掃描：八層的
+// `env -S "env -S \"... rm -rf build\""` 產生 87,381 次掃描與 65,536 份「同一個」目標。
+// 2026-09-05 用 node 22.17.0 在這台實測：65,536 個目標的判定在 arm64 是 1,024 ms、在 x86_64
+// （Rosetta）是 1,461 ms（單跑一條的新行程）；放進整套測試裡，x86_64 那一輪越過了 2,000 ms
+// 的 JUDGING_BUDGET_MS——`judged 64800 of 65536`——於是一條無害的 `rm -rf build` 在
+// ubuntu-24.04（x86_64）runner 上被當成「判不完」拒絕，在這台 Mac（arm64）上卻放行。方向是
+// fail-closed 沒錯，但同一條命令因為主機快慢而得到兩種答案。
+// 去重不是啟發式：同一段文字在同一個 depth 再掃一次，是同一個純計算；同一個目標判第二次也
+// 不可能找到第一次沒找到的東西。87,381 次掃描收斂成 17 次，成本從指數變成隨層數線性。
+// 回傳的陣列是共用的，任何呼叫端都不得就地修改；所有呼叫端都是把結果展開進自己的 `targets`，
+// 沒有一個會改它。
+let nestedScanMemo = null;
+
+// What a repeated scan is allowed to contribute. Every one of the eleven nested
+// call sites does `targets.push(...nestedScan(...))`, and every scan returns its
+// own `targets`, so whatever the FIRST scan of a text found has already been
+// pushed all the way up into the top-level list. A second scan of the same text
+// at the same depth can therefore only append a copy of targets that are already
+// there: the SET is unchanged, and dropping the copies is what turns 65,536
+// entries into one. Frozen because it is shared by every repeat.
+// 重複掃描能貢獻的東西。十一個巢狀呼叫端全都是 `targets.push(...nestedScan(...))`，而每一次
+// 掃描回傳的都是它自己的 `targets`，所以「第一次」掃到的東西早就一路被推進最上層的清單了。
+// 同一段文字在同一個 depth 再掃一次，只能追加一份「已經在裡面」的副本：集合不變，把副本丟掉
+// 正是 65,536 收斂成 1 的原因。凍結，因為所有重複共用同一個。
+const NO_NEW_TARGETS = Object.freeze([]);
+
+function nestedScan(text, depth, bodiesAreCode, expansionEnv) {
+  if (nestedScanMemo === null || nestedScanMemo.expansionEnv !== expansionEnv) {
+    return commandTargetsScan(text, depth, bodiesAreCode, expansionEnv);
+  }
+  const key = `${depth}\u0000${bodiesAreCode ? 1 : 0}\u0000${text}`;
+  if (nestedScanMemo.scanned.has(key)) return NO_NEW_TARGETS;
+  // Recorded BEFORE the scan runs, so a text that somehow reached itself could
+  // not spin -- depth strictly increases on every nested call, so it cannot, and
+  // this costs nothing to guarantee anyway.
+  // 在掃描開始「之前」就記錄，萬一有文字繞回自己也不會空轉——每次巢狀呼叫 depth 都嚴格遞增，
+  // 本來就繞不回來，但保證它不花任何成本。
+  nestedScanMemo.scanned.add(key);
+  return commandTargetsScan(text, depth, bodiesAreCode, expansionEnv);
+}
+
+// The entry point, and the only owner of the memo: it lives for exactly one
+// top-level scan and is dropped in a `finally`, so a throw cannot leave answers
+// behind for the next command. Re-entrant by construction -- an inner call that
+// reached this function instead of nestedScan() would find a memo already owned
+// and would not clear it.
+// 進入點，也是 memo 唯一的擁有者：只活在一次頂層掃描裡，並在 `finally` 清掉，即使中途丟出
+// 例外也不會把答案留給下一條命令。設計上可重入——萬一有內層呼叫走到這個函式而不是
+// nestedScan()，它會看到 memo 已經有主人，不會把它清掉。
 function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, expansionEnv = null) {
+  const owned = nestedScanMemo === null;
+  if (owned) nestedScanMemo = { expansionEnv, scanned: new Set() };
+  try {
+    return commandTargetsScan(command, depth, bodiesAreCodeFromCaller, expansionEnv);
+  } finally {
+    if (owned) nestedScanMemo = null;
+  }
+}
+
+function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false, expansionEnv = null) {
   const words = shellWords(command);
   const dynamicExpansions = words.dynamicExpansions || [];
-  // Which words were written as unquoted shell operators. Only the find branch
-  // consults it, and only for `;`: everywhere else a separator-shaped word is
-  // treated as a separator exactly as before, which keeps this change to the one
-  // question that needed answering.
-  // 哪些字是「未加引號的 shell 運算子」。只有 find 那一支會問，而且只問 `;`：其他地方對長得
-  // 像分隔符的字照舊當分隔符，這個改動就只回答需要回答的那一個問題。
+  // Which words were written as unquoted shell operators. `;`, `\;` and `';'`
+  // tokenize to the same one-character word and only the FIRST of them ends a
+  // command, so every scan that decides where a simple command stops has to ask
+  // this and not just what the word spells.
+  // 哪些字是「未加引號的 shell 運算子」。`;`、`\;`、`';'` 斷詞後是同一個單字元字，而只有第
+  // 一個會結束命令，所以每一處判斷「簡單命令在哪裡停住」的掃描都必須問這個，而不是只問這個
+  // 字長什麼樣。
   const operatorTokens = words.operatorTokens || [];
+  // The one place that pairing is written down (r5-fix-better-rm-6, R5-f). Before
+  // it, `rm -rf ';' /etc` was ALLOWED and really removed /etc: `;` `&` `|` `(`
+  // `)` are in `terminators`, so the operand scan stopped and collected nothing,
+  // and `>` `<` `<<` are in `redirectors`, whose arm skips the operator AND the
+  // word after it -- the target. `&&` `||` `;;` `2>` `>>` `{` `}` are in neither
+  // set, so the same quoting trick with them never hid anything: that asymmetry
+  // is what says set membership, not quoting, was doing the deciding.
+  // A quoted operator-shaped word is an ordinary OPERAND, and must go on being
+  // one -- so this reads as a question about the word's spelling AND its writing,
+  // never as "refuse anything that looks like an operator".
+  // Grep for `operatorAt(` to see every scan that asks; the sites that
+  // deliberately do NOT are the `controlWords` ones (`{`, `}`, `if`, ... are
+  // words, not operators, and a quoted one is already an ordinary operand there).
+  // 這一對關係只寫在這裡（r5-fix-better-rm-6，R5-f）。在它之前，`rm -rf ';' /etc` 是放行的，
+  // 而且真的會刪掉 /etc：`;` `&` `|` `(` `)` 屬於 `terminators`，操作元掃描直接停下、什麼都
+  // 沒收；`>` `<` `<<` 屬於 `redirectors`，那條臂會跳過運算子「以及它後面那個字」——也就是目
+  // 標。`&&` `||` `;;` `2>` `>>` `{` `}` 兩個集合都不屬於，同樣的加引號手法對它們從來藏不住
+  // 東西：這個不對稱正說明真正在做決定的是集合成員資格，不是引號。
+  // 加了引號、長得像運算子的字是「普通操作元」，而且必須繼續是——所以這裡問的是「字面 且 寫
+  // 法」，絕不是「凡是長得像運算子就拒絕」。
+  // 用 `operatorAt(` grep 就能看到每一處會問的掃描；刻意不問的是 `controlWords` 那幾處
+  // （`{`、`}`、`if` … 是「字」不是運算子，加了引號在那裡本來就已經是普通操作元）。
+  const operatorAt = (index, set) => operatorTokens[index] === true && set.has(words[index]);
   const targets = [];
   const separators = new Set([';', '&', '|', '(', ')', '<', '>', '\n']);
   // Redirections (`<`, `>`) stay within a simple command; they are not command
@@ -1930,8 +2065,9 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
     // 上停住、看不到 carrier、heredoc 內文被當成資料——2026-09-05 實測，內文的 touch marker
     // 真的被建立（`bash` 與 `bash -s` 都是），而 hook 放行了那一行。
     let afterEnv = false;
-    for (const word of words) {
-      if (separators.has(word)) { atCommandPosition = true; afterEnv = false; continue; }
+    for (let w = 0; w < words.length; w += 1) {
+      const word = words[w];
+      if (operatorAt(w, separators)) { atCommandPosition = true; afterEnv = false; continue; }
       if (!atCommandPosition) continue;
       const name = path.basename(word);
       if (carriers.has(name)) { carrierPresent = true; break; }
@@ -1999,20 +2135,120 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
   // 接起來會把 `"/etc/my dir"` 重新拆開，也會讓加了引號的 `';'` 把掃描截斷。這一掃是「加入」
   // 上面兩掃而不是取代它們，理由與它們是加法的理由相同。
   const envArgvWordLiteral = (word) => `'${String(word).replace(/'/g, "'\\''")}'`;
+  // env(1)'s own -S grammar, and only the part of it that both implementations
+  // agree on. Everything else returns `unjudgeable` and the caller fails closed.
+  // Measured 2026-09-05 with marker directories on macOS BSD env and on GNU
+  // coreutils 9.11 env (the ubuntu-24.04 runner's), identical on both:
+  //   `mkdir\_-p <dir>`        creates it  -> `\_` is a space that SPLITS
+  //   `mkdir # x -p <dir>`     creates it  -> `#` at a word start comments to the
+  //                                            end of the STRING, and the argv
+  //                                            after -S still follows
+  //   `mkdir#x -p <dir>`       creates nothing -> `#` mid-word is not a comment
+  //   `mkdir\ -p <dir>`        creates nothing -> `\ ` is not a word split
+  //   `mkdir\t-p <dir>`        creates nothing -> an escape does not split
+  //   `mkdir\c -p <dir>`       creates it  -> `\c` ends the string early
+  //   `${MKDIRNAME} -p <dir>`  creates it  -> `$` really is expanded
+  //   `mkdir '-p' <dir>` and `mkdir "-p" <dir>` create it -> quotes group
+  // env(1) 自己的 -S 文法，而且只取兩種實作都同意的那一部分；其餘一律回報 unjudgeable，由呼
+  // 叫端失敗即關閉。2026-09-05 用 marker 目錄在 macOS BSD env 與 GNU coreutils 9.11 env（即
+  // ubuntu-24.04 runner 用的那個）上實測，兩邊完全一致，逐條如上。
+  const ENV_S_ESCAPES = new Map([
+    ['\\', '\\'], ['#', '#'], ['$', '$'], ["'", "'"], ['"', '"'],
+    ['f', '\f'], ['n', '\n'], ['r', '\r'], ['t', '\t'], ['v', '\v'],
+  ]);
+  const envSplitWords = (text) => {
+    const words = [];
+    let word = '';
+    let building = false;
+    let quote = '';
+    const endWord = () => { if (building) { words.push(word); word = ''; building = false; } };
+    const add = (char) => { word += char; building = true; };
+    for (let k = 0; k < text.length; k += 1) {
+      const char = text[k];
+      // A `$` is an expansion in every position this gate can see, and what it
+      // expands to is not knowable here.
+      // `$` 在這裡看得到的每一個位置都是展開，展開成什麼在這裡不可能知道。
+      if (char === '$') return { words, unjudgeable: 'a $ expansion' };
+      if (quote === "'") {
+        if (char === "'") { quote = ''; continue; }
+        // A backslash inside single quotes is a quirk, not a rule: measured on
+        // both implementations, `-S "DUMP 'a\\\\b'"` yields <a\\b> (the `\\\\` WAS
+        // processed) while `-S "DUMP 'a\\_b'"` yields <a\\_b> (the `\\_` was NOT).
+        // Two escapes, two answers, inside the same quotes -- not a rule this
+        // gate can carry, so it stops.
+        // 單引號裡的反斜線是個怪癖而不是規則：兩種實作實測，`'a\\\\b'` 得到 <a\\b>（`\\\\` 有被處
+        // 理），`'a\\_b'` 得到 <a\\_b>（`\\_` 沒有）。同樣在單引號裡、兩個跳脫兩種答案——這不是
+        // 這道閘門扛得住的規則，所以就此停下。
+        if (char === '\\') return { words, unjudgeable: 'a backslash inside single quotes' };
+        add(char);
+        continue;
+      }
+      if (quote === '"') {
+        if (char === '"') { quote = ''; continue; }
+        if (char !== '\\') { add(char); continue; }
+        // Inside double quotes `\_` is a literal space that does NOT split, and
+        // `\c` was not measured there, so it is not modelled there.
+        // Measured with an argv dumper on both implementations:
+        //   -S 'DUMP a\_b'    -> argc=2 <a><b>
+        //   -S 'DUMP "a\_b"'  -> argc=1 <a b>
+        // 雙引號裡的 `\_` 是「不會切開」的字面空白，而 `\c` 在引號裡沒有實測過，所以不建模。
+        if (text[k + 1] === '_') { k += 1; add(' '); continue; }
+        if (text[k + 1] === 'c') return { words, unjudgeable: 'a \\c inside double quotes' };
+      } else {
+        if (char === "'") { quote = "'"; building = true; continue; }
+        if (char === '"') { quote = '"'; building = true; continue; }
+        if (char === ' ' || char === '\t' || char === '\n') { endWord(); continue; }
+        // Only at a word START. `mkdir#x` is a command name, measured.
+        // 只在「字首」。`mkdir#x` 是命令名稱，實測如此。
+        if (char === '#' && !building) { endWord(); return { words, unjudgeable: null }; }
+        if (char !== '\\') { add(char); continue; }
+      }
+      // A backslash, in either the unquoted or the double-quoted state.
+      // 反斜線，未加引號與雙引號兩種狀態共用。
+      const next = text[k + 1];
+      if (next === undefined) return { words, unjudgeable: 'a trailing backslash' };
+      k += 1;
+      // `\_` IS the separator; the space it stands for does not stay in the word.
+      // Measured: -S 'DUMP a\_b' -> argc=2 <a><b>, not <a ><b>.
+      // `\_` 本身就是分隔符；它代表的那個空白不會留在字裡。
+      if (next === '_') { endWord(); continue; }
+      if (next === 'c') { endWord(); return { words, unjudgeable: null }; }
+      const literal = ENV_S_ESCAPES.get(next);
+      if (literal === undefined) return { words, unjudgeable: `the escape \\${next}` };
+      add(literal);
+    }
+    if (quote) return { words, unjudgeable: 'an unclosed quote' };
+    endWord();
+    return { words, unjudgeable: null };
+  };
   const envSplitStringTargets = (splitString, argvAfter = []) => {
     const text = String(splitString || '');
     if (!text && argvAfter.length === 0) return;
     if (depth >= 8) { targets.push('/'); return; }
-    if (text) targets.push(...commandTargets(text, depth + 1, false, expansionEnv));
+    if (text) targets.push(...nestedScan(text, depth + 1, false, expansionEnv));
     const parts = text.trim().split(/\s+/);
     let p = 0;
     while (p < parts.length && !parts[p].startsWith('-') && parts[p].includes('=')) p += 1;
     const stripped = parts.slice(p).join(' ');
-    if (p > 0 && stripped) targets.push(...commandTargets(stripped, depth + 1, false, expansionEnv));
-    const asEnvArgv = ['env', text, ...argvAfter.map(envArgvWordLiteral)]
+    if (p > 0 && stripped) targets.push(...nestedScan(stripped, depth + 1, false, expansionEnv));
+    // The -S string is env's ARGV, so it is split by env's rules and then each
+    // word is re-quoted exactly the way the words after -S already are. Splicing
+    // the raw string in and letting the SHELL lexer re-split it was the defect:
+    // `rm\_-rf` came back as the single word `rm_-rf` (no command at all) and
+    // `rm # x` truncated the reconstruction at the `#`, dropping the very
+    // operands it exists to append. Measured 2026-09-05 with marker directories,
+    // both spellings really run `rm -rf <target>` on BSD env and on GNU env.
+    // -S 字串就是 env 的 argv，所以用 env 的規則切、再把每個字照 -S 後面那些字已經在用的方
+    // 式重新加引號。把原始字串原封不動接進去、讓 shell 斷詞器重新切，就是那個缺陷：
+    // `rm\_-rf` 會變回單一個字 `rm_-rf`（根本不是命令），而 `rm # x` 會在 `#` 上把重組截
+    // 斷，丟掉的正是它要接上去的那些操作元。2026-09-05 用 marker 目錄實測，兩種拼法在 BSD
+    // env 與 GNU env 上都真的跑了 `rm -rf <目標>`。
+    const split = envSplitWords(text);
+    if (split.unjudgeable) targets.push(UNJUDGEABLE_ENV_S + split.unjudgeable);
+    const asEnvArgv = ['env', ...split.words.map(envArgvWordLiteral), ...argvAfter.map(envArgvWordLiteral)]
       .filter((piece) => piece !== '')
       .join(' ');
-    targets.push(...commandTargets(asEnvArgv, depth + 1, false, expansionEnv));
+    targets.push(...nestedScan(asEnvArgv, depth + 1, false, expansionEnv));
   };
   // The words that follow the `-S` option, up to the end of this simple command.
   // `separators` alone is what the enclosing walk (`while (i < words.length &&
@@ -2036,7 +2272,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
   // 都沒有任何一列改變。因此列為 finding 回報，不在這裡就地修補。
   const envArgvAfter = (from) => {
     const rest = [];
-    for (let k = from; k < words.length && !separators.has(words[k]); k += 1) rest.push(words[k]);
+    for (let k = from; k < words.length && !operatorAt(k, separators); k += 1) rest.push(words[k]);
     return rest;
   };
   // A here-string is the same shape as a heredoc body for this purpose, and it
@@ -2055,11 +2291,11 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
   if (carrierPresent) {
     for (const entry of bodies) {
       if (depth >= 8) targets.push('/');
-      else targets.push(...commandTargets(entry.body, depth + 1, true, expansionEnv));
+      else targets.push(...nestedScan(entry.body, depth + 1, true, expansionEnv));
     }
     for (const body of hereStringBodies) {
       if (depth >= 8) targets.push('/');
-      else targets.push(...commandTargets(body, depth + 1, true, expansionEnv));
+      else targets.push(...nestedScan(body, depth + 1, true, expansionEnv));
     }
   }
 
@@ -2075,7 +2311,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
     if (depth >= 8) targets.push('/');
     else {
       for (const nested of substitutions) {
-        targets.push(...commandTargets(nested, depth + 1, carrierPresent, expansionEnv));
+        targets.push(...nestedScan(nested, depth + 1, carrierPresent, expansionEnv));
       }
     }
   }
@@ -2101,9 +2337,9 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
     // Set when a wrapper hands the command its operands on stdin (xargs), where
     // the paths are unknowable before the command runs.
     let stdinCompletesOperands = false;
-    while (i < words.length && !separators.has(words[i])) {
+    while (i < words.length && !operatorAt(i, separators)) {
       while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i += 1;
-      if (i >= words.length || separators.has(words[i])) break;
+      if (i >= words.length || operatorAt(i, separators)) break;
       if (controlWords.has(words[i])) {
         i += 1;
         executable = '';
@@ -2824,7 +3060,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
       for (const text of verdict.texts) {
         if (!text) continue;
         if (depth >= 8) targets.push('/');
-        else targets.push(...commandTargets(text, depth + 1, true, expansionEnv));
+        else targets.push(...nestedScan(text, depth + 1, true, expansionEnv));
       }
       return;
     }
@@ -3200,7 +3436,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
   let i = 0;
 
   while (i < words.length) {
-    while (i < words.length && separators.has(words[i])) i += 1;
+    while (i < words.length && operatorAt(i, separators)) i += 1;
     if (i >= words.length) break;
     if (controlWords.has(words[i])) {
       i += 1;
@@ -3230,9 +3466,9 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
       targets.push('/');
     }
     if (['rm', 'rmdir'].includes(executable) || unresolvedExecutable) {
-      for (; i < words.length && !terminators.has(words[i]); i += 1) {
+      for (; i < words.length && !operatorAt(i, terminators); i += 1) {
         const candidate = words[i];
-        if (redirectors.has(candidate)) {
+        if (operatorAt(i, redirectors)) {
           // ...but this loop also runs for an UNRESOLVABLE command word, and
           // that word may be a shell carrier, in which case its here-string is
           // the script -- the same rule the shellCarriers branch applies. Before
@@ -3248,11 +3484,11 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
           // (實測)。只針對 here-string:'<' 與 '<<' 接的是檔名,不是腳本。
           if (unresolvedExecutable && candidate === '<<<' && i + 1 < words.length) {
             if (depth >= 8) targets.push('/');
-            else targets.push(...commandTargets(words[i + 1], depth + 1, false, expansionEnv));
+            else targets.push(...nestedScan(words[i + 1], depth + 1, false, expansionEnv));
           }
           // Skip the redirection and its filename operand (not an rm target),
           // but never skip a command terminator that follows a bare redirect.
-          if (i + 1 < words.length && !terminators.has(words[i + 1])) i += 1;
+          if (i + 1 < words.length && !operatorAt(i + 1, terminators)) i += 1;
           continue;
         }
         if (candidate === '--') continue;
@@ -3261,7 +3497,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
         // be parsed as a command as well as compared as a path.
         if (unresolvedExecutable && /\s/.test(candidate)) {
           if (depth >= 8) targets.push('/');
-          else targets.push(...commandTargets(candidate, depth + 1, false, expansionEnv));
+          else targets.push(...nestedScan(candidate, depth + 1, false, expansionEnv));
         }
         if (!candidate.startsWith('-') || candidate === '-') {
           targets.push(
@@ -3325,9 +3561,9 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
         // Bound adversarial recursion, but fail closed rather than letting a
         // deeply nested shell carrier bypass the protected-directory hook.
         if (depth >= 8) targets.push('/');
-        else targets.push(...commandTargets(nestedCommand, depth + 1, false, expansionEnv));
+        else targets.push(...nestedScan(nestedCommand, depth + 1, false, expansionEnv));
       }
-      while (i < words.length && !separators.has(words[i])) i += 1;
+      while (i < words.length && !operatorAt(i, separators)) i += 1;
     } else if (executable === 'find') {
       // find deletes on its own with -delete, and through the -exec family when
       // the command it runs is rm. Either way the paths it walks are literal
@@ -3349,7 +3585,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
       // 讓 `find -x /etc -delete` 一個 root 都沒收到、退回 '.'，於是它拿到的那條路徑根本
       // 沒被判——實測那條命令會刪掉 /etc。
       const leadingOptions = new Set(['-x', '-d', '-s', '-E', '-H', '-L', '-P', '-h', '-X']);
-      while (i < words.length && !terminators.has(words[i])) {
+      while (i < words.length && !operatorAt(i, terminators)) {
         // A root that only exists after expansion is unknowable, exactly as an rm
         // operand is: `find $DIR -delete` and `find "$DIR" -delete` both delete
         // (measured), and the rm branch already folds that shape to '/'. The find
@@ -3359,7 +3595,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
         // 原字，同一種不可知得到兩種答案。
         const asRoot = (index) => targetFromWord(words[index], dynamicExpansions[index], expansionEnv);
         if (words[i] === '-f') {
-          if (i + 1 < words.length && !terminators.has(words[i + 1])) searchRoots.push(asRoot(i + 1));
+          if (i + 1 < words.length && !operatorAt(i + 1, terminators)) searchRoots.push(asRoot(i + 1));
           i += 2;
           continue;
         }
@@ -3370,6 +3606,17 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
       }
       const execOperands = [];
       for (; i < words.length; i += 1) {
+        // NOT gated on `operatorAt` (r5-fix-better-rm-6 deliberately stops here):
+        // only `;` and `+` terminate an -exec clause, which is POSIX, so an
+        // escaped or quoted `|`, `&` or `(` really does end find's read of the
+        // clause -- measured, BSD find answers `-exec: no terminating ";" or "+"`,
+        // exits 1 and removes nothing. The three `find /etc -exec cat {} '|'
+        // -delete` rows in test-hooks.js pin that, and gating this site turned
+        // all three into refusals of a command that deletes nothing.
+        // 這一處刻意不接上 `operatorAt`：只有 `;` 與 `+` 會終止 -exec 子句（POSIX），所以
+        // 跳脫或加引號的 `|`、`&`、`(` 真的會結束 find 對子句的讀取——實測 BSD find 回
+        // 「no terminating ";" or "+"」、exit 1、什麼都沒刪。test-hooks.js 裡那三列
+        // `find /etc -exec cat {} '|' -delete` 就是釘它的，把這裡接上會把三列都變成誤擋。
         if (terminators.has(words[i])) {
           // The `;` that closes an -exec clause has to be hidden from the shell,
           // so it is written `\;` or `';'` -- and the tokenizer turns all three
@@ -3501,10 +3748,10 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
       }
       if (nestedCommand.length > 0) {
         if (depth >= 8) targets.push('/');
-        else targets.push(...commandTargets(nestedCommand.join(' '), depth + 1, false, expansionEnv));
+        else targets.push(...nestedScan(nestedCommand.join(' '), depth + 1, false, expansionEnv));
       }
     } else {
-      while (i < words.length && !separators.has(words[i])) i += 1;
+      while (i < words.length && !operatorAt(i, separators)) i += 1;
     }
   }
   return targets;
@@ -3616,6 +3863,26 @@ function unjudgeableDenial(judgedCount, totalCount, isCopilot, isAntigravity, is
 // 產生裁決，/bin/rm 就直接跑了，連垃圾桶副本都沒有。那個形狀打穿的是每一個宣告項目，不只
 // 這一個，所以推薦它的拒絕訊息等於閘門自己教人繞過自己。字面的絕對路徑會照一般規則判定，
 // 這正是要求它的理由。
+// The refusal for an `env -S` string this gate could not split the way env(1)
+// would. It has to say WHICH rule it could not model, or the reader is left to
+// guess at a string they wrote themselves; and it has to offer a way through
+// that this gate still judges -- spelling the words out as ordinary argv is
+// exactly that, because then there is no -S string left to split.
+// 這是「-S 字串沒辦法照 env(1) 的規則切開」時的拒絕。它必須說出「是哪一條規則沒能建模」，否
+// 則讀的人只能對著自己寫的字串猜；而它給的出路必須是這道閘門仍然會判定的形狀——把那些字直接
+// 寫成普通 argv 正好就是，因為那樣就沒有 -S 字串要切了。
+function unjudgeableEnvStringDenial(rule, isCopilot, isAntigravity, isCursor, isGrok) {
+  const zh = `拒絕刪除：無法確定 env -S 的字串會被拆成哪些字，因為它含有${rule}，`
+    + `而 env(1) 拆 -S 的規則與 shell 不同（\`\\_\` 會切開、字首的 \`#\` 是註解、\`\${VAR}\` 會展開），`
+    + `拆錯就等於看不見那條刪除命令。`
+    + `繞法：不要用 -S，把那些字直接寫成 env 的引數，例如 env FOO=1 rm -rf /path。`;
+  const en = `Refused to remove: cannot determine how env -S splits its string, because it contains ${rule},`
+    + ` and env(1) does not split -S the way a shell does (\`\\_\` splits, a leading \`#\` comments,`
+    + ` \`\${VAR}\` is expanded); splitting it wrong is the same as not seeing the removal at all.`
+    + ` Workaround: drop -S and spell the words as env's own arguments, e.g. env FOO=1 rm -rf /path.`;
+  return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
+}
+
 function unknownDenial(operand, isCopilot, isAntigravity, isCursor, isGrok) {
   const zh = `拒絕刪除：無法在執行前確定 '${operand}' 會展開成哪一條路徑，因此不予放行`
     + `（這不是說它是受保護的目錄，是說這道閘門不知道它是什麼）。`
@@ -3795,6 +4062,7 @@ function evaluate(payload, env = process.env) {
       target.startsWith(UNRESOLVED_TARGET)
       || target.startsWith(UNSCANNABLE_SCRIPT)
       || target.startsWith(UNREADABLE_PIPE_TARGET)
+      || target.startsWith(UNJUDGEABLE_ENV_S)
     ) continue;
     const reason = protectedReason(target, cwd, home, extraDirs);
     if (reason) return denial(reason, isCopilot, isAntigravity, isCursor, isGrok);
@@ -3837,6 +4105,18 @@ function evaluate(payload, env = process.env) {
     if (!target.startsWith(UNREADABLE_PIPE_TARGET)) continue;
     return unreadablePipeTargetDenial(
       target.slice(UNREADABLE_PIPE_TARGET.length), isCopilot, isAntigravity, isCursor, isGrok,
+    );
+  }
+  // Above the unresolved-variable refusal, for the same reason the two above it
+  // are: this one names the rule it could not model and carries the way through,
+  // while "cannot determine which path this expands to" would be pointing at an
+  // operand when the thing that could not be read is the -S string.
+  // 排在「解不開變數」之前，理由與上面兩個相同：它指名了沒能建模的那條規則、也帶著出路，而
+  // 「算不出這個操作元展開成哪條路徑」會指著操作元，可是讀不出來的是那段 -S 字串。
+  for (const target of targets) {
+    if (!target.startsWith(UNJUDGEABLE_ENV_S)) continue;
+    return unjudgeableEnvStringDenial(
+      target.slice(UNJUDGEABLE_ENV_S.length), isCopilot, isAntigravity, isCursor, isGrok,
     );
   }
   for (const target of targets) {
