@@ -209,9 +209,34 @@ function heredocDelimiter(input, start) {
   return { delimiter, end: index, quoted };
 }
 
+// How many substitution reads inside a double quote may FAIL before the three
+// readers below stop being called at all. A read that fails scans to end of input
+// and the caller then advances ONE character, so N unbalanced openers cost
+// O(N x len) -- measured through the real stdin entry point: `echo "` + '${' x
+// 60,000 + '" ; rm -rf /etc' cost 6,071 ms at 5bf41fe against 35 ms before those
+// readers existed, past the live 5,000 ms PreToolUse timeout. A hook that outruns
+// its timeout produces NO decision, so the deletion on that same line runs
+// unjudged -- and the padding costs whoever writes the command nothing.
+//
+// Past the budget the arms fall through to `word += char`, which is exactly what
+// this file did before those readers were added: the direction is more refusals,
+// never fewer. Only FAILED reads spend budget, so a command whose substitutions
+// close -- every real one -- never reaches it, and the nested-quote fix those
+// readers exist for is untouched. 64 is far above any real command and far below
+// the point where the quadratic matters.
+// 雙引號裡的替換讀取「失敗」幾次之後，下面三個 reader 就不再被呼叫。一次失敗的讀取會掃到輸入
+// 結尾，而呼叫端只前進一個字元，所以 N 個不收尾的開頭要花 O(N x len)——實測 6,071 ms，超過
+// live 的 5,000 ms 逾時，而逾時的 hook 不產生任何裁決。超過預算之後這幾個臂會退回
+// `word += char`，也就是這些 reader 加進來以前的行為：方向是「更常拒絕」，不是更少。
+// 只有「失敗」的讀取會花預算，所以真實命令（替換都收得了尾）永遠碰不到它。
+const MAX_FAILED_SUBSTITUTION_READS = 64;
+
 function shellWords(command) {
   const words = [];
   const dynamicExpansions = [];
+  // Per invocation, not per file: each shellWords() call gets its own budget.
+  // 逐次呼叫各自一份預算。
+  let failedSubstitutionReads = 0;
   // Bodies lifted OUT of the word stream, each remembering which '<<' word it
   // belongs to, so commandTargets can hand a body back to a shell carrier and to
   // nothing else.
@@ -347,7 +372,10 @@ function shellWords(command) {
       // 分支就對它開火，一條普通的 sed 被以 `unresolvable pipe target ($X/)` 擋掉。
       // 內文用的是頂層 `$(` 分支同一個 readParenthesized()（它本來就處理巢狀與引號），
       // 所以替換會落在它所屬的那個字裡，與沒有外層引號的雙胞胎一致。
-      else if (quote === '"' && char === '$' && input[index + 1] === '(') {
+      else if (
+        quote === '"' && char === '$' && input[index + 1] === '('
+        && failedSubstitutionReads < MAX_FAILED_SUBSTITUTION_READS
+      ) {
         const substitution = readParenthesized(input, index + 1);
         wordHasDynamicExpansion = true;
         if (substitution) {
@@ -356,6 +384,7 @@ function shellWords(command) {
         } else {
           // Unbalanced '(': keep the old character-by-character behaviour, the
           // same fallback the top-level branch takes.
+          failedSubstitutionReads += 1;
           word += char;
         }
       }
@@ -370,23 +399,31 @@ function shellWords(command) {
       // 另外兩種「裡面可以自帶引號」的替換寫法，同一條規則。只修 `$( … )` 會留下同一個缺陷
       // 的兩個兄弟站點。`$(( … ))` 不需要自己的分支：readParenthesized 從第一個括號起就會
       // 把巢狀括號配對完。
-      else if (quote === '"' && char === '$' && input[index + 1] === '{') {
+      else if (
+        quote === '"' && char === '$' && input[index + 1] === '{'
+        && failedSubstitutionReads < MAX_FAILED_SUBSTITUTION_READS
+      ) {
         const braced = readBraced(input, index + 1);
         wordHasDynamicExpansion = true;
         if (braced !== null) {
           word += input.slice(index, braced + 1);
           index = braced;
         } else {
+          failedSubstitutionReads += 1;
           word += char;
         }
       }
-      else if (quote === '"' && char === '`') {
+      else if (
+        quote === '"' && char === '`'
+        && failedSubstitutionReads < MAX_FAILED_SUBSTITUTION_READS
+      ) {
         const backquoted = readBackquoted(input, index);
         wordHasDynamicExpansion = true;
         if (backquoted !== null) {
           word += input.slice(index, backquoted + 1);
           index = backquoted;
         } else {
+          failedSubstitutionReads += 1;
           word += char;
         }
       }
@@ -551,6 +588,10 @@ function shellWords(command) {
   Object.defineProperty(words, 'dynamicExpansions', { value: dynamicExpansions });
   Object.defineProperty(words, 'operatorTokens', { value: operatorTokens });
   Object.defineProperty(words, 'heredocs', { value: heredocs });
+  // Read by test-hooks.js: the property this budget is pinned by is a COUNT, not
+  // a duration -- a millisecond ceiling on this path measures the host.
+  // 由 test-hooks.js 讀取：釘住這個預算的是「次數」而不是「時間」。
+  Object.defineProperty(words, 'failedSubstitutionReads', { value: failedSubstitutionReads });
   return words;
 }
 
@@ -1672,7 +1713,16 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
     'for', 'while', 'until', 'select', 'do', 'done',
     'case', 'in', 'esac', '{', '}',
   ]);
-  const shellCarriers = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'fish']);
+  // csh/tcsh belong here for the same reason every other name does: a script
+  // piped into one really runs. On this stock macOS /bin/csh and /bin/tcsh are the
+  // same inode, both are in /etc/shells, and a touch payload through either one
+  // executes -- while `fish`, already on this list, is not installed here at all.
+  // The four lists derived below are spreads of this one, so this is the only
+  // place a carrier name is written.
+  // csh／tcsh 屬於這裡的理由與其他每一個名字相同：灌進去的腳本真的會執行。在這台原廠 macOS
+  // 上 /bin/csh 與 /bin/tcsh 是同一個 inode、都在 /etc/shells 裡；反倒是清單上的 fish 沒裝。
+  // 下面四份清單都是對這一份的展開，所以 carrier 名字只在這裡寫一次。
+  const shellCarriers = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'fish', 'csh', 'tcsh']);
   const simpleWrappers = new Set(['!', 'nohup', 'setsid']);
   const wrapperCommands = new Set([
     ...simpleWrappers,
@@ -2068,7 +2118,13 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
   // 會被讀出來、照一般規則判；PIPED_SCRIPT_EXCEPTIONS 上的安裝路徑放行；其餘一律拒絕，
   // 包含「這個解析器分類不出來的產生器」。這裡刻意沒有 fail-open 的分支。
   const r4Carriers = new Set([...shellCarriers, 'source', '.']);
-  const stdinScriptPaths = new Set(['/dev/stdin', '/dev/fd/0', '-']);
+  // `/proc/self/fd/0` is Linux's spelling of the two /dev entries beside it, and
+  // this project ships to Linux (README.md:7, install.sh, CI on ubuntu-24.04).
+  // It is text on the command line here, never a path this hook stats, so adding
+  // it costs macOS nothing and cannot become a host-dependent answer.
+  // `/proc/self/fd/0` 是旁邊那兩個 /dev 項目在 Linux 上的寫法，而本專案有出貨到 Linux。
+  // 這裡它只是命令列上的文字，不會被 stat，所以在 macOS 上不花任何代價。
+  const stdinScriptPaths = new Set(['/dev/stdin', '/dev/fd/0', '/proc/self/fd/0', '-']);
   // Matching ')' for every operator '(' , computed once for the whole word
   // stream. Scanning per substitution instead was quadratic on nested
   // `<( <( … ) )`, and a gate that outruns the live 5,000 ms hook timeout makes
@@ -2149,22 +2205,35 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
   // refusal, never an allowance.
   // 產生器端刻意保守的外殼拆解：任何它看不全的外殼寫法都會落在「不是
   // echo/printf/curl/wget」的字上，於是產生器變成讀不到——也就是 fail-closed 的答案。
+  // `prefixed` records that something stood in FRONT of the command word that can
+  // change what runs or where it fetches from: an environment assignment, or a
+  // transparent wrapper and its options. Only the curl/wget EXEMPTION reads it --
+  // the literal and heredoc producers stay readable through any prefix, because
+  // their output is scanned either way. A shell CONTROL word (`if`, `then`, `do`,
+  // `{`) is deliberately NOT a prefix: it is syntax, it cannot move a fetch, and
+  // counting it would refuse `if true; then curl <documented URL> | bash; fi` for
+  // nothing (measured both ways 2026-09-04).
+  // `prefixed` 記的是「命令字前面站了能改變執行內容或抓取位置的東西」：環境變數指派，或透明
+  // 包裝及其選項。只有 curl/wget 的豁免會讀它——literal 與 heredoc 產生器照舊容許前綴，因為
+  // 它們吐出來的文字兩邊都會被掃。shell 控制字刻意不算前綴：那是語法，搬不動抓取。
   const producerExecutable = (context, start, end) => {
     let k = start;
+    let prefixed = false;
     while (k < end) {
-      if (context.operatorTokens[k]) return { index: -1, name: '' };
+      if (context.operatorTokens[k]) return { index: -1, name: '', word: '', prefixed };
       const word = context.words[k];
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) { k += 1; continue; }
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) { k += 1; prefixed = true; continue; }
       const name = path.basename(word);
       if (controlWords.has(name)) { k += 1; continue; }
       if (transparent.has(name)) {
+        prefixed = true;
         k += 1;
         while (k < end && !context.operatorTokens[k] && context.words[k].startsWith('-')) k += 1;
         continue;
       }
-      return { index: k, name };
+      return { index: k, name, word, prefixed };
     }
-    return { index: -1, name: '' };
+    return { index: -1, name: '', word: '', prefixed };
   };
   // Three readable producers, and one refusal that is the default.
   const classifyProducer = (context, start, end) => {
@@ -2250,14 +2319,60 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
       // shapes the unresolved-executable arm already needs (:1904-1911).
       // 兩種掃法、目標取聯集。join 抓 `echo rm -rf /etc`；逐操作元掃抓
       // `printf %s "rm -rf /etc"`（join 會把格式字串推到命令位置，把刪除藏在後面）。
+      // ...and a THIRD scan, for the spelling neither of the two above can see: a
+      // deletion written as separate whitespace-free WORDS. `echo -e rm -rf /etc`
+      // has no operand containing a space, and the plain join starts `-e rm …`
+      // with the option in command position -- so `rm` is never in command
+      // position in any text and the deletion was ALLOWED (measured at 5bf41fe
+      // through the real stdin entry point; a touch payload really ran under
+      // /bin/bash 3.2.57, bash 5.x, sh, zsh, dash and ksh). Dropping the LEADING
+      // option words puts the emitted words back in the order the shell will see
+      // them. printf drops one more: its first non-option word is the FORMAT, not
+      // part of the output.
+      // The benign twins (`echo -e hi`, `printf '%s ' hello world`) stay allowed
+      // because this adds TEXT to scan, not a refusal: the ordinary rules judge
+      // what the emitter emits, exactly as they do for the join.
+      // ……再加第三種掃法，補上前兩種都看不到的那一種寫法：刪除被寫成分開的、各自不含空白的
+      // 「字」。`echo -e rm -rf /etc` 沒有任何含空白的操作元，而 join 出來的字串以 `-e` 開頭，
+      // `rm` 從來沒有出現在命令位置上——於是這條刪除被放行（實測）。拿掉開頭的選項字，就把
+      // 產生器吐出的字還原成 shell 會看到的順序；printf 還要多丟一個：它的第一個非選項字是
+      // 格式字串，不是輸出內容。
+      let firstOperandIndex = 0;
+      while (
+        firstOperandIndex < argv.length
+        && argv[firstOperandIndex].startsWith('-')
+        && argv[firstOperandIndex] !== '-'
+      ) firstOperandIndex += 1;
+      const emitted = argv.slice(firstOperandIndex);
       return {
         kind: 'literal',
         label,
-        texts: [argv.join(' '), ...operands.filter((word) => /\s/.test(word))],
+        texts: [
+          argv.join(' '),
+          emitted.join(' '),
+          ...(label === 'printf' ? [emitted.slice(1).join(' ')] : []),
+          ...operands.filter((word) => /\s/.test(word)),
+        ],
       };
     }
+    // The option allowlist below exists because `--resolve`, `--proxy`,
+    // `--unix-socket`, `-K` and `-o` move the fetch while the URL text stays the
+    // documented one. An environment assignment (`CURL_HOME`, `WGETRC`,
+    // `https_proxy`, `LD_PRELOAD`, `PATH`) and a transparent wrapper move it the
+    // same way and never reach `options` -- the scan that fills it starts AFTER
+    // the command word -- so the exemption asks for a producer with nothing in
+    // front of it. `resolved.word === label` is the other half: the label comes
+    // from path.basename(), so without it `/tmp/evil/curl` and `./curl` inherited
+    // the exemption. Measured 2026-09-04: `curl -K /tmp/evil/.curlrc <URL> | bash`
+    // was refused while `CURL_HOME=/tmp/evil curl <URL> | bash` -- the same config
+    // file, through the environment -- was allowed.
+    // 選項白名單存在的理由是那幾個選項會「保留網址文字但把抓取搬走」。環境變數指派與透明包裝
+    // 用同樣的方式搬動抓取，而且永遠不會進到 `options`（填它的掃描從命令字之後才開始），所以
+    // 豁免要求產生器前面什麼都沒有。`resolved.word === label` 是另一半：label 來自
+    // path.basename()，少了它，任何叫做 `curl` 的執行檔都會繼承豁免。
     if (
       (label === 'curl' || label === 'wget') && !dynamic && operands.length === 1
+      && !resolved.prefixed && resolved.word === label
       && !/\.\.|%2e|%2f|%5c/i.test(operands[0])
       && PIPED_SCRIPT_EXCEPTIONS.some((prefix) => operands[0].startsWith(prefix))
       && options.every((option) => (
@@ -2571,7 +2686,7 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
       // procsubByFd 是對整條命令列建的，所以跨 `;` 的 `exec 3< <(…); bash /dev/fd/3`
       // 也由同一個判斷接住。
       for (const operand of fileOperands) {
-        const fdMatch = /^\/dev\/fd\/([0-9]+)$/.exec(operand);
+        const fdMatch = /^(?:\/dev\/fd|\/proc\/self\/fd)\/([0-9]+)$/.exec(operand);
         const fdRange = fdMatch ? procsubByFd.get(fdMatch[1]) : undefined;
         if (fdRange) {
           if (!procsubRanges.some((range) => range.start === fdRange.start)) {
@@ -3313,4 +3428,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { HOME_DIRS, MOUNT_PARENTS, SYSTEM_DIRS, commandTargets, evaluate, globCanMatchGit, hasGlob, normalizedTarget, protectedReason, shellWords };
+module.exports = { HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, commandTargets, evaluate, globCanMatchGit, hasGlob, normalizedTarget, protectedReason, shellWords };

