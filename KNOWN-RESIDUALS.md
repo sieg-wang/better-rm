@@ -362,6 +362,35 @@ row per name, where getting it wrong in the consuming direction is a new fail-op
 -- and fish is not a login shell on this machine and nothing in `~/bin` or launchd
 pipes into it, so this is written down rather than pretended away.
 
+**2026-09-05 補上同一族的 xargs 成員（R5 unit 9 驗收時量出）。** `xargs` 的 `-J` 選項在「替換
+字串沒有出現在引數列裡」時，BSD 版會把 stdin 那一行直接**附加**到命令列尾端——這不是「吃掉下
+一個字」的那種選項，而是走到命令字之後又自己補了一個操作元，這道閘門完全沒有模擬。
+`echo hi | xargs -0J rm sh -c` 這種寫法看起來只有 `sh -c`（沒有引數），這道閘門判它「腳本讀不
+到、但也沒有東西可讀」而放行；真正的 xargs 卻把 stdin 那一行接到 `-c` 後面執行。實測（marker
+目錄，BSD xargs，bash 5.3.15／3.2.57／sh）：script 從**檔案或重導向**（`< script.sh`）或不可讀
+的產生器進來時，`xargs -0J rm sh -c`、`bash -c`、`zsh -c` 三種拼法都真的執行，共 6 列語料。這
+與 `xargs -0 sh -c < file` 在**任何一版**這支 hook 上都放行、是同一種能力——都是「腳本從檔案／
+重導向進來」這條本來就承認的路（見上面 R4-b 的 `bash < script.sh`），不是新開的洞。字面產生器
+仍然照掃照擋：能讀到內容的產生器（例如可辨識的字面 `echo`／`printf`）仍然被判定並拒絕。
+R5 unit 9 移除的是舊版一個**誤讀**造成的意外拒絕（把這個 `-0J` 串誤判成「protected directory:
+/」），不是拿掉一道真正的建模——這 6 列現在跟這個家族其餘成員判得一樣。
+
+**2026-09-05 addendum (found during R5 unit 9's validation): the xargs member of the same
+family.** BSD xargs' `-J` option, when its replace string never occurs in the argument list,
+APPENDS the stdin record to the end of the argument list — not an option that eats the next
+word, but one that adds an operand after the carrier is already assembled, which this gate does
+not model at all. `echo hi | xargs -0J rm sh -c` looks like a bare `sh -c` with no argument, so
+the gate reads it as "no script visible, nothing to read" and allows it; real xargs appends the
+stdin line after `-c` and runs it. Measured with marker directories under BSD xargs on bash
+5.3.15, 3.2.57 and sh: when the script arrives from a FILE or a redirect (`< script.sh`) or an
+unreadable producer, `xargs -0J rm sh -c`, `bash -c` and `zsh -c` all really execute — 6 corpus
+rows. This is the same capability as `xargs -0 sh -c < file`, which is ALLOW on every version of
+this hook (see R4-b's `bash < script.sh`) — an already-adjudicated route, not a new one. A
+literal producer this gate CAN read is still scanned and refused. What R5 unit 9 removed was an
+accidental refusal from a MIS-PARSE (the old `-0J` walk misread the cluster as `protected
+directory: /`), not a modelled guard — these 6 rows are now judged the same way the rest of the
+family is.
+
 
 ## R5-a — 斷詞階段的 `$(` 平方級成本 — 2026-09-05 **CLOSED**（線性化，沒有上輸入長度上限）
 
@@ -819,3 +848,77 @@ backslash inside single quotes — measured, both implementations process `\\` t
 `\_`), a `\c` inside double quotes, or an unclosed quote is refused even when it is harmless.
 Known cost: `env -S 'rm\ -rf' /etc` moved from ALLOW to DENY; measured, that spelling runs on
 neither implementation, so this is an over-refusal, not a missed one.
+
+## R5-15 — heredoc 的結束標記讀法與 bash 不同 — 2026-09-05 **CLOSED**，留作紀錄
+
+heredoc 內文在哪裡結束，只由結束標記那一個字決定，而內文結束錯地方，後面的一切就對本檔所有
+掃描隱形。`heredocDelimiter()` 不認 ANSI-C 引號（`$'…'`）也不認行接續（`EO\` + 換行 + `F`），
+而二十行外的 tokenizer 兩者都認。`cat <<$'EOF'` 算出來的標記是 `$EOF`，永遠對不上 `EOF` 那
+一行，內文一路吃到輸入結尾，又因為標記裡有引號而被當成「字面」抹掉——heredoc 後面那條
+`rm -rf /etc` 就此隱形，整條命令**放行**。2026-09-05 用 touch marker 在 /bin/bash 3.2.57、
+/opt/homebrew/bin/bash 5.3.15 與 /bin/sh 實測，十二種拼法的 marker 全都出現：
+`$'EOF'`、`$'E\x4FF'`、`$'EO'F`、`$'E\tF'`、`<<-$'EOF'`、`$"EOF"`、`EO\`+換行+`F`、
+`"EO\`+換行+`F"`、`"E\$F"`、`$'E\qF'`、`$(echo A)`、`` `echo A` ``。現在這個字用與 tokenizer
+相同的規則讀，包含「有沒有加引號」（行接續是在問這個問題之前就被刪掉的，所以它**不**算引號；
+反引號那種兩個 bash 不一致，取「未加引號」＝掃得比較多的那一邊）。引號到輸入結尾都沒收尾時
+（bash 自己也是語法錯誤）改為以 `unreadable heredoc delimiter` 拒絕整條命令。
+**代價**：9,043 列語料裡 853 列從 ALLOW 變 DENY（516 列是標記終於對上、標記後面那條命令因此
+被真的判定；337 列是新的「讀不到標記」拒絕，全部是 bash 眼中的語法錯誤）。
+
+**R5-15 — the heredoc delimiter was read by rules bash does not use (CLOSED 2026-09-05, kept as
+a record).** Where a heredoc body ends is decided by one word, and a body that ends in the wrong
+place hides everything after it from every scan in this file. `heredocDelimiter()` modelled
+neither ANSI-C quoting nor a line continuation while the tokenizer twenty lines away modelled
+both, so `cat <<$'EOF'` computed the delimiter `$EOF`, never matched the `EOF` line, ran the body
+to end of input and — the delimiter having a quote in it — masked that body out of the
+substitution scan. The deletion after the heredoc was invisible and the command was ALLOWED.
+Twelve spellings measured executing in three shells. The delimiter is now read with the
+tokenizer's own rules, quoting included, and an unterminated quote refuses the whole command
+(`unreadable heredoc delimiter`) instead of masking the rest of it.
+
+## R5-i — xargs 的串選項：一種讀得出來卻無法判定的殘留（**OPEN，僅記錄，代價已知**）
+
+`xargs` 的短選項會串在一起（`-0I{}`），而串裡第一個「要值」的字元會把串的剩餘部分當成它的
+值；串到此為止時就吃下一個字。這條文法是必要的——`xargs -0I % sh -c %` 實測真的會執行 stdin
+送進來的腳本——但它也會吃掉「唯一可能是命令的字」：`xargs -0I rm -rf` 的 `rm` 其實是替換字串，
+這條命令行真的 xargs 會回 `xargs: invalid option -- f`，什麼都不會跑。這種情況以刻意的過度拒
+絕處理：串尾的值只在「後面還留著一個不以 `-` 開頭的字」時才吃下一個字。
+
+**量出的殘留比原記錄大**：2026-09-05 R5 unit 9 驗收用更寬的網格重新量過，這一類其實是
+**24 種拼法／102 列語料**，不是兩種——都是 `xargs -0I <字>` 或 `-0J <字>` 這種形狀，串尾的值
+吃掉一個字之後，剩下的走訪停在一個**不是命令、也不是合法 xargs 選項**的字上，例如
+`xargs -0I rm -rf /etc`、`xargs -0I rm -rf {}`、`xargs -0I rm sh -c`、`xargs -0I rm perl -e`、
+`xargs -0I rm python3 -c` 等（`rm` 被誤吃成替換字串，走訪真正落腳的是它後面那個字）。
+test-hooks.js 釘住的仍然是原本那 10 列（`xargs -0I rm -f {}`／`xargs -0J rm -f {}` 各自配 4 種
+產生器加裸命令），當作這一整類的代表列；本機與 GNU 實測一致：走訪落腳的那個字（`{}`、`sh`、
+`perl`、`python3` ……）都不是 `rm`，這道閘門讀得到、判不出危險，命令本身也確實跑不出刪除
+（視落腳的字而定，`invalid option` 或 `command not found` 之類）。**24 種裡有 3 種、共 6 列是
+例外，不屬於這裡「讀得到但沒事」的類別**：`xargs -0J rm sh -c`／`bash -c`／`zsh -c`（不帶引數）
+在腳本從檔案、重導向或不可讀的產生器進來時真的會執行——那 6 列改記在 KNOWN-RESIDUALS.md 的
+R4-c，判法跟著 `bash < file` 那個已裁決的家族走，不算進這裡「代價已知、刻意不修」的殘留。要把
+剩下 21 種都擋住，這道閘門一樣得背下「所有合法的 xargs 選項字母」，那張表寫錯的代價仍然是擋掉
+跑得起來的命令，因此刻意不做。
+
+**R5-i — xargs option clusters: one readable-but-unjudgeable residual (OPEN, recorded, cost
+known).** A value-taking letter at the end of a cluster eats the next word, which is required
+(`xargs -0I % sh -c %` was measured executing) but can swallow the only command-shaped word on
+the line. That is handled by a deliberate over-refusal: the next word is eaten only while a word
+not starting with `-` still follows it.
+**The measured class is wider than the original record.** R5 unit 9's validation
+(2026-09-05) re-measured over a wider grid: this class is actually **24 shapes / 102 corpus
+rows**, not two. Every row is an `xargs -0I <word>` or `-0J <word>` form where, after the
+cluster-end value eats one word, the walk lands on a word that is neither a command NOR a valid
+xargs option — e.g. `xargs -0I rm -rf /etc`, `xargs -0I rm -rf {}`, `xargs -0I rm sh -c`,
+`xargs -0I rm perl -e`, `xargs -0I rm python3 -c` (`rm` is eaten as the replace string; the word
+the walk actually lands on is the one after it). The 10 rows already pinned in test-hooks.js
+(`xargs -0I rm -f {}` / `xargs -0J rm -f {}` each with 4 producers plus the bare form) stand as
+the REPRESENTATIVE set for the whole class; measured here and true on GNU too, the word the walk
+lands on (`{}`, `sh`, `perl`, `python3`, …) is never `rm`, and the line really does not run a
+deletion (`invalid option`, `command not found`, depending on what it lands on). **3 of the 24
+shapes — 6 rows — are the exception and do NOT belong in this "readable but harmless" class**:
+`xargs -0J rm sh -c` / `bash -c` / `zsh -c` (no argument) really execute when the script arrives
+from a file, a redirect, or an unreadable producer — those 6 rows are recorded under
+KNOWN-RESIDUALS.md's R4-c instead, judged the way the already-adjudicated `bash < file` family
+is, not counted in this section's known cost. Closing the remaining 21 shapes would still need
+this gate to carry a table of every valid xargs option letter, whose failure mode is refusing a
+working command, so it stays undone.

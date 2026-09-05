@@ -171,13 +171,57 @@ function decodeAnsiCEscape(input, slashIndex) {
 // The delimiter can be quoted or backslash-escaped, and the quoting is what tells
 // the SHELL whether to expand the body -- it is not our business here, we only
 // need the text that ends the body.
+//
+// R5-15 (r5-fix-better-rm-9): this word is read with the SAME rules the tokenizer
+// below uses for every other word, and it has to be, because the two answers are
+// used together. This one says where the body ENDS, and a body that ends in the
+// wrong place hides everything after it from every scan in this file. The old
+// reader modelled neither ANSI-C quoting nor a line continuation while the
+// tokenizer twenty lines below modelled both (`quote === 'ansi-c'` and the
+// `\` + newline arm), so `cat <<$'EOF'` computed the delimiter `$EOF`, never
+// matched the `EOF` line, ran the body to END OF INPUT -- and, the delimiter
+// having a quote in it, marked that body LITERAL, which masks it out of the
+// substitution scan. The deletion after the heredoc was invisible and the whole
+// command was ALLOWED.
+// MEASURED 2026-09-05, a touch marker in place of the deletion, three shells
+// (/bin/bash 3.2.57, /opt/homebrew/bin/bash 5.3.15, /bin/sh): the marker appeared
+// in ALL THREE for twelve spellings -- `$'EOF'`, `$'E\x4FF'`, `$'EO'F`,
+// `$'E\tF'`, `<<-$'EOF'`, `$"EOF"`, `EO\`+newline+`F`, `"EO\`+newline+`F"`,
+// `"E\$F"`, `$'E\qF'`, `$(echo A)` and `` `echo A` ``. bash ends the heredoc where
+// this reader now ends it and really runs what comes next.
+// The QUOTED half was measured the same way, with `$(touch marker)` as the body:
+// `$'…'`, `$"…"`, `"…"`, `'…'`, `\E` and any `"` in the word leave the body
+// LITERAL; bare, `$X`, `${X}` and `$(…)` leave it EXPANDED. A line continuation
+// is deleted BEFORE bash asks whether the word was quoted, so `EO\`+nl+`F` is
+// unquoted -- the old reader called it quoted, which is the second half of the
+// same bypass. The backtick spelling is the one place the two bashes disagree
+// (3.2 literal, 5.3 expanded); it is modelled UNQUOTED, the side that scans more.
+// An unterminated quote returns `unreadable`: see UNREADABLE_HEREDOC_DELIMITER.
 // 讀 heredoc 的結束標記。標記可以被引號或反斜線包住，那個引號決定 shell 會不會展開內文
 // ——這裡不管展開，只需要「什麼字串會結束這段內文」。
-function heredocDelimiter(input, start) {
+// R5-15：這個字要用與下面 tokenizer 讀任何其他字「完全相同」的規則來讀，因為兩個答案是一起
+// 用的：這裡決定內文在哪裡結束，而內文結束錯地方，後面的一切就對本檔所有掃描隱形。舊讀法不
+// 認 ANSI-C 引號、也不認行接續，而二十行外的 tokenizer 兩者都認：`cat <<$'EOF'` 算出來的標
+// 記是 `$EOF`，永遠對不上 `EOF` 那一行，內文一路吃到輸入結尾，又因為標記裡有引號而被當成
+// 「字面」抹掉——heredoc 後面那條刪除命令就此隱形，整條命令放行。2026-09-05 三個 shell 用
+// touch marker 實測，十二種拼法的 marker 全都出現。行接續是在「問這個字有沒有加引號」之前
+// 就被刪掉的，所以 `EO\`+換行+`F` 是「未加引號」；舊讀法把它算成加了引號，是同一個繞過的另
+// 一半。反引號那種是兩個 bash 唯一分歧之處（3.2 字面、5.3 展開），這裡模型取「未加引號」，
+// 也就是掃得比較多的那一邊。引號沒有收尾就回傳 `unreadable`。
+function heredocDelimiter(input, start, readsLeft = Infinity) {
   let index = start;
+  // The three substitution readers below scan to end of input when they fail, and
+  // the caller then advances ONE character -- the same O(N x len) shape
+  // MAX_FAILED_SUBSTITUTION_READS exists to bound (R5-13). `cat <<$(` repeated is
+  // exactly that shape, so this reader spends the CALLER'S budget rather than
+  // opening a second one: `readsLeft` is what is left of it, and `failedReads` is
+  // what this call spent, which shellWords adds back to the one counter.
+  // 下面三個 reader 失敗時會掃到輸入結尾，而呼叫端只前進一個字元——正是
+  // MAX_FAILED_SUBSTITUTION_READS 要界的那個 O(N x len)。所以這裡花的是「呼叫端那一份」
+  // 預算，不另開一份：readsLeft 是剩下的額度，failedReads 是這次花掉的。
+  let failedReads = 0;
   while (index < input.length && (input[index] === ' ' || input[index] === '\t')) index += 1;
   let delimiter = '';
-  let quote = '';
   // Any quoting at all on the delimiter makes the body LITERAL: no parameter
   // expansion, no command substitution. That is the shell's own switch for
   // whether the body can execute anything, so it decides whether this guard
@@ -185,28 +229,125 @@ function heredocDelimiter(input, start) {
   // 結束標記只要帶引號，內文就是字面的：不做參數展開、也不做命令替換。這是 shell 自己
   // 用來決定「這段內文能不能執行東西」的開關，所以也由它決定守衛要不要往裡面看。
   let quoted = false;
+
+  // One quoted run: `'…'`, `"…"`, `$'…'` or `$"…"`. Returns null when the quote
+  // never closes, which is the fail-closed case -- bash calls that a syntax error
+  // and runs nothing, and the old reader answered with the rest of the command as
+  // the delimiter, a delimiter no line can ever match.
+  // 一段引號：收不了尾就回 null（fail-closed；bash 在這裡是語法錯誤，什麼都不會執行）。
+  const readQuotedRun = (openIndex) => {
+    const dollar = input[openIndex] === '$';
+    const opener = dollar ? input[openIndex + 1] : input[openIndex];
+    const ansiC = dollar && opener === "'";
+    let cursor = openIndex + (dollar ? 2 : 1);
+    let text = '';
+    while (cursor < input.length) {
+      const char = input[cursor];
+      if (char === opener) return { text, end: cursor + 1 };
+      if (ansiC && char === '\\') {
+        const decoded = decodeAnsiCEscape(input, cursor);
+        text += decoded.value;
+        cursor = decoded.end + 1;
+        continue;
+      }
+      // Inside DOUBLE QUOTES a backslash is special only before `$`, backtick,
+      // `"`, `\` and newline; before anything else bash keeps BOTH characters.
+      // The same rule the tokenizer's own double-quote arm states, measured with
+      // od(1) there, and re-measured here through the delimiter: `<<"E\$F"` ends
+      // at a line reading `E$F`, `<<"E\nF"` at a line reading `E\nF`, and
+      // `<<"EO\`+newline+`F"` at `EOF`.
+      // 雙引號裡的反斜線只有在 `$`、反引號、`"`、`\`、換行之前才是逸出；其餘兩個字元都留。
+      if (opener === '"' && char === '\\' && cursor + 1 < input.length) {
+        const next = input[cursor + 1];
+        if (next === '\n') { cursor += 2; continue; }
+        if ('$`"\\'.includes(next)) { text += next; cursor += 2; continue; }
+        text += char;
+        cursor += 1;
+        continue;
+      }
+      text += char;
+      cursor += 1;
+    }
+    return null;
+  };
+
   while (index < input.length) {
     const char = input[index];
-    if (quote) {
-      if (char === quote) quote = '';
-      else delimiter += char;
-      index += 1;
-    } else if (char === '"' || char === "'") {
-      quote = char;
-      quoted = true;
-      index += 1;
-    } else if (char === '\\' && index + 1 < input.length) {
+    if (char === '\\') {
+      // A backslash-newline is a LINE CONTINUATION: bash deletes BOTH characters
+      // before it reads the word, so it neither ends the delimiter nor quotes it.
+      // 反斜線接換行是行接續：兩個字元在讀這個字之前就被刪掉，既不結束標記也不是引號。
+      if (input[index + 1] === '\n') { index += 2; continue; }
+      // A backslash at the very end of the input escapes nothing; bash reports an
+      // unexpected end of file. Fail closed rather than invent a delimiter.
+      if (index + 1 >= input.length) {
+        return { delimiter, end: input.length, quoted: false, unreadable: '\\', failedReads };
+      }
       delimiter += input[index + 1];
       quoted = true;
       index += 2;
-    } else if (/[\s;&|()<>]/.test(char)) {
-      break;
-    } else {
-      delimiter += char;
-      index += 1;
+      continue;
     }
+    if (
+      char === "'" || char === '"'
+      || (char === '$' && (input[index + 1] === "'" || input[index + 1] === '"'))
+    ) {
+      const run = readQuotedRun(index);
+      if (run === null) {
+        return {
+          delimiter,
+          end: input.length,
+          quoted: false,
+          unreadable: char === '$' ? `$${input[index + 1]}` : char,
+          failedReads,
+        };
+      }
+      delimiter += run.text;
+      quoted = true;
+      index = run.end;
+      continue;
+    }
+    // `$( … )`, `${ … }` and `` ` … ` `` belong to the word the way the tokenizer
+    // says they do -- and bash performs NO expansion on a heredoc delimiter, so
+    // the delimiter is that text LITERALLY (measured: `cat <<$(echo A)` ends at a
+    // line reading `$(echo A)`, and the command after it runs). Breaking the word
+    // at the `(` spelled the delimiter `$`, which no line matched, so the body ran
+    // to end of input and hid the rest of the command.
+    // `$( … )`、`${ … }`、`` ` … ` `` 屬於這個字（tokenizer 也是這樣讀的），而 bash 對結束
+    // 標記不做任何展開，所以標記就是那段「字面」文字（實測）。在 `(` 處斷字會把標記算成
+    // `$`，任何一行都對不上，內文就吃到輸入結尾、把命令其餘部分藏起來。
+    if (char === '$' && input[index + 1] === '(' && failedReads < readsLeft) {
+      const substitution = readParenthesized(input, index + 1);
+      if (substitution) {
+        delimiter += input.slice(index, substitution.end + 1);
+        index = substitution.end + 1;
+        continue;
+      }
+      failedReads += 1;
+    }
+    if (char === '$' && input[index + 1] === '{' && failedReads < readsLeft) {
+      const braced = readBraced(input, index + 1);
+      if (braced !== null) {
+        delimiter += input.slice(index, braced + 1);
+        index = braced + 1;
+        continue;
+      }
+      failedReads += 1;
+    }
+    if (char === '`' && failedReads < readsLeft) {
+      const backquoted = readBackquoted(input, index);
+      if (backquoted !== null) {
+        delimiter += input.slice(index, backquoted + 1);
+        index = backquoted + 1;
+        continue;
+      }
+      failedReads += 1;
+    }
+    if (/[\s;&|()<>]/.test(char)) break;
+    delimiter += char;
+    index += 1;
   }
-  return { delimiter, end: index, quoted };
+  return { delimiter, end: index, quoted, failedReads };
 }
 
 // How many substitution reads inside a double quote may FAIL before the three
@@ -243,6 +384,15 @@ function shellWords(command) {
   // 從字流裡抽出來的 heredoc 內文，各自記得屬於哪一個 '<<'，好讓 commandTargets 只把它
   // 交還給 shell carrier。
   const heredocs = [];
+  // Heredoc delimiter WORDS this reader could not read: an unterminated quote, or
+  // a backslash with nothing after it. Kept as a list on `words` for exactly the
+  // reason `failedSubstitutionReads` is (R5-13): a budget or a failed read may
+  // decide what this scan COSTS, never what the gate ANSWERS. See
+  // UNREADABLE_HEREDOC_DELIMITER for what commandTargets does with them.
+  // 讀不出來的 heredoc 結束標記（引號沒收尾、或反斜線後面什麼都沒有）。與
+  // failedSubstitutionReads 掛在 words 上的理由相同：讀不到只能決定「成本」，不能決定
+  // 「答案」。
+  const unreadableHeredocDelimiters = [];
   const pendingHeredocs = [];
   const input = String(command || '');
   let word = '';
@@ -555,7 +705,13 @@ function shellWords(command) {
       const stripTabs = input[index + 2] === '-';
       pushWord(stripTabs ? '<<-' : '<<');
       const operatorIndex = words.length - 1;
-      const parsed = heredocDelimiter(input, index + (stripTabs ? 3 : 2));
+      const parsed = heredocDelimiter(
+        input,
+        index + (stripTabs ? 3 : 2),
+        MAX_FAILED_SUBSTITUTION_READS - failedSubstitutionReads,
+      );
+      failedSubstitutionReads += parsed.failedReads;
+      if (parsed.unreadable !== undefined) unreadableHeredocDelimiters.push(parsed.unreadable);
       pushWord(parsed.delimiter);
       pendingHeredocs.push({
         operatorIndex, delimiter: parsed.delimiter, stripTabs, quoted: parsed.quoted,
@@ -630,6 +786,11 @@ function shellWords(command) {
   // a duration -- a millisecond ceiling on this path measures the host.
   // 由 test-hooks.js 讀取：釘住這個預算的是「次數」而不是「時間」。
   Object.defineProperty(words, 'failedSubstitutionReads', { value: failedSubstitutionReads });
+  // Read by commandTargets (R5-15), the same way `failedSubstitutionReads` is.
+  // 由 commandTargets 讀取（R5-15），與 failedSubstitutionReads 同一套。
+  Object.defineProperty(
+    words, 'unreadableHeredocDelimiters', { value: unreadableHeredocDelimiters },
+  );
   return words;
 }
 
@@ -1224,6 +1385,28 @@ const UNJUDGEABLE_ENV_S = '\u0000env-s:';
 // 單，等於在描述一條他沒有寫的命令。動作只要讀得到就會被當成巢狀腳本掃描
 // （$HOME／$PWD／$TMPDIR 用的是 rm 操作元同一個函式），所以只有「文字要執行後才知道」時才會走到這裡。
 const UNREADABLE_TRAP_ACTION = '\u0000trap-action:';
+
+// A heredoc DELIMITER word this gate could not read (R5-15), with the same
+// discipline as the sentinels above -- written as an ESCAPE and not a raw byte,
+// for the install-hooks.sh reason spelled out at UNRESOLVED_TARGET -- and it needs
+// to be its own for the reason each of them does: the message. What could not be
+// read here is a REDIRECTION OPERAND, so the pipe/shell/URL-allowlist sentence
+// would describe a command the user did not write, and "cannot determine which
+// path this expands to" would point at an operand when the unreadable thing is the
+// word that says where the heredoc BODY ends.
+// It also has to exist at all, and that is the load-bearing half: an unterminated
+// quote in the delimiter made the old reader take the REST OF THE COMMAND as the
+// delimiter, which no line can ever match, so the body ran to end of input and
+// every scan in this file stopped seeing the command. Answering "allow" about text
+// nobody looked at is the same defect SUBSTITUTION_BUDGET_EXHAUSTED exists to
+// close, one reader over.
+// 讀不到的 heredoc 結束標記（R5-15）。與上面幾個 sentinel 同一套規矩（同樣寫成跳脫序列，理
+// 由見 UNRESOLVED_TARGET），而它必須自成一種的理由也一樣是訊息：這裡讀不到的是「重導向的操
+// 作元」，講 pipe／shell／網址清單會描述一條使用者沒寫的命令。它必須存在的理由則是：引號沒
+// 收尾時，舊讀法會把「命令剩下的部分」整段當成結束標記——那是任何一行都對不上的標記，內文因
+// 此吃到輸入結尾，本檔所有掃描從那裡開始什麼都看不到。對沒人看過的文字回答「放行」，與
+// SUBSTITUTION_BUDGET_EXHAUSTED 要關掉的是同一個缺陷，只差在換了一個 reader。
+const UNREADABLE_HEREDOC_DELIMITER = '\u0000heredoc-delimiter:';
 
 // A scan that ran out of failed-read budget (R5-13, r5-fix-better-rm-8). Same
 // discipline as the sentinels above, and it needs to be its own for the same
@@ -2150,6 +2333,21 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
     return scanned;
   };
   noteSubstitutionBudget(words);
+  // R5-15, and the same rule as the budget helper right above it: a delimiter this
+  // file could not read must not be answered as if the rest of the command had
+  // been read. Applied to BOTH shellWords call sites (this one and wordContext's),
+  // because the property is "a heredoc whose end we do not know", not "a heredoc
+  // in the top-level word stream".
+  // R5-15，與上面那個預算 helper 同一條規則：讀不出結束標記，就不能當作命令其餘部分已經讀
+  // 過。兩個 shellWords 呼叫端都套（這裡與 wordContext），因為性質是「不知道這段 heredoc 在
+  // 哪裡結束」，不是「頂層字流裡的 heredoc」。
+  const noteHeredocDelimiters = (scanned) => {
+    for (const spelling of scanned.unreadableHeredocDelimiters || []) {
+      targets.push(UNREADABLE_HEREDOC_DELIMITER + spelling);
+    }
+    return scanned;
+  };
+  noteHeredocDelimiters(words);
   const separators = new Set([';', '&', '|', '(', ')', '<', '>', '\n']);
   // Redirections (`<`, `>`) stay within a simple command; they are not command
   // terminators. The rm/rmdir argument scan must skip a redirection and its
@@ -2774,7 +2972,8 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
         // xargs' options that take a SEPARATE following word, and only those
         // (R5-14). This set decides where the command word is, so an entry that
         // eats one word too many walks past the shell and allows the deletion the
-        // rule exists to catch.
+        // rule exists to catch. LONG spellings only: the short ones are letters
+        // inside a cluster and live in the two sets below (R5-16).
         // NOT here, and the reason is the grammar rather than a policy: GNU
         // findutils spells `-i[replace-str]`, `-e[eof-str]` and `-l[max-lines]`
         // with an OPTIONAL, ATTACHED argument (`--replace[=…]`, `--eof[=…]`,
@@ -2797,7 +2996,8 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
         // stdin, and all three were ALLOWED. GNU's `--process-slot-var` is the
         // same shape.
         // xargs 裡「吃掉下一個字」的選項，而且只有這些（R5-14）。這個集合決定命令字在哪裡，
-        // 多吃一個字就會走過 shell、放行本該被擋的刪除。
+        // 多吃一個字就會走過 shell、放行本該被擋的刪除。這裡只放「長寫法」：短選項是「字母」，
+        // 由下面兩個集合處理（R5-16）。
         // 不在這裡的：GNU 的 `-i[replace-str]`／`-e[eof-str]`／`-l[max-lines]`（以及三個長寫
         // 法）引數是「選填且相連」的，裸寫時一個字都不吃。它們還在集合裡時，`xargs -i sh -c`
         // 會把 `sh` 吞掉、停在 `-c`、找不到 carrier 而放行，而 GNU xargs 真的會執行 stdin 那
@@ -2806,11 +3006,47 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
         // 新加的：BSD 的 `-J`／`-R`／`-S` 原本完全不在表裡，走訪會停在它們的「值」上——這三個
         // 在本機用 marker 實測，`-R 3 -I{} sh -c '{}'`、`-S 5000 -I{} sh -c '{}'`、
         // `-J % -I{} sh -c '{}'` 都真的執行了從 stdin 進來的腳本，而且全部被放行。
-        const optionsWithValue = new Set([
-          '-a', '--arg-file', '-d', '--delimiter', '-E',
-          '-I', '-J', '-L', '-n', '--max-args', '-P', '--max-procs',
-          '-R', '-S', '-s', '--max-chars', '--process-slot-var',
+        const longOptionsWithValue = new Set([
+          '--arg-file', '--delimiter', '--max-args', '--max-procs', '--max-chars',
+          '--process-slot-var',
         ]);
+        // R5-16: SHORT options are letters, and they come in CLUSTERS. `-0I{}` is
+        // one word holding two of them, and it is the ordinary spelling -- the
+        // fully separated `-0 -I{}` is the unusual one. The walk above did not
+        // take a cluster apart, so no replace string was recorded for `-0I{}`,
+        // the `-c '{}'` after it looked like a script written on the command line,
+        // and `echo 'rm -rf /etc' | xargs -0I{} sh -c '{}'` was ALLOWED while its
+        // separated twin was refused. Measured 2026-09-05 with a touch marker on
+        // this host (BSD xargs) under /bin/bash 3.2.57, bash 5.3.15 and /bin/sh:
+        // `-0I{}`, `-tI{}`, `-rI{}`, `-t0I{}`, `-rtI{}`, `-0I %`, `-0J%`,
+        // `-p0I{}`, `-tp0I{}`, `-0I{} -t`, `-0E EOF` and `-0P 4` all really ran a
+        // payload that arrived on stdin. `-0i{}` and `-xI{}` could not be run
+        // here -- BSD rejects `-i` outright and refuses `-x` without `-n`/`-s`,
+        // while GNU findutils accepts both, and this repository ships to Linux.
+        // The grammar, not a list of spellings: inside a cluster every character
+        // is an option, and the FIRST one that takes a value swallows the rest of
+        // the cluster as that value -- or, when the cluster ends there, the next
+        // word. Measured on this host, which is where the rule comes from:
+        // `xargs -0P2I{}` answers `xargs: -P 2I{}: invalid` (the remainder became
+        // -P's value) and `xargs -0EX I{} sh -c '{}'` tries to exec `I{}` (X
+        // became -E's value, so the command word is the next one).
+        // R5-16：短選項是「字母」，而且會串在一起。`-0I{}` 是一個字裡有兩個選項，而且那才是
+        // 一般的寫法（完全分開的 `-0 -I{}` 反而少見）。上面的走訪不拆串，於是 `-0I{}` 的替換
+        // 字串沒被記下、後面的 `-c '{}'` 看起來像是寫在命令列上的腳本，整條命令被放行——而它
+        // 分開寫的雙胞胎會被擋。本機（BSD xargs）用 touch marker 在三個 shell 實測，十二種串
+        // 寫法真的會執行從 stdin 進來的 payload。`-0i{}` 與 `-xI{}` 在本機跑不起來（BSD 拒絕
+        // `-i`，且 `-x` 需要搭配 `-n`/`-s`），但 GNU findutils 兩個都收，而本專案有出貨到
+        // Linux。規則是文法不是拼法清單：串裡每個字元都是一個選項，第一個「要值」的字元把串
+        // 的剩餘部分當成它的值，串到此為止時就吃下一個字。
+        const shortOptionsWithValue = new Set([
+          'a', 'd', 'E', 'I', 'J', 'L', 'n', 'P', 'R', 'S', 's',
+        ]);
+        // GNU's optional-argument short options: the value is attached or absent,
+        // and either way the NEXT WORD is never eaten. `-i` additionally means the
+        // replace string `{}` when written bare -- "the effect is the same as
+        // -I{}", in the findutils manual's own words.
+        // GNU 的「選填且相連」短選項：值要嘛相連、要嘛沒有，兩種都不會吃下一個字。
+        const shortOptionsWithOptionalValue = new Set(['i', 'e', 'l']);
         while (i < words.length && words[i].startsWith('-')) {
           // xargs' REPLACE STRING, observed on the way past without changing how
           // many words each option consumes -- the walk above is what decides
@@ -2820,36 +3056,64 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
           // an argument, and what runs is the stdin line, not the `{}` on the
           // command line (measured, marker file, BSD xargs under bash 5.3.15 and
           // 3.2.57). Both separated (`-I {}`) and attached (`-I{}`) spellings,
-          // plus GNU's `--replace=` and `-i` -- this repository ships to Linux
-          // (README.md:7, CI on ubuntu-24.04), where those two exist.
+          // clustered (`-0I{}`) as well as alone, plus GNU's `--replace=` and
+          // `-i` -- this repository ships to Linux (README.md:7, CI on
+          // ubuntu-24.04), where those two exist.
           // xargs 的「替換字串」，只是順路記下來，不改變每個選項吃幾個字（命令字在哪裡由上面
           // 那段走訪決定，不歸這條規則動）。需要它是因為 `-I{}` 會讓 `-c` 的引數變成「佔位
-          // 符」而不是腳本：真正跑的是 stdin 那一行（實測有 marker）。分開與相連的寫法都認，
-          // 另外 GNU 的 `--replace=`／`-i` 也認，因為本專案有出貨到 Linux。
+          // 符」而不是腳本：真正跑的是 stdin 那一行（實測有 marker）。分開、相連、串在一起的
+          // 寫法都認，另外 GNU 的 `--replace=`／`-i` 也認，因為本專案有出貨到 Linux。
           const option = words[i];
-          // `-I` and BSD's `-J` take their replace string as the NEXT word; the
-          // optional-argument spellings (`-i`, `--replace`) written bare take no
-          // word at all and mean `{}` -- "the effect is the same as -I{}", in the
-          // findutils manual's own words. Reading `words[i + 1]` for those was
-          // the same modelling error as the option table above, one line apart:
-          // it named `sh` as the replace string AND ate it.
-          // `-I` 與 BSD 的 `-J` 用「下一個字」當替換字串；`-i`／`--replace` 裸寫時不吃字，
-          // 意思就是 `{}`（findutils 手冊原話：效果等同 `-I{}`）。對它們去讀下一個字，與上面
-          // 那張表是同一個建模錯誤：把 `sh` 當成替換字串，還把它吃掉。
-          if (option === '-I' || option === '-J') {
-            xargsReplaceString = (i + 1 < words.length ? words[i + 1] : '') || '{}';
-          } else if (option === '-i' || option === '--replace') {
-            xargsReplaceString = '{}';
-          } else if (option.startsWith('-J') && option.length > 2) {
-            xargsReplaceString = option.slice(2);
-          } else if (option.startsWith('--replace=')) {
-            xargsReplaceString = option.slice('--replace='.length) || '{}';
-          } else if (option.startsWith('-I') && option.length > 2) {
-            xargsReplaceString = option.slice(2);
-          } else if (option.startsWith('-i') && option.length > 2 && !option.startsWith('-i-')) {
-            xargsReplaceString = option.slice(2);
+          let consumesNextWord = false;
+          if (option.startsWith('--')) {
+            if (option === '--replace') xargsReplaceString = '{}';
+            else if (option.startsWith('--replace=')) {
+              xargsReplaceString = option.slice('--replace='.length) || '{}';
+            }
+            consumesNextWord = longOptionsWithValue.has(option);
+          } else {
+            for (let letter = 1; letter < option.length; letter += 1) {
+              const flag = option[letter];
+              const rest = option.slice(letter + 1);
+              if (shortOptionsWithValue.has(flag)) {
+                // The rest of the cluster IS the value; an empty rest takes the
+                // next word instead. `-I`/`-J` is where that value is the replace
+                // string, and an empty one means `{}`, the same default the
+                // separated spelling has always had.
+                // ...but only while a command word is still left after it. This
+                // is a deliberate OVER-refusal, in the same spirit as `-J`'s one
+                // right below: eating the next word when NOTHING but options
+                // follows it would move the walk past the last word that could be
+                // the command, and this gate would then answer "no command here"
+                // about a line whose only command-shaped word it just swallowed.
+                // `xargs -0I rm -rf` is such a line -- real xargs rejects it
+                // (`xargs: invalid option -- f`, measured on this host, nothing
+                // runs), so refusing it costs no working command, while allowing
+                // it would be the gate becoming more permissive than it was.
+                // `-0I % sh -c %` is the shape that REQUIRES the word be eaten
+                // (measured executing), and it still is: `sh` follows.
+                // ……但只在「後面還留著一個命令字」時才吃。這是刻意的過度拒絕，與下面 `-J` 那
+                // 個同一種：後面除了選項什麼都沒有時還把下一個字吃掉，等於把「唯一可能是命令
+                // 的字」吞掉，然後對這條命令回答「這裡沒有命令」。`xargs -0I rm -rf` 就是這種
+                // 行——真的 xargs 會拒絕它（本機實測 `invalid option -- f`，什麼都不會跑），
+                // 所以擋它不會擋掉任何跑得起來的命令；放行它才是讓閘門變得比原本寬。
+                const nextWord = i + 1 < words.length ? words[i + 1] : '';
+                const commandWordFollows = words.slice(i + 2).some((word) => !word.startsWith('-'));
+                const value = rest !== '' ? rest : nextWord;
+                if (rest === '' && commandWordFollows) consumesNextWord = true;
+                if (flag === 'I' || flag === 'J') xargsReplaceString = value || '{}';
+                break;
+              }
+              if (shortOptionsWithOptionalValue.has(flag)) {
+                // Optional AND attached: the rest of the cluster is the value if
+                // there is one, and nothing is eaten either way.
+                if (flag === 'i') xargsReplaceString = rest !== '' ? rest : '{}';
+                break;
+              }
+              // A valueless flag; keep walking the cluster.
+            }
           }
-          i += optionsWithValue.has(words[i]) ? 2 : 1;
+          i += consumesNextWord ? 2 : 1;
         }
         executable = '';
         continue;
@@ -2973,7 +3237,7 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
     // 之一的預算也花完，所以單獨刪掉這一行在今天是等價突變，沒有測試殺得掉——記在這裡，而不
     // 是假裝有。留著它，是因為「漏斗一定也會觸發」是今天呼叫圖的性質、不是保證，而 R5-13 的
     // 由來正是本檔案曾經相信過一次「不可能發生」的論證。
-    const contextWords = noteSubstitutionBudget(shellWords(text));
+    const contextWords = noteHeredocDelimiters(noteSubstitutionBudget(shellWords(text)));
     const contextOperators = contextWords.operatorTokens || [];
     const contextClosing = new Map();
     const contextOpen = [];
@@ -4401,6 +4665,31 @@ function unreadableTrapActionDenial(word, isCopilot, isAntigravity, isCursor, is
   return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
 }
 
+// The refusal for a heredoc delimiter this gate could not read (R5-15). Its own
+// wording for the reason recorded at UNREADABLE_HEREDOC_DELIMITER: the thing that
+// could not be read is the word that says where the heredoc BODY ends, and every
+// other "could not read" message names something else entirely. The way out is
+// about the DELIMITER and not about a deletion, for the same reason the budget
+// refusal's is: this gate is not claiming to have found one.
+// 「讀不到 heredoc 結束標記」的拒絕（R5-15）。自成一種訊息的理由記在
+// UNREADABLE_HEREDOC_DELIMITER：讀不到的是「決定內文在哪裡結束」的那個字。出路講的是結束
+// 標記而不是刪除——閘門沒有宣稱找到刪除。
+function unreadableHeredocDelimiterDenial(spelling, isCopilot, isAntigravity, isCursor, isGrok) {
+  const zh = `拒絕執行：這條命令裡有一個 heredoc，它的結束標記以 ${spelling} 開頭而到輸入結尾`
+    + `都沒有收尾，所以這道閘門算不出內文在哪一行結束——結束標記之後的每一條命令，`
+    + `包括可能寫在那裡的刪除，這道閘門一條都沒有讀到`
+    + `（這不是說一定有，是說這道閘門沒有讀到）。規則：unreadable heredoc delimiter。`
+    + `繞法：把結束標記的引號補完（cat <<'EOF' … EOF），或改用不加引號的標記。`;
+  const en = `Refused to run: this command opens a heredoc whose delimiter starts with`
+    + ` ${spelling} and never closes before the end of the input, so this gate cannot work out`
+    + ` which line ends the body -- which means every command AFTER the delimiter, including any`
+    + ` deletion written there, went unread (this does not say one is there; it says this gate`
+    + ` did not read it).`
+    + ` Rule: unreadable heredoc delimiter.`
+    + ` Workaround: close the quote on the delimiter (cat <<'EOF' … EOF), or write it unquoted.`;
+  return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
+}
+
 // The refusal for a scan that ran out of failed-read budget (R5-13). Its own
 // wording for the reason recorded at SUBSTITUTION_BUDGET_EXHAUSTED: the other
 // three "could not read" messages each name the THING they could not read -- a
@@ -4536,6 +4825,7 @@ function evaluate(payload, env = process.env) {
       || target.startsWith(UNJUDGEABLE_ENV_S)
       || target.startsWith(UNREADABLE_TRAP_ACTION)
       || target.startsWith(SUBSTITUTION_BUDGET_EXHAUSTED)
+      || target.startsWith(UNREADABLE_HEREDOC_DELIMITER)
     ) continue;
     const reason = protectedReason(target, cwd, home, extraDirs);
     if (reason) return denial(reason, isCopilot, isAntigravity, isCursor, isGrok);
@@ -4578,6 +4868,20 @@ function evaluate(payload, env = process.env) {
     if (!target.startsWith(SUBSTITUTION_BUDGET_EXHAUSTED)) continue;
     return substitutionBudgetDenial(
       target.slice(SUBSTITUTION_BUDGET_EXHAUSTED.length), isCopilot, isAntigravity, isCursor,
+      isGrok,
+    );
+  }
+  // Beside the budget refusal and above the other three, for the reason recorded
+  // there: those three describe something this gate DID read and could not
+  // resolve, while these two say a stretch of the command was never read at all.
+  // Below the budget one because the budget refusal is the more general statement
+  // -- it covers a scan that stopped everywhere, this one a body that never ended.
+  // 與預算拒絕並列、排在另外三種之前，理由記在那裡：那三種是「讀到了但解不開」，這兩種是
+  // 「有一段根本沒讀」。排在預算之後，因為預算那句話涵蓋得更廣。
+  for (const target of targets) {
+    if (!target.startsWith(UNREADABLE_HEREDOC_DELIMITER)) continue;
+    return unreadableHeredocDelimiterDenial(
+      target.slice(UNREADABLE_HEREDOC_DELIMITER.length), isCopilot, isAntigravity, isCursor,
       isGrok,
     );
   }
