@@ -454,7 +454,26 @@ function shellWords(command) {
     } else if (char === '$' && input[index + 1] === "'") {
       quote = 'ansi-c';
       index += 1;
-    } else if (char === '$' && input[index + 1] === '(') {
+    } else if (
+      char === '$' && input[index + 1] === '('
+      // The TOP-LEVEL twin of the in-quote arm above spends the SAME budget, and
+      // it has to: its failure path is character-for-character identical (scan to
+      // end of input, return null, caller advances one character), so N unclosed
+      // `$(` outside a quote cost O(N x len) exactly as they did inside one.
+      // Measured before this guard, through the real stdin entry point:
+      // `echo ` + `$(` x n + ` ; rm -rf /etc` took 820 ms at 16 KB, 2,870 ms at
+      // 32 KB and 11,458 ms at 64 KB -- past the live 5,000 ms timeout, where the
+      // hook makes NO decision and the deletion after the `;` runs unjudged. The
+      // in-quote spelling was HALF that (382/1,428/5,678 ms) because only one of
+      // the two sites was unbounded there. One counter for all four arms: a
+      // second budget would let a command spend 64 in each.
+      // 頂層這個臂與上面雙引號那個共用同一份預算：它的失敗路徑一模一樣（掃到輸入結尾、回
+      // null、呼叫端只前進一個字元），所以引號外 N 個不收尾的 `$(` 同樣是 O(N x len)。
+      // 加這道守衛之前實測：16 KB 820 ms、32 KB 2,870 ms、64 KB 11,458 ms，已經超過 live
+      // 的 5,000 ms 逾時，而逾時的 hook 不做任何裁決，`;` 後面的刪除就不受判定地執行。
+      // 四個臂共用一份計數：分兩份會讓同一條命令在每一份各花 64 次。
+      && failedSubstitutionReads < MAX_FAILED_SUBSTITUTION_READS
+    ) {
       // A command substitution belongs to the word it sits in, exactly like a
       // parameter expansion. Splitting it on the parentheses made
       // `$(which rm) -rf /` tokenize as the word `$` followed by a `(`
@@ -467,6 +486,7 @@ function shellWords(command) {
         index = substitution.end;
       } else {
         // Unbalanced '(': keep the old character-by-character behaviour.
+        failedSubstitutionReads += 1;
         word += char;
       }
     } else if (char === '#' && wasAtWordStart) {
@@ -731,6 +751,57 @@ function readParenthesized(input, openIndex) {
 function commandSubstitutions(command, noCommentSpans = []) {
   const input = String(command || '');
   const commands = [];
+  // The same failed-read budget the tokenizer spends, for the same reason and on
+  // the same shape -- this scanner re-reads the RAW command text after
+  // tokenizing, so the tokenizer's per-call counter cannot reach it and its two
+  // readParenthesized call sites below carried the whole `$(` quadratic on their
+  // own. Measured before this counter, real stdin entry point, `echo "` + `$(` x n
+  // + `" ; rm -rf /etc`: 382 ms at 16 KB, 1,428 ms at 32 KB, 5,678 ms at 64 KB,
+  // and the cost was ATTRIBUTED with an instrumented copy rather than assumed --
+  // at 16 KB the tokenizer spent its 64 failed reads and THIS function spent
+  // 8,192, scanning 33.7 M characters. The `<(` site four lines below has the
+  // identical failure path (785 ms / 2,965 ms at 16 KB / 32 KB) and shares the
+  // counter. Only FAILED reads spend it, so every command whose substitutions
+  // close -- every real one -- never reaches it.
+  // What a spent budget costs, stated rather than hidden: past the cap a `$(`
+  // that WOULD have closed is no longer read, so a substitution after 64 unclosed
+  // ones is not returned and its body is not scanned.
+  // THIS COMMENT USED TO SAY that reaching the cap needs "64 openers that never
+  // balance anywhere in the rest of the input, which is a syntax error in every
+  // shell this file models (`bash -n` refuses it), so no command that reaches the
+  // cap is a command that runs". That was FALSE, and the counter-example is
+  // twenty lines below in this same function: an UNQUOTED heredoc body is
+  // deliberately kept in `scannable` because its substitutions really do run, so
+  // this scanner reads that text while bash treats it as ordinary DATA. 64 x `$(`
+  // in a heredoc body is not a syntax error -- `bash -n` accepts it, bash prints
+  // a NON-fatal `bad substitution: no closing )` at run time and carries on to
+  // the next line. Measured 2026-09-05 (r5-validate-better-rm-7): `cat <<EOF` +
+  // 64 x `$(` + `EOF` + `echo $(rm -rf /etc)` was ALLOWED and really removed the
+  // target under bash 5.3.15, /bin/bash 3.2.57 and /bin/sh; 63 openers denied and
+  // 64 allowed. The general rule this file may not forget again: a bash-LITERAL
+  // context that this gate still scans is scannable text for the gate and inert
+  // text for the shell, so "the padding would be a syntax error" is never an
+  // argument for a state being unreachable here.
+  // So a spent budget is no longer silence: commandTargetsScan reads this counter
+  // and pushes SUBSTITUTION_BUDGET_EXHAUSTED, which refuses the whole invocation
+  // (R5-13). The counter is what makes that possible, which is why it is exposed.
+  // 與 tokenizer 同一份失敗讀取預算、同樣的理由、同樣的形狀：這個掃描器在斷詞之後重讀原始
+  // 文字，tokenizer 的計數器碰不到它，`$(` 的平方級成本整份都由這裡的兩個 readParenthesized
+  // 站點扛著（實測 16 KB 382 ms、32 KB 1,428 ms、64 KB 5,678 ms；用加了計數器的複本歸因，
+  // 16 KB 時這個函式失敗了 8,192 次、掃了 3,370 萬個字元）。只有「失敗」的讀取會花預算。
+  // 代價講明白：超過上限之後，「本來讀得完」的 `$(` 不再被讀出來。
+  // 這段註解原本寫著「要走到那一步，輸入裡得有 64 個到結尾都不收尾的開頭，而那在本檔案建模
+  // 的每一種 shell 裡都是語法錯誤，所以走到上限的命令不是會執行的命令」——那句話是錯的，
+  // 反例就在同一個函式往下二十行：未加引號的 heredoc 內文「刻意」留在 scannable 裡（因為它
+  // 裡面的替換是真的會執行），所以這個掃描器會讀那段文字，而 bash 只把它當資料。heredoc 內
+  // 文裡的 64 個 `$(` 完全不是語法錯誤：`bash -n` 接受，bash 執行時只印一則非致命的
+  // `bad substitution`，然後繼續跑下一行（2026-09-05 實測：`cat <<EOF` + 64 個 `$(` + `EOF`
+  // + `echo $(rm -rf /etc)` 被放行且真的刪掉目標，63 個拒絕、64 個放行）。
+  // 通則，別再忘記：任何「bash 當成字面資料、而這道閘門仍然會掃」的脈絡，都是「掃得到但不
+  // 是語法」的文字，所以「那樣寫會是語法錯誤」永遠不能拿來論證某個狀態不可能發生。
+  // 因此預算花完不再等於沉默：commandTargetsScan 會讀這個計數並推入
+  // SUBSTITUTION_BUDGET_EXHAUSTED，整條命令直接拒絕（R5-13）。計數器對外可見正是為了這件事。
+  let failedSubstitutionReads = 0;
   const inNoCommentSpan = (i) => noCommentSpans.some(([a, b]) => i >= a && i < b);
   let quote = '';
   let escaped = false;
@@ -788,7 +859,25 @@ function commandSubstitutions(command, noCommentSpans = []) {
       continue;
     }
     if (char === '$' && input[i + 1] === '(') {
-      const nested = readParenthesized(input, i + 1);
+      // The budget test is INSIDE the branch, not in its condition: the branch
+      // ends in `continue`, and letting a `$` fall through to the bottom of the
+      // loop instead would change nothing here but would change it for the `<(`
+      // sibling below, whose character IS in the word-start class. Keeping both
+      // branches shaped the same way means a spent budget skips the READ and
+      // nothing else.
+      // 預算判斷放在分支「裡面」而不是條件上：這個分支以 continue 結尾，改成落到迴圈底部對
+      // 這裡沒差，對下面 `<(` 那個兄弟站點卻有（它的字元本身就在字首類別裡）。預算用完只會
+      // 少做那一次讀取，不會改變別的事。
+      let nested = null;
+      if (failedSubstitutionReads < MAX_FAILED_SUBSTITUTION_READS) {
+        nested = readParenthesized(input, i + 1);
+        // Only a read that was ATTEMPTED and FAILED spends budget. Incrementing
+        // outside this guard would keep counting after the cap and turn the
+        // counter into a length measurement, which is the one thing the row that
+        // pins it (`half === full`) exists to catch.
+        // 只有「真的試了而且失敗」的讀取才花預算。
+        if (!nested) failedSubstitutionReads += 1;
+      }
       if (nested) {
         // `$((` is ARITHMETIC, not a command substitution wrapping a subshell.
         // readParenthesized counts the inner '(' too, so for `$(( expr ))` it
@@ -827,7 +916,18 @@ function commandSubstitutions(command, noCommentSpans = []) {
       continue;
     }
     if ((char === '<' || char === '>') && input[i + 1] === '(') {
-      const nested = readParenthesized(input, i + 1);
+      // The sibling of the `$(` site above: same reader, same scan-to-EOF failure
+      // path, same one-character advance, and it was measured quadratic on its
+      // own (`echo ` + `<(` x n + ` ; rm -rf /etc`: 785 ms at 16 KB, 2,965 ms at
+      // 32 KB). It shares the counter -- fixing only the `$(` half would have
+      // left the shape one character away.
+      // `$(` 站點的兄弟：同一個 reader、同一條失敗路徑、同樣只前進一個字元，自己就量得出平方
+      // 級。共用同一份計數；只修 `$(` 那一半，形狀只要改一個字元就繞過去了。
+      let nested = null;
+      if (failedSubstitutionReads < MAX_FAILED_SUBSTITUTION_READS) {
+        nested = readParenthesized(input, i + 1);
+        if (!nested) failedSubstitutionReads += 1;
+      }
       if (nested) {
         commands.push(nested.command);
         i = nested.end;
@@ -853,6 +953,12 @@ function commandSubstitutions(command, noCommentSpans = []) {
     }
     if (!quote && /[\s;&|()<>]/.test(char)) atWordStart = true;
   }
+  // Read by test-hooks.js, exactly like shellWords' counter and for the same
+  // reason: what pins this budget is a COUNT, not a duration -- a millisecond
+  // ceiling on this path measures the host, not the gate. Non-enumerable, so an
+  // array of substitutions is still just an array everywhere else.
+  // 由 test-hooks.js 讀取，與 shellWords 的計數器同理：釘住這份預算的是「次數」而不是時間。
+  Object.defineProperty(commands, 'failedSubstitutionReads', { value: failedSubstitutionReads });
   return commands;
 }
 
@@ -1098,6 +1204,69 @@ const UNREADABLE_PIPE_TARGET = '\u0000pipe-target:';
 // 不是刪除完全由 X 決定。沒有建模的跳脫、以及沒有收掉的引號也一樣——切出來的字都是猜的，
 // 而猜不是答案。
 const UNJUDGEABLE_ENV_S = '\u0000env-s:';
+
+// A `trap` ACTION this gate could not read (R5-c, r5-fix-better-rm-7). Same
+// discipline as the sentinels above -- written as an ESCAPE and not a raw byte,
+// for the install-hooks.sh reason spelled out at UNRESOLVED_TARGET -- and it
+// needs to be its OWN sentinel for the reason each of them does: the message.
+// unscannableScriptDenial states as fact that the command feeds a script into a
+// shell through a pipe or a process substitution and offers
+// PIPED_SCRIPT_EXCEPTIONS as the way out; for `trap "$CMD" EXIT` there is no
+// pipe, no URL, and the thing that could not be read is an ARGUMENT. Sending
+// that user to a URL allowlist describes a command they did not write, which is
+// the defect these separate messages exist to prevent. A trap action is scanned
+// as a nested script whenever this gate CAN read it -- $HOME/$PWD/$TMPDIR are
+// resolved by exactly the function an rm operand uses -- so this sentinel is
+// reached only when the action's TEXT is unknown before the command runs.
+// 「讀不到的 trap 動作」（R5-c）。與上面幾個 sentinel 同一套規矩（同樣寫成足以避開原始位元組的跳脱序列，
+// 理由見 UNRESOLVED_TARGET），而它必須自成一種的理由也一樣是訊息：
+// `trap "$CMD" EXIT` 沒有 pipe、沒有網址，讀不到的是一個「引數」，叫使用者去改網址允許清
+// 單，等於在描述一條他沒有寫的命令。動作只要讀得到就會被當成巢狀腳本掃描
+// （$HOME／$PWD／$TMPDIR 用的是 rm 操作元同一個函式），所以只有「文字要執行後才知道」時才會走到這裡。
+const UNREADABLE_TRAP_ACTION = '\u0000trap-action:';
+
+// A scan that ran out of failed-read budget (R5-13, r5-fix-better-rm-8). Same
+// discipline as the sentinels above, and it needs to be its own for the same
+// reason each of them does: what could not be read here is not a path, not a
+// piped script and not an argument -- it is the REST OF THE COMMAND. Past
+// MAX_FAILED_SUBSTITUTION_READS the readers stop reading, so a `$( ... )` after
+// the padding is not returned and its body is never scanned; before this sentinel
+// that state produced no refusal at all, and `cat <<EOF` + 64 x `$(` + `EOF` +
+// `echo $(rm -rf /etc)` was ALLOWED while bash really ran the deletion (measured
+// 2026-09-05 under bash 5.3.15, /bin/bash 3.2.57 and /bin/sh; 63 openers denied,
+// 64 allowed). The value carried is the COUNT of unreadable openers, because that
+// number is the one thing the user can act on: it says how much of their own
+// command this gate could not see.
+// This is the fail-CLOSED half of the budget the R5-a fix added. The budget still
+// bounds the cost -- a spent budget skips the READ, exactly as before -- and this
+// sentinel is what stops "skipped the read" from also meaning "answered as if it
+// had read it".
+// A scan is exhausted at EXACTLY the cap and never past it: the counters are only
+// incremented inside the guard that tests them, so `>= MAX` and `=== MAX` are the
+// same question, and `>=` is written because a future site that increments
+// elsewhere must still be caught.
+// (SCAN, NOT SYNTAX) `$(( ... ))`'s recursive commandSubstitutions() call keeps a
+// counter of its own and is deliberately NOT wired to this sentinel: it runs only
+// after readParenthesized balanced the whole `$(( ... ))`, and readParenthesized
+// counts a `$(` inside a double quote as depth exactly as it counts an unquoted
+// one, so padding that would spend the inner budget makes the OUTER read fail and
+// is recorded by the outer counter instead. test-hooks.js pins that -- it is a
+// measured property of this file's own reader, not a claim about shells.
+// 「掃描把失敗讀取的預算用完了」（R5-13）。與上面幾個 sentinel 同一套規矩，而它必須自成一種
+// 的理由也一樣：這裡讀不到的既不是路徑、不是管線腳本、也不是某個引數，而是「命令剩下的部
+// 分」。超過上限之後 reader 就不再讀，填充後面的 `$( ... )` 不會被回傳、內文也不會被掃；在
+// 這個 sentinel 之前，那個狀態根本不產生任何拒絕（實測：`cat <<EOF` + 64 個 `$(` + `EOF` +
+// `echo $(rm -rf /etc)` 被放行，而 bash 真的執行了刪除；63 個拒絕、64 個放行）。帶的值是
+// 「讀不出來的開頭有幾個」，因為那是使用者唯一能據以行動的數字。
+// 這是 R5-a 那份預算的 fail-closed 那一半：預算照舊只是「少做那一次讀取」，而這個 sentinel
+// 讓「少讀了」不再同時代表「當作讀過了」。
+// 計數只在「測試它的那道守衛裡面」遞增，所以 `>= MAX` 與 `=== MAX` 是同一個問題；寫 `>=` 是
+// 為了讓將來在別處遞增的站點一樣會被接住。
+// `$(( ... ))` 的遞迴刻意不接這個 sentinel：它只有在 readParenthesized 把整段配對成功之後才
+// 會跑，而它連雙引號裡的 `$(` 都算深度，所以會花掉內層預算的填充一定先讓外層讀取失敗、由外
+// 層計數器記下來。test-hooks.js 有釘住這一點——那是本檔案自己 reader 的實測性質，不是對
+// shell 的臆測。
+const SUBSTITUTION_BUDGET_EXHAUSTED = '\u0000substitution-budget:';
 
 // The install routes exempted from the rule above, as raw URL text prefixes.
 // Every entry is scheme + host + owner/repo and MUST end with '/': a bare host
@@ -1954,6 +2123,33 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
   // （`{`、`}`、`if` … 是「字」不是運算子，加了引號在那裡本來就已經是普通操作元）。
   const operatorAt = (index, set) => operatorTokens[index] === true && set.has(words[index]);
   const targets = [];
+  // R5-13: EVERY failed-read budget in this file fails CLOSED, through one
+  // helper, applied at every site that spends one. A budget bounds what a scan
+  // may cost; it must not also decide what the gate answers. Past the cap the
+  // readers stop reading, so a `$( ... )` after the padding is never returned and
+  // its body is never scanned -- and until this helper existed, that produced no
+  // refusal at all: `cat <<EOF` + 64 x `$(` + `EOF` + `echo $(rm -rf /etc)` was
+  // ALLOWED and really removed the target (measured 2026-09-05).
+  // One helper rather than four copies of the test, for the reason this file
+  // gives everywhere else: the copies are what drift. Every call that spends a
+  // budget in this scan goes through it -- shellWords here, commandSubstitutions
+  // over `scannable`, and the two inside the producer/carrier classifiers below
+  // -- and each of those is measurably reachable on its own (test-hooks.js pins
+  // one row per site). A sentinel pushed here refuses the WHOLE invocation, not
+  // just the segment: the part of the command this gate did not read is not
+  // scoped to the segment the padding sat in.
+  // R5-13：本檔案「每一份」失敗讀取預算都 fail-closed，統一走這一個 helper。預算界的是成本，
+  // 不該連「閘門要回答什麼」也一起決定。上限之後 reader 不再讀，填充後面的 `$( ... )` 不會被
+  // 回傳、內文也不會被掃——而在這個 helper 出現之前，那個狀態不產生任何拒絕（實測：上面那條
+  // 命令被放行且真的刪掉目標）。寫成一個 helper 而不是四份相同的判斷，理由與本檔案其他地方
+  // 一樣：會走鐘的永遠是抄出來的那幾份。
+  const noteSubstitutionBudget = (scanned) => {
+    if (scanned.failedSubstitutionReads >= MAX_FAILED_SUBSTITUTION_READS) {
+      targets.push(SUBSTITUTION_BUDGET_EXHAUSTED + scanned.failedSubstitutionReads);
+    }
+    return scanned;
+  };
+  noteSubstitutionBudget(words);
   const separators = new Set([';', '&', '|', '(', ')', '<', '>', '\n']);
   // Redirections (`<`, `>`) stay within a simple command; they are not command
   // terminators. The rm/rmdir argument scan must skip a redirection and its
@@ -2306,7 +2502,9 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
   const unquotedBodySpans = (words.heredocs || [])
     .filter((entry) => !entry.quoted)
     .map((entry) => [entry.bodyStart, entry.bodyEnd]);
-  const substitutions = commandSubstitutions(scannable, unquotedBodySpans);
+  const substitutions = noteSubstitutionBudget(
+    commandSubstitutions(scannable, unquotedBodySpans),
+  );
   if (substitutions.length > 0) {
     if (depth >= 8) targets.push('/');
     else {
@@ -2337,6 +2535,11 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
     // Set when a wrapper hands the command its operands on stdin (xargs), where
     // the paths are unknowable before the command runs.
     let stdinCompletesOperands = false;
+    // xargs' `-I`/`-i`/`--replace` string, when one was given. Null means the
+    // command line carried none, in which case xargs APPENDS the stdin words
+    // instead of substituting them.
+    // xargs 的替換字串（沒有就是 null，那時 xargs 是把 stdin 的字「接在後面」）。
+    let xargsReplaceString = null;
     while (i < words.length && !operatorAt(i, separators)) {
       while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i += 1;
       if (i >= words.length || operatorAt(i, separators)) break;
@@ -2568,12 +2771,84 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
         // 記住它的操作元會由 stdin 補上——那是前置閘門讀不到的東西。
         stdinCompletesOperands = true;
         i += 1;
+        // xargs' options that take a SEPARATE following word, and only those
+        // (R5-14). This set decides where the command word is, so an entry that
+        // eats one word too many walks past the shell and allows the deletion the
+        // rule exists to catch.
+        // NOT here, and the reason is the grammar rather than a policy: GNU
+        // findutils spells `-i[replace-str]`, `-e[eof-str]` and `-l[max-lines]`
+        // with an OPTIONAL, ATTACHED argument (`--replace[=…]`, `--eof[=…]`,
+        // `--max-lines[=…]` likewise), so a bare `-i` consumes nothing at all.
+        // While they were in this set, `echo 'rm -rf /etc' | xargs -i sh -c '{}'`
+        // swallowed `sh`, landed on `-c`, found no carrier and was ALLOWED, while
+        // GNU xargs really runs `sh -c '<the stdin line>'`. The asymmetry that
+        // exposed it: the attached `--replace={}` -- identical semantics -- was
+        // refused all along. Grammar checked against the findutils manual
+        // (man7.org/linux/man-pages/man1/xargs.1.html, 2026-09-05); it could not
+        // be executed here, because this host's BSD xargs rejects all three
+        // outright (`xargs: invalid option -- i`, measured), which also makes
+        // refusing them fail-closed on both platforms.
+        // ADDED here, and these are not theoretical: BSD's `-J replstr`,
+        // `-R replacements` and `-S replsize` take a mandatory separate word and
+        // were missing entirely, so the walk stopped ON the value. Measured on
+        // this host with a marker file under bash 5.3.15 and /bin/bash 3.2.57:
+        // `-R 3 -I{} sh -c '{}'`, `-S 5000 -I{} sh -c '{}'` and
+        // `-J % -I{} sh -c '{}'` all really executed a payload that arrived on
+        // stdin, and all three were ALLOWED. GNU's `--process-slot-var` is the
+        // same shape.
+        // xargs 裡「吃掉下一個字」的選項，而且只有這些（R5-14）。這個集合決定命令字在哪裡，
+        // 多吃一個字就會走過 shell、放行本該被擋的刪除。
+        // 不在這裡的：GNU 的 `-i[replace-str]`／`-e[eof-str]`／`-l[max-lines]`（以及三個長寫
+        // 法）引數是「選填且相連」的，裸寫時一個字都不吃。它們還在集合裡時，`xargs -i sh -c`
+        // 會把 `sh` 吞掉、停在 `-c`、找不到 carrier 而放行，而 GNU xargs 真的會執行 stdin 那
+        // 一行。文法對照 findutils 手冊；本機 BSD xargs 直接拒絕這三個短選項（實測），所以
+        // 兩邊都是 fail-closed。
+        // 新加的：BSD 的 `-J`／`-R`／`-S` 原本完全不在表裡，走訪會停在它們的「值」上——這三個
+        // 在本機用 marker 實測，`-R 3 -I{} sh -c '{}'`、`-S 5000 -I{} sh -c '{}'`、
+        // `-J % -I{} sh -c '{}'` 都真的執行了從 stdin 進來的腳本，而且全部被放行。
         const optionsWithValue = new Set([
-          '-a', '--arg-file', '-d', '--delimiter', '-E', '-e', '--eof',
-          '-I', '--replace', '-i', '-L', '--max-lines', '-l',
-          '-n', '--max-args', '-P', '--max-procs', '-s', '--max-chars',
+          '-a', '--arg-file', '-d', '--delimiter', '-E',
+          '-I', '-J', '-L', '-n', '--max-args', '-P', '--max-procs',
+          '-R', '-S', '-s', '--max-chars', '--process-slot-var',
         ]);
         while (i < words.length && words[i].startsWith('-')) {
+          // xargs' REPLACE STRING, observed on the way past without changing how
+          // many words each option consumes -- the walk above is what decides
+          // where the command word is, and it is not this rule's to move.
+          // It is needed because `-I{}` makes the `-c` argument a PLACEHOLDER
+          // rather than a script: `… | xargs -I{} sh -c '{}'` shows a `-c` with
+          // an argument, and what runs is the stdin line, not the `{}` on the
+          // command line (measured, marker file, BSD xargs under bash 5.3.15 and
+          // 3.2.57). Both separated (`-I {}`) and attached (`-I{}`) spellings,
+          // plus GNU's `--replace=` and `-i` -- this repository ships to Linux
+          // (README.md:7, CI on ubuntu-24.04), where those two exist.
+          // xargs 的「替換字串」，只是順路記下來，不改變每個選項吃幾個字（命令字在哪裡由上面
+          // 那段走訪決定，不歸這條規則動）。需要它是因為 `-I{}` 會讓 `-c` 的引數變成「佔位
+          // 符」而不是腳本：真正跑的是 stdin 那一行（實測有 marker）。分開與相連的寫法都認，
+          // 另外 GNU 的 `--replace=`／`-i` 也認，因為本專案有出貨到 Linux。
+          const option = words[i];
+          // `-I` and BSD's `-J` take their replace string as the NEXT word; the
+          // optional-argument spellings (`-i`, `--replace`) written bare take no
+          // word at all and mean `{}` -- "the effect is the same as -I{}", in the
+          // findutils manual's own words. Reading `words[i + 1]` for those was
+          // the same modelling error as the option table above, one line apart:
+          // it named `sh` as the replace string AND ate it.
+          // `-I` 與 BSD 的 `-J` 用「下一個字」當替換字串；`-i`／`--replace` 裸寫時不吃字，
+          // 意思就是 `{}`（findutils 手冊原話：效果等同 `-I{}`）。對它們去讀下一個字，與上面
+          // 那張表是同一個建模錯誤：把 `sh` 當成替換字串，還把它吃掉。
+          if (option === '-I' || option === '-J') {
+            xargsReplaceString = (i + 1 < words.length ? words[i + 1] : '') || '{}';
+          } else if (option === '-i' || option === '--replace') {
+            xargsReplaceString = '{}';
+          } else if (option.startsWith('-J') && option.length > 2) {
+            xargsReplaceString = option.slice(2);
+          } else if (option.startsWith('--replace=')) {
+            xargsReplaceString = option.slice('--replace='.length) || '{}';
+          } else if (option.startsWith('-I') && option.length > 2) {
+            xargsReplaceString = option.slice(2);
+          } else if (option.startsWith('-i') && option.length > 2 && !option.startsWith('-i-')) {
+            xargsReplaceString = option.slice(2);
+          }
           i += optionsWithValue.has(words[i]) ? 2 : 1;
         }
         executable = '';
@@ -2582,7 +2857,9 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
 
       break;
     }
-    return { executable, executableIndex, index: i, stdinCompletesOperands };
+    return {
+      executable, executableIndex, index: i, stdinCompletesOperands, xargsReplaceString,
+    };
   }
 
   // A carrier whose SCRIPT arrives on a PIPE or through a PROCESS SUBSTITUTION.
@@ -2681,7 +2958,22 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
   // 字串流與它的側車資料一起傳，讓同一個產生器分類器既能用在這條命令列上，也能用在從
   // carrier 的 here-string 重新斷詞出來的命令替換上。抄第二份就是日後會走鐘的那一份。
   const wordContext = (text) => {
-    const contextWords = shellWords(text);
+    // R5-13, and DEFENCE IN DEPTH rather than the load-bearing guard: this call
+    // spends a budget of its own, and it really is reached (measured with a
+    // per-site counter on an instrumented copy: `bash <<EOF` + newline +
+    // `$(echo "` + 64 x `${` + `")` + newline + `EOF` reaches it). But every shape
+    // that reaches it also exhausts one of the two funnel sites at the top of
+    // this scan, so deleting this line alone is an EQUIVALENT MUTANT today -- no
+    // test kills it, and test-hooks.js says so instead of pretending otherwise.
+    // It stays because "the funnels always fire too" is a property of today's
+    // call graph, not a guarantee, and R5-13 exists because this file trusted an
+    // unreachability argument once already.
+    // R5-13，這是縱深防禦而不是承重的守衛：這個呼叫自己會花一份預算，而且真的走得到（用加了
+    // 逐站計數的複本實測）。但每一種走得到它的形狀，都同時把這個掃描開頭那兩個「漏斗」站點
+    // 之一的預算也花完，所以單獨刪掉這一行在今天是等價突變，沒有測試殺得掉——記在這裡，而不
+    // 是假裝有。留著它，是因為「漏斗一定也會觸發」是今天呼叫圖的性質、不是保證，而 R5-13 的
+    // 由來正是本檔案曾經相信過一次「不可能發生」的論證。
+    const contextWords = noteSubstitutionBudget(shellWords(text));
     const contextOperators = contextWords.operatorTokens || [];
     const contextClosing = new Map();
     const contextOpen = [];
@@ -3079,7 +3371,22 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
   // carrier 的腳本文字看得見，但裡面的命令替換看不見：`bash <<< "$(curl -s URL)"` 執行的是
   // 那個網址吐出來的東西，實測放行，而它旁邊的 `curl … | bash` 是拒絕的。
   function unscannableSubstitutions(text, shape, nest) {
-    const inners = commandSubstitutions(String(text || ''));
+    // R5-13, and DEFENCE IN DEPTH rather than the load-bearing guard: this call
+    // spends a budget of its own, and it really is reached (measured with a
+    // per-site counter on an instrumented copy: `bash <<EOF` + newline +
+    // `$(echo "` + 64 x `${` + `")` + newline + `EOF` reaches it). But every shape
+    // that reaches it also exhausts one of the two funnel sites at the top of
+    // this scan, so deleting this line alone is an EQUIVALENT MUTANT today -- no
+    // test kills it, and test-hooks.js says so instead of pretending otherwise.
+    // It stays because "the funnels always fire too" is a property of today's
+    // call graph, not a guarantee, and R5-13 exists because this file trusted an
+    // unreachability argument once already.
+    // R5-13，這是縱深防禦而不是承重的守衛：這個呼叫自己會花一份預算，而且真的走得到（用加了
+    // 逐站計數的複本實測）。但每一種走得到它的形狀，都同時把這個掃描開頭那兩個「漏斗」站點
+    // 之一的預算也花完，所以單獨刪掉這一行在今天是等價突變，沒有測試殺得掉——記在這裡，而不
+    // 是假裝有。留著它，是因為「漏斗一定也會觸發」是今天呼叫圖的性質、不是保證，而 R5-13 的
+    // 由來正是本檔案曾經相信過一次「不可能發生」的論證。
+    const inners = noteSubstitutionBudget(commandSubstitutions(String(text || '')));
     if (inners.length === 0) return;
     if (nest >= 4) {
       targets.push(UNSCANNABLE_SCRIPT + shape('nested substitution'));
@@ -3129,7 +3436,9 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
     for (let n = 0; n < segments.length; n += 1) {
       const segment = segments[n];
       if (segment.start >= segment.end) continue;
-      const { executable, executableIndex } = resolveExecutable(segment.start);
+      const {
+        executable, executableIndex, stdinCompletesOperands, xargsReplaceString,
+      } = resolveExecutable(segment.start);
       if (!executable || executableIndex < 0) continue;
       // A command word that only exists after expansion may BE a carrier, and it
       // gets the same answer the rest of this file gives that shape: assume the
@@ -3313,10 +3622,48 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
               word === '-C' || word.startsWith('--init-command') || word.startsWith('--command=')
             ))
           ) {
-            visible = true;
             commandOption = (k + 1 < words.length && !operatorTokens[k + 1])
               ? words[k + 1]
               : null;
+            // A `-c` reached THROUGH xargs is not the same thing as a `-c` typed
+            // on this line: xargs supplies its script from stdin, which is
+            // precisely what this rule exists to refuse (R4-b). Two shapes, both
+            // measured with touch markers under BSD xargs on bash 5.3.15 and
+            // 3.2.57:
+            //   (a) no argument at all -- `… | xargs -0 bash -c` -- where xargs
+            //       APPENDS the stdin line and it becomes the script;
+            //   (b) an argument that IS the replace string -- `… | xargs -I{} sh
+            //       -c '{}'` -- where the `{}` on the command line is a
+            //       placeholder and the stdin line is what runs.
+            // Seven spellings execute the payload as written (`-0 bash -c`,
+            // `-0 sh -c`, `-I{} sh -c '{}'`, `-I{} bash -c '{}'`, `-0 -- bash -c`,
+            // `-P4 -0 bash -c`, `-0 zsh -c`). Three more -- bare `xargs bash -c`,
+            // `-L1 bash -c`, `-n1 sh -c` -- split stdin on whitespace, so a
+            // MULTI-word payload runs only its first word as the script and the
+            // marker never appeared; but with a single-word payload all three
+            // really do run it (measured, same probe), so the script still comes
+            // from stdin in every one of them. They are refused by the same rule
+            // rather than carved out: "the script comes from stdin" is one rule,
+            // and "…unless xargs' word splitting would have mangled this
+            // particular payload" would be a second one that has to model that
+            // splitting to stay true.
+            // What stays VISIBLE, and is the row that keeps this from collapsing
+            // into "xargs plus a shell is refused": a `-c` argument that is on the
+            // command line and that no replace string can rewrite --
+            // `… | xargs -0 bash -c 'echo hi'` -- where stdin becomes $0/$1 and
+            // not the script (measured NOT to execute the payload).
+            // 走過 xargs 的 `-c` 與這一行上打出來的 `-c` 不是同一回事：腳本由 xargs 從 stdin
+            // 補上，而那正是這條規則要擋的。兩種形狀（都有 marker 實測）：(a) 後面根本沒有引
+            // 數，stdin 那一行被接上去就成了腳本；(b) 引數就是替換字串，命令列上的 `{}` 只是
+            // 佔位符。另外三種（裸的、`-L1`、`-n1`）依空白切開，多字 payload 不會照原樣執行，
+            // 但單字 payload 三種都會執行——腳本一樣來自 stdin，所以用同一條規則拒絕。
+            // 仍然算「看得見」的是：`-c` 的引數寫在命令列上、又沒有替換字串會改寫它。
+            const scriptComesFromStdin = stdinCompletesOperands && (
+              commandOption === null
+              || (xargsReplaceString !== null && commandOption.includes(xargsReplaceString))
+            );
+            visible = !scriptComesFromStdin;
+            if (scriptComesFromStdin) commandOption = null;
             break;
           }
           if (/^-[A-Za-z]*s/.test(word)) stdinMarker = true;
@@ -3379,6 +3726,16 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
       const opaquePipeTarget = (dynamicCarrier && !r4Carriers.has(carrier))
         ? () => UNREADABLE_PIPE_TARGET + carrierWord
         : null;
+      // The SHAPE quoted back in the refusal. When the carrier was reached
+      // through xargs, `curl | bash` would describe a command line that does not
+      // contain the word `bash` next to the pipe -- the reader has to be able to
+      // find the shape in what they typed, which is the whole reason these
+      // messages quote a shape instead of describing one.
+      // 拒絕訊息裡引用的「形狀」。走過 xargs 時只寫 `curl | bash`，讀的人在自己打的那一行上
+      // 找不到那個形狀——這些訊息引用形狀而不是描述行為，理由就在這裡。
+      const carrierShape = stdinCompletesOperands
+        ? `xargs … ${carrier} -c`
+        : String(carrier);
       if (!visible && !scriptIsFile && pipeFed) {
         const producer = segments[n - 1];
         if (segment.run.includes(')') || producer.start >= producer.end) {
@@ -3387,12 +3744,12 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
           // classify and the honest answer is that this gate did not read it.
           // 複合產生器：裡面每一條命令都在餵那個 pipe，沒有單一產生器可以分類。
           targets.push(
-            opaquePipeTarget ? opaquePipeTarget() : `${UNSCANNABLE_SCRIPT}subshell | ${carrier}`,
+            opaquePipeTarget ? opaquePipeTarget() : `${UNSCANNABLE_SCRIPT}subshell | ${carrierShape}`,
           );
         } else {
           scriptFromProducer(
             outerContext, producer.start, producer.end,
-            (label) => `${label} | ${carrier}`, 0, opaquePipeTarget,
+            (label) => `${label} | ${carrierShape}`, 0, opaquePipeTarget,
           );
         }
       }
@@ -3741,6 +4098,62 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
         for (let r = 0; r < roots.length; r += 1) targets.push(roots[r]);
         for (const operand of execOperands) targets.push(operand);
       }
+    } else if (executable === 'trap') {
+      // `trap '<action>' <sigspec…>`: the action is SHELL CODE, and it runs when
+      // the signal arrives. Nothing in this file used to treat "this command's
+      // argument is a script" as a scan source, so `trap 'rm -rf /etc' EXIT`
+      // was allowed and really deleted (KNOWN-RESIDUALS.md R5-c). MEASURED with
+      // touch markers rather than reasoned about, 2026-09-05: the action really
+      // executes for EXIT, ERR, DEBUG, a named signal, the numeric `0`, the
+      // lowercase `exit`, several signals at once, after `--`, and through
+      // `builtin trap` / `command trap` / `\trap` -- under bash 5.3.15,
+      // bash 3.2.57, sh, zsh, dash and ksh alike.
+      // The action is handed to nestedScan, the same treatment `bash -c '…'`
+      // gets, so every rule in this file applies inside it instead of a second
+      // copy of any of them living here.
+      // `trap '<動作>' <訊號>` 的第一個引數就是 shell 程式碼，訊號到達時會執行。本檔案先前
+      // 沒有任何一支把「某個命令的引數其實是腳本」當成掃描來源。動作交給 nestedScan，與
+      // `bash -c '…'` 同一條路，所以規則只有一份。
+      let actionIndex = -1;
+      let sawDoubleDash = false;
+      for (; i < words.length && !separators.has(words[i]); i += 1) {
+        const word = words[i];
+        if (operatorTokens[i] || heredocBodies.has(i)) continue;
+        if (!sawDoubleDash && word === '--') { sawDoubleDash = true; continue; }
+        // `-l` and `-p` are trap's PRINT options. Skipping the option WORD and
+        // going on to read the next operand is one branch; "print mode, so do
+        // not look at all" would be a second branch whose only effect is to turn
+        // a refusal into an allowance for `trap -p '<action>' EXIT` -- a shape
+        // measured NOT to execute, so the allowance would buy nothing and the
+        // branch would be one more thing to get wrong.
+        // `-l`／`-p` 是列印選項。跳過選項字、繼續讀下一個操作元就夠了；多寫一個「列印模式
+        // 就不要看」的分支，唯一作用是把一個實測不會執行的形狀從拒絕改成放行。
+        if (!sawDoubleDash && /^-[lp]+$/.test(word)) continue;
+        actionIndex = i;
+        break;
+      }
+      // `trap - EXIT` (reset) and `trap '' INT` (ignore) are the two most common
+      // lines in any script that cleans up after itself, and neither is an
+      // action. Reading them as one would refuse both.
+      // `trap - EXIT`（重設）與 `trap '' INT`（忽略）都不是動作。
+      const action = actionIndex >= 0 ? words[actionIndex] : '';
+      if (action !== '' && action !== '-') {
+        // The action's TEXT has to be known before it can be scanned. It is
+        // resolved by exactly the function an rm operand uses, so
+        // `trap 'rm -rf "$TMPDIR/x"' EXIT` is read, resolved and judged ordinary
+        // while `trap "$CMD" EXIT` -- whose text only exists after expansion --
+        // fails closed. A blanket "the word contains a $" test would refuse the
+        // first one too, which is the shape a real cleanup trap is written in.
+        // 動作的「文字」要先知道才掃得了。用的是 rm 操作元同一個解析函式，所以真正的清理
+        // trap 讀得出來，而文字要展開後才知道的那種 fail closed。
+        const actionText = hasUnresolvedTargetExpansion(dynamicExpansions[actionIndex])
+          ? resolveKnownExpansions(action, expansionEnv)
+          : action;
+        if (actionText === null) targets.push(UNREADABLE_TRAP_ACTION + action);
+        else if (depth >= 8) targets.push('/');
+        else targets.push(...nestedScan(actionText, depth + 1, false, expansionEnv));
+      }
+      while (i < words.length && !operatorAt(i, separators)) i += 1;
     } else if (executable === 'eval') {
       const nestedCommand = [];
       for (; i < words.length && !separators.has(words[i]); i += 1) {
@@ -3962,6 +4375,64 @@ function unreadablePipeTargetDenial(word, isCopilot, isAntigravity, isCursor, is
   return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
 }
 
+// The refusal for a `trap` action this gate could not read (R5-c). Separate from
+// unscannableScriptDenial for the reason recorded at UNREADABLE_TRAP_ACTION: that
+// message names a pipe, a shell and a URL allowlist, and none of the three is in
+// `trap "$CMD" EXIT`. It names the word it could not resolve, names its own rule
+// so the message is searchable, and gives the two spellings that make it go away.
+// 「讀不到 trap 動作」的拒絕。與 unscannableScriptDenial 分開的理由記在
+// UNREADABLE_TRAP_ACTION：那句話講的 pipe、shell 與網址清單，這裡一個都沒有。
+function unreadableTrapActionDenial(word, isCopilot, isAntigravity, isCursor, isGrok) {
+  const zh = `拒絕執行：這條命令替某個訊號裝上一段這道閘門讀不到的動作（trap 的第一個引數就是`
+    + ` shell 程式碼，訊號到達時會執行），而 ${word} 要展開之後才知道是什麼，`
+    + `所以無法判斷那段程式碼會不會刪除受保護的目錄`
+    + `（這不是說它一定會刪，是說這道閘門讀不到）。規則：unreadable trap action。`
+    + `繞法：把動作寫成字面的命令（trap 'rm -rf /tmp/build' EXIT），`
+    + `或把它放進腳本檔、改成 trap 'bash /path/cleanup.sh' EXIT。`
+    + `只有 $HOME、$PWD、$TMPDIR 會被解析。`;
+  const en = `Refused to run: this command installs a trap whose action this gate cannot read`
+    + ` (trap's first argument IS shell code and runs when the signal arrives), because ${word}`
+    + ` only exists after expansion, so it cannot tell whether that code removes a protected`
+    + ` directory (this does not say that it does; it says this gate could not read it).`
+    + ` Rule: unreadable trap action.`
+    + ` Workaround: spell the action literally (trap 'rm -rf /tmp/build' EXIT), or put it in a`
+    + ` script file and trap that (trap 'bash /path/cleanup.sh' EXIT).`
+    + ` Only $HOME, $PWD and $TMPDIR are resolved.`;
+  return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
+}
+
+// The refusal for a scan that ran out of failed-read budget (R5-13). Its own
+// wording for the reason recorded at SUBSTITUTION_BUDGET_EXHAUSTED: the other
+// three "could not read" messages each name the THING they could not read -- a
+// piped script, a pipe target, a trap action -- and here the thing is the rest of
+// the command. It names the count, because that is what the user can act on, and
+// it names its own rule so the message is searchable.
+// The way out is deliberately about the OPENERS and not about the deletion: the
+// gate is not asking the user to remove a deletion it never claimed to have
+// found, it is asking them to write the 64 unreadable openers in a way a reader
+// can get past -- close them, single-quote them, or move the text into a file.
+// 「掃描的讀取預算用完」的拒絕（R5-13）。自成一種訊息的理由記在
+// SUBSTITUTION_BUDGET_EXHAUSTED：另外三種「讀不到」都指名了讀不到的東西，這裡讀不到的是
+// 「命令剩下的部分」。訊息帶著數量（使用者唯一能據以行動的數字）並指名規則名以便搜尋。
+// 出路刻意講「開頭」而不是「刪除」：閘門沒有宣稱找到刪除，它要求的是把那些開頭寫成讀得過
+// 去的樣子。
+function substitutionBudgetDenial(count, isCopilot, isAntigravity, isCursor, isGrok) {
+  const zh = '拒絕執行：這條命令裡有 ' + count + ' 個這道閘門讀不出來的替換開頭'
+    + '（`$(`、`<(` 或 `${`，到輸入結尾都沒有收尾），單次判定的讀取預算已經用完，'
+    + '所以「它們後面」的替換這道閘門一個也沒有掃到——包含可能藏在那裡的刪除'
+    + '（這不是說一定有，是說這道閘門沒有讀到）。規則：substitution budget exhausted。'
+    + '繞法：把沒有收尾的開頭補完、或改成單引號，或把那段文字放進檔案再讓命令去讀。';
+  const en = 'Refused to run: this command carries ' + count + ' substitution openers this gate'
+    + ' could not read (`$(`, `<(` or `${` with no closer before the end of the input), which'
+    + ' spends the whole per-invocation read budget, so every substitution AFTER them went'
+    + ' unscanned -- including any deletion hidden there (this does not say one is; it says this'
+    + ' gate did not read it). Rule: substitution budget exhausted (' + count
+    + ' unreadable openers).'
+    + ' Workaround: close the openers, or single-quote them, or move the text into a file and'
+    + ' have the command read it from there.';
+  return denialShape(zh + ' / ' + en, isCopilot, isAntigravity, isCursor, isGrok);
+}
+
 function denial(reason, isCopilot, isAntigravity, isCursor, isGrok) {
   const message = `拒絕刪除受保護的目錄：${reason} / Refused to remove protected directory: ${reason}`;
   return denialShape(message, isCopilot, isAntigravity, isCursor, isGrok);
@@ -4063,6 +4534,8 @@ function evaluate(payload, env = process.env) {
       || target.startsWith(UNSCANNABLE_SCRIPT)
       || target.startsWith(UNREADABLE_PIPE_TARGET)
       || target.startsWith(UNJUDGEABLE_ENV_S)
+      || target.startsWith(UNREADABLE_TRAP_ACTION)
+      || target.startsWith(SUBSTITUTION_BUDGET_EXHAUSTED)
     ) continue;
     const reason = protectedReason(target, cwd, home, extraDirs);
     if (reason) return denial(reason, isCopilot, isAntigravity, isCursor, isGrok);
@@ -4089,6 +4562,25 @@ function evaluate(payload, env = process.env) {
   // NOTE, deliberately not "fixed": the sentinel is pushed into `targets`, so it
   // counts toward unjudgeableDenial's totalCount above. Filtering it out would
   // need a second pass over the array to change one number in a timeout message.
+  // FIRST among the "could not read" refusals (R5-13), and above them all for a
+  // reason none of them shares: the other three describe something this gate DID
+  // read and could not resolve -- a script it can see arriving on a pipe, a pipe
+  // target word, a trap action -- while this one says a stretch of the command was
+  // never read at all. Anything those three could have said about the unread part
+  // would be a guess about text nobody looked at. A protected path found BEFORE
+  // the budget ran out still wins over this, in the loop above, because a concrete
+  // path is the more useful thing to be told -- and every one of the timing rows
+  // in test-hooks.js is exactly that shape, so they keep naming `/etc`.
+  // 排在所有「讀不到」拒絕的最前面，理由是其他三種都沒有的：它們描述的是「讀到了但解不
+  // 開」，這一種說的是「有一段根本沒讀」。上面那個迴圈找到的受保護路徑仍然勝過它——具體的
+  // 路徑對使用者更有用。
+  for (const target of targets) {
+    if (!target.startsWith(SUBSTITUTION_BUDGET_EXHAUSTED)) continue;
+    return substitutionBudgetDenial(
+      target.slice(SUBSTITUTION_BUDGET_EXHAUSTED.length), isCopilot, isAntigravity, isCursor,
+      isGrok,
+    );
+  }
   for (const target of targets) {
     if (!target.startsWith(UNSCANNABLE_SCRIPT)) continue;
     return unscannableScriptDenial(
@@ -4113,6 +4605,19 @@ function evaluate(payload, env = process.env) {
   // operand when the thing that could not be read is the -S string.
   // 排在「解不開變數」之前，理由與上面兩個相同：它指名了沒能建模的那條規則、也帶著出路，而
   // 「算不出這個操作元展開成哪條路徑」會指著操作元，可是讀不出來的是那段 -S 字串。
+  // Above the unresolved-variable refusal, alongside the two refusals before it
+  // and for the same reason: it names the rule it could not read past and carries
+  // the way through, while "cannot determine which path this expands to" would
+  // point at an operand when the thing that could not be read is the trap action
+  // -- and `trap "$CMD" EXIT` has no deletion operand at all.
+  // 排在「解不開變數」之前，理由與前面兩個相同：`trap "$CMD" EXIT` 根本沒有刪除操作元，
+  // 用那句話回答是假的。
+  for (const target of targets) {
+    if (!target.startsWith(UNREADABLE_TRAP_ACTION)) continue;
+    return unreadableTrapActionDenial(
+      target.slice(UNREADABLE_TRAP_ACTION.length), isCopilot, isAntigravity, isCursor, isGrok,
+    );
+  }
   for (const target of targets) {
     if (!target.startsWith(UNJUDGEABLE_ENV_S)) continue;
     return unjudgeableEnvStringDenial(
@@ -4148,4 +4653,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, commandTargets, evaluate, globCanMatchGit, hasGlob, normalizedTarget, protectedReason, shellWords };
+module.exports = { HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, commandSubstitutions, commandTargets, evaluate, globCanMatchGit, hasGlob, normalizedTarget, protectedReason, shellWords };

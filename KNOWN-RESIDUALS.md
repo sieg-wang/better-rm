@@ -233,18 +233,33 @@ check, which is why an exempted fetch may carry only options that cannot move it
 - `bash < script.sh`、`bash script.sh`——重導向或操作元指向真正的檔案。
 - `bash -c "$(curl …)"`、`eval "$(curl …)"`——**只在沒有 pipe 餵著時**。有 pipe 的
   `curl … | bash -c "$(cat)"` 從 2026-09-04 起是拒絕的。
-- `… | xargs -I{} bash -c "{}"` 與 `… | xargs -0 bash -c`：`-c` 的命令字串是 xargs 從 pipe
-  補上去的，這道閘門看到的 `-c` 後面根本沒有字。
-  **2026-09-05 補測，把這一族逐個拼法量清楚**（marker 檔，不是推論）：
-  `echo '<payload>' | xargs -0 bash -c`、`| xargs -0 sh -c`、`| xargs -0 -I{} bash -c '{}'`、
-  `| xargs -I{} sh -c '{}'` 四種**都真的執行**，而 hook 對四者都是**放行**——這不是解碼的問題，
-  連完全沒有逸出的 `echo 'rm -rf /etc' | xargs -0 bash -c` 也放行，而它旁邊的
-  `echo 'rm -rf /etc' | sh` 是拒絕的。相對地，**裸的 `| xargs bash -c`（沒有 `-0` 也沒有
-  `-I`）並不會執行 payload**：xargs 依空白切開，`touch` 變成 `-c` 的腳本、其餘變成 `$0`，
-  實測沒有產生 marker。所以這一族要寫成「`-0` 與 `-I{}` 的拼法」，不要寫成「xargs 全部」。
-  **在 ee2cb0e 與 2026-09-05 的工作樹上量到同一個結果，是既有行為**；2026-09-03 由使用者
-  裁決列為**本輪範圍外**（xargs 是「引數即程式碼」那一族的一員，與 R5-c 同源，要修就要整族
-  一起修，替 xargs 補特例會讓下一個人以為這一族已經處理過了）。
+- ~~`… | xargs -I{} bash -c "{}"` 與 `… | xargs -0 bash -c`~~ — **2026-09-05 已修，不再是殘留**。
+  `-c` 的命令字串是 xargs 從 pipe 補上去的，這道閘門看到的 `-c` 後面根本沒有字（或只有一個
+  `{}` 佔位符），於是 R4 的管線規則把腳本當成「看得見」而放行。修法：走過 xargs 抵達 carrier
+  時，`-c` 沒有引數、或引數含有 xargs 的替換字串，就算「腳本從 stdin 進來」，與 `| bash` 走同
+  一條規則——產生器讀得出來就照讀（`echo hi | xargs -0 bash -c` 仍然放行），讀不出來就拒絕。
+  **實測（marker 檔，BSD xargs，bash 5.3.15 與 3.2.57）**：`-0 bash -c`、`-0 sh -c`、
+  `-I{} sh -c '{}'`、`-I{} bash -c '{}'`、`-0 -- bash -c`、`-P4 -0 bash -c`、`-0 zsh -c`
+  七種真的會執行 payload。**另外三種不會照原樣執行**：裸的 `| xargs bash -c`、`| xargs -L1
+  bash -c`、`| xargs -n1 sh -c`——沒有 `-0` 時 xargs 依空白切開，第一個字成了 `-c` 的腳本、其餘
+  成為 `$0`、`$1`，多字 payload 不會照寫的樣子跑（沒有產生 marker）。**它們照樣拒絕，而理由也
+  是量出來的**：把 payload 換成「單一個字」（一個腳本檔路徑），這三種全部真的執行了它——腳本
+  一樣來自 stdin、一樣讀不到。「腳本從 stdin 來就拒絕」是一條規則；「除非 xargs 的空白切割會
+  把這個特定 payload 弄壞」得再建模一次 xargs 的切字規則才會是真的。
+  仍然允許的是 `-c` 的腳本寫在命令列上、又沒有替換字串會改寫它的寫法
+  （`echo … | xargs -0 bash -c 'echo hi'`，實測不會執行 payload）。
+  **2026-09-05 第二輪：連 xargs 的「選項表」一起補正（R5-14）。** 上面那條規則靠「走過選項找
+  命令字」運作，所以吃錯字數就會走過 shell。兩類都錯、都 fail-open：GNU 的
+  `-i[replace-str]`／`-e[eof-str]`／`-l[max-lines]`（含 `--replace[=…]`／`--eof[=…]`／
+  `--max-lines[=…]`）引數是「選填且相連」，裸寫不吃字，卻被當成吃下一個字——
+  `… | xargs -i sh -c '{}'` 因此吞掉 `sh`、停在 `-c`、找不到 carrier 而放行；BSD 的
+  `-J replstr`／`-R replacements`／`-S replsize` 與 GNU 的 `--process-slot-var` 根本不在表裡，
+  走訪停在它們的值上。後三者**在本機用 marker 實測真的會執行 stdin 送進來的腳本**
+  （`-R 3 -I{} sh -c '{}'`、`-S 5000 -I{} sh -c '{}'`、`-J % -I{} sh -c '{}'`，
+  bash 5.3.15 與 3.2.57 皆同），而且原本全部放行；`xargs -t -J % sh -c %` 對 stdin 的 `hi`
+  印出 `sh -c hi`，stdin 那一行就是腳本本身。GNU 的文法對照 findutils 手冊，本機沒有 GNU
+  xargs、也依 SAFETY 不安裝；BSD 直接拒絕 `-i`／`-e`／`-l`（實測 `invalid option`），所以兩邊
+  都是 fail-closed。讓整族現形的不對稱：相連寫法 `--replace={}` 語意相同，卻一直是拒絕的。
 - `bash <&3`——fd 3 由別處開啟，而且不是 process substitution 開的。
   `bash /dev/fd/3 3< <(curl …)` 與 `exec 3< <(curl …); bash /dev/fd/3` 那一族已於
   2026-09-04 納入。
@@ -268,19 +283,45 @@ carrier 自己的 here-string 與 heredoc 內文（`bash <<< "$(curl …)"`、`b
 看不見），2026-09-04 才補上。範圍外的部分改成下面那份逐列量過的清單，不再用「全部」這種詞。
 
 **R4-b — deliberately out of scope.** `bash < file`, `bash script.sh`,
-`bash -c "$(curl …)"`, `eval "$(curl …)"`, the `xargs` carrier family
-(`… | xargs -0 bash -c`, `| xargs -0 sh -c`, `| xargs -0 -I{} bash -c '{}'`,
-`| xargs -I{} sh -c '{}'` -- all four measured 2026-09-05 to really EXECUTE the
-piped payload and to be ALLOW, at ee2cb0e and on the current working tree alike,
-while the plain `echo 'rm -rf /etc' | sh` beside them is refused; the BARE
-`| xargs bash -c`, with neither `-0` nor `-I`, does NOT execute the payload --
-xargs splits on whitespace, so the first word becomes the `-c` script and the rest
-becomes `$0`, measured, no marker -- so this family is the `-0`/`-I{}` spellings,
-not "xargs" in general; adjudicated OUT OF SCOPE by the owner on 2026-09-03,
-because it is a member of the same "an argument is code" family as R5-c and a
-special case for `xargs` would leave the next reader believing the family was
-handled),
-`bash <&3`, and non-shell consumers such as `curl … | python3`. The decision named
+`bash -c "$(curl …)"`, `eval "$(curl …)"`,
+`bash <&3`, and non-shell consumers such as `curl … | python3`.
+**The `xargs` carrier family that used to head this list was FIXED on 2026-09-05 and
+is no longer a residual.** xargs supplies the `-c` script from stdin, so the gate saw
+a `-c` with no argument at all (or with nothing but a `{}` placeholder) and called
+the script visible. Now a carrier reached THROUGH xargs whose `-c` has no argument,
+or whose argument contains xargs' replace string, is treated as "the script comes
+from stdin" and goes through the same rule `| bash` does: a producer this gate can
+read is read (`echo hi | xargs -0 bash -c` stays allowed), and one it cannot is
+refused. Measured with marker files under BSD xargs on bash 5.3.15 and 3.2.57, seven
+spellings really execute the payload (`-0 bash -c`, `-0 sh -c`, `-I{} sh -c '{}'`,
+`-I{} bash -c '{}'`, `-0 -- bash -c`, `-P4 -0 bash -c`, `-0 zsh -c`). Three more do
+NOT run a multi-word payload as written -- bare `| xargs bash -c`, `| xargs -L1
+bash -c` and `| xargs -n1 sh -c` split stdin on whitespace, so the first word becomes
+the `-c` script and the rest become `$0`, `$1` … -- and they are refused all the same,
+for a measured reason: with a SINGLE-word payload (a script file path) all three
+really do execute it, so the script still arrives from stdin and this gate still
+cannot read it. What stays allowed is a `-c` script written on the command line that
+no replace string can rewrite (`echo … | xargs -0 bash -c 'echo hi'`, measured not to
+execute the payload).
+**Second pass on 2026-09-05: xargs' OPTION TABLE itself (R5-14).** That rule finds
+the command word by stepping over options, so an entry that eats the wrong number of
+words walks straight past the shell. Two families were wrong, both fail-open: GNU's
+optional-argument options -- `-i[replace-str]`, `-e[eof-str]`, `-l[max-lines]` and
+`--replace[=…]`, `--eof[=…]`, `--max-lines[=…]`, where the argument is optional AND
+attached, so a bare `-i` consumes nothing -- were modelled as taking a separate word,
+which made `… | xargs -i sh -c '{}'` swallow `sh`, land on `-c`, find no carrier and
+ALLOW; and BSD's `-J replstr`, `-R replacements`, `-S replsize` plus GNU's
+`--process-slot-var` were missing from the table entirely, so the walk stopped on
+their value. The last three are not theoretical: measured on this host with a marker
+file under bash 5.3.15 and /bin/bash 3.2.57, `-R 3 -I{} sh -c '{}'`,
+`-S 5000 -I{} sh -c '{}'` and `-J % -I{} sh -c '{}'` all really executed a payload
+arriving on stdin, and all three were ALLOWED; `xargs -t -J % sh -c %` prints
+`sh -c hi` for a `hi` on stdin, so the stdin line becomes the script itself. GNU's
+grammar was checked against the findutils manual and could not be executed here
+(no GNU xargs on this host, and SAFETY forbids installing one); BSD xargs rejects
+`-i`, `-e` and `-l` outright (`invalid option`, measured), so refusing them is
+fail-closed on both platforms. The asymmetry that exposed the family: the attached
+`--replace={}`, identical in meaning, was refused all along. The decision named
 pipes and process substitutions, and the exemption mechanism is URL-shaped rather
 than path-shaped; folding in the file/fd family is a second, much larger posture
 change and should be asked separately. Every item above was measured ALLOW on
@@ -322,60 +363,162 @@ row per name, where getting it wrong in the consuming direction is a new fail-op
 pipes into it, so this is written down rather than pretended away.
 
 
-## R5-a — 斷詞階段的 `$(` 平方級成本仍在，而唯一的完整解法是輸入長度上限（**未裁決**）
+## R5-a — 斷詞階段的 `$(` 平方級成本 — 2026-09-05 **CLOSED**（線性化，沒有上輸入長度上限）
 
 判定預算（`JUDGING_BUDGET_MS = 2000`）是在 `commandTargets()` **之後**才設 deadline 的，
 所以**斷詞本身不在預算內**。2026-09-04 補上的失敗讀取預算
-（`MAX_FAILED_SUBSTITUTION_READS = 64`）只封住 `shellWords()` 裡那三個雙引號內的 reader；
-`commandSubstitutions()` 用的 `readParenthesized()` 仍然是既有的平方級成本。
+（`MAX_FAILED_SUBSTITUTION_READS = 64`）只封住 `shellWords()` 裡那三個雙引號內的 reader，
+`$(` 那一半留了下來。
 
-實測（走真正的 stdin 進入點，命令是 `echo "` + 開頭字 ×n + `" ; rm -rf /etc`，同一台 Mac）：
+**成本先歸因、再修**（用加了計數器的複本量，不是猜）：16KB 的 `echo "` + `$(`×n + `" ; rm -rf
+/etc` 這個形狀，tokenizer 只花掉它的 64 次失敗讀取（預算本來就在作用），而
+`commandSubstitutions()` 失敗了 **8,192 次、掃了 3,370 萬個字元**——成本整份在那裡。未加引號
+的雙胞胎則是兩個站點各 8,192 次，所以它的時間剛好是引號版的兩倍。
 
-| 形狀 | 39KB | 78KB | 117KB |
-|---|---|---|---|
-| `${`，修復前 | 811ms | 2,791ms | 6,071ms |
-| `${`，修復後 | 36ms | 45ms | 52ms |
-| `$(`，修復前 | 4,117ms | 17,995ms | 37,015ms |
-| `$(`，修復後 | 2,083ms | 8,232ms | 18,355ms |
+**修法**：把同一份失敗讀取預算加到剩下的三個站點——tokenizer 的「頂層」`$(` 臂（與已經有預算
+的引號內那個臂共用同一個計數器），以及 `commandSubstitutions()` 的 `$(` 與 `<(`／`>(` reader
+（那個函式自己一份，因為它是在斷詞之後重讀原始文字，tokenizer 的計數器碰不到它）。
+**沒有上輸入長度上限**：使用者 2026-09-05 的裁決是先讓掃描變線性，只有做不到才回頭考慮上限。
 
-`${` 那一半是 2026-09-03 的 tokenizer 修復帶進來的回歸，已經修掉。`$(` 那一半**不是**：
-在該修復之前的版本上，78KB 就已經要 11,513ms，早就超過 live hook 的 5,000ms 逾時，而
-**逾時的 PreToolUse hook 不做任何裁決、也不會擋下命令**——同一行後面的刪除會不受判定地執行。
+實測（走真正的 stdin 進入點，命令是 `echo "` + `$(`×n + `" ; rm -rf /etc`，以及它未加引號的
+雙胞胎；arm64 = 本機 node 26.8.1，x86_64 = node 22.17.0，也就是 CI 跑的架構）：
 
-**為什麼沒有順手修**：三條路都試算過。
-（a）把 `readBraced` 改成線性需要一個把「每次呼叫都重新開始的引號／跳脫狀態」重現出來的堆疊
-掃描，那是在一個活的安全檔案裡重寫斷詞器，而且它**碰不到** `$(` 這一半。
-（b）審查報告建議的 `noCloserBeyond` 記憶化是**不成立的**：拿這個檔案自己的 `readBraced`
-反證，輸入 `${${}` 時 `readBraced(.,1)` 回 `null` 而 `readBraced(.,3)` 回 `4`——後面的開頭
-可以收尾，前面的卻不能，所以「越過某點就沒有收尾」這個前提是假的。**不要照那個處方實作。**
-（c）**輸入長度上限 + fail-closed 的「太長，不予判定」拒絕**能把兩半一起封住，但它是**姿態
-改變**：實測最壞形狀在 16KB 是 746ms、32KB 是 2,883ms、64KB 是 12,363ms，而判定預算最多再加
-2,000ms，所以只有 16KB 左右才有真正的餘裕——而 16KB 的上限會在整台機器上誤擋合法的長命令。
+| 形狀 | 16KB | 32KB | 64KB | 128KB |
+|---|---|---|---|---|
+| 引號內，修復前（arm64） | 382ms | 1,428ms | 5,678ms | — |
+| 引號內，修復後（arm64） | 48ms | 60ms | 83ms | 130ms |
+| 未加引號，修復前（arm64） | 820ms | 2,870ms | 11,458ms | — |
+| 未加引號，修復後（arm64） | 56ms | 74ms | 113ms | 173ms |
+| 引號內，修復前（x86_64） | 758ms | 2,624ms | 9,103ms | 38,557ms |
+| 引號內，修復後（x86_64） | 159ms | 177ms | 215ms | 306ms |
+| 未加引號，修復前（x86_64） | 1,409ms | 4,788ms | 15,818ms | 80,591ms |
+| 未加引號，修復後（x86_64） | 205ms | 235ms | 276ms | 407ms |
 
-**這是使用者的裁決，不是修復者的**，因此留在這裡等一個明確的決定：要不要上一個輸入長度上限、
-上限訂在哪裡，以及被擋掉的長命令改怎麼寫。
+每一格的裁決都是**拒絕**，而且拒絕的理由是「受保護的目錄 /etc」而不是「時間用完」——後者代表
+閘門是停止讀取，而不是讀完了。`<(` 那個兄弟站點自己也是平方級（arm64 修復前 16KB 785ms、
+32KB 2,965ms），共用同一份預算。
 
-**R5-a — the pre-existing `$(` quadratic in the TOKENIZER is still there, and the
-only complete fix is an input-size cap (UNDECIDED).** The judging budget's deadline
-is set AFTER `commandTargets()`, so tokenizing is outside it. The failed-read budget
-added 2026-09-04 (`MAX_FAILED_SUBSTITUTION_READS = 64`) bounds only the three
-in-double-quote readers in `shellWords()`; `readParenthesized()` inside
-`commandSubstitutions()` keeps the pre-existing cost. Measured through the real
-stdin entry point, `echo "` + opener x n + `" ; rm -rf /etc`: the `${` shape went
-6,071ms -> 52ms at 117KB (that half was a regression introduced by the 2026-09-03
-tokenizer fix and is now gone), while `$(` went 37,015ms -> 18,355ms and was
-ALREADY past the live 5,000 ms timeout at 78KB before that fix (11,513ms) -- and a
-PreToolUse hook that outruns its timeout produces no decision, so the deletion on
-the same line runs unjudged. Three routes were costed: making `readBraced` linear
-is a tokenizer rewrite in a live security file that does not touch the `$(` half;
-the `noCloserBeyond` memo a review suggested is UNSOUND, disproved against this
-file's own `readBraced` (`${${}`: index 1 returns null, index 3 returns 4, so a
-LATER opener can close where an earlier one cannot -- do not implement it); and an
-input-size cap with a fail-closed "too long to judge" refusal would bound both
-halves but is a POSTURE CHANGE (measured at HEAD: 16KB -> 746ms, 32KB -> 2,883ms,
-64KB -> 12,363ms, plus up to 2,000ms of judging on top, so only a ~16KB cap has real
-margin, and a 16KB cap falsely refuses legitimate long commands machine-wide). That
-is the user's call, not a fixer's, and it is written here rather than shipped.
+**釘住它的是「次數」不是毫秒**：`shellWords()` 與 `commandSubstitutions()` 各自把
+`failedSubstitutionReads` 掛在回傳值上，測試斷言「剛好停在上限」與「輸入加倍不會多買到任何
+一次失敗讀取」。牆鐘斷言在這條路徑上量的是主機負載（R4-5 的教訓）。
+
+**代價，明講而不是藏著**：超過上限之後，「本來讀得完」的 `$(` 不再被讀出來，它的內文也就不會
+被掃。
+
+> **這一段原本是錯的，而且錯得會出人命（R5-13，2026-09-05 已修）。** 原文寫著「要走到那一步，
+> 輸入裡得有 64 個一路到結尾都不收尾的開頭，而那在本檔案建模的每一種 shell 裡都是語法錯誤
+> （`bash -n` 會拒絕），所以走到上限的命令不是會執行的命令」。**反例就在同一個函式裡**：未加
+> 引號的 heredoc 內文是「刻意」留在 `scannable` 裡的（因為那裡的替換是真的會展開），所以那段
+> 文字對這道閘門是要掃的程式碼、對 bash 只是資料。heredoc 內文裡的 64 個 `$(` 完全不是語法錯
+> 誤——`bash -n` 接受，bash 執行時只印一則非致命的 `bad substitution: no closing )`，然後繼續
+> 跑下一行。實測（r5-validate-better-rm-7，bash 5.3.15、/bin/bash 3.2.57、/bin/sh，用真的目
+> 標）：`cat <<EOF` + 64 個 `$(` + `EOF` + `echo $(rm -rf /etc)` **被放行而且真的刪掉了**，63
+> 個是拒絕、64 個是放行。六種拼法（`<(` 版、`<<-`、`cat <<EOF | wc -l`、40+40 混合、
+> `cat > notes.txt <<EOF`）全部相同。
+>
+> **通則，寫下來免得再犯**：任何「bash 當成字面資料、而這道閘門仍然會掃」的脈絡，都是「掃得
+> 到但不是語法」的文字，所以本檔案不可以再拿「那樣寫會是語法錯誤」當作某個狀態不可能發生的
+> 論據。
+
+**現在的行為（R5-13）**：任何一份失敗讀取預算被用完，整條命令就以自己的 sentinel
+（`SUBSTITUTION_BUDGET_EXHAUSTED`）與自己的規則名（`substitution budget exhausted`）**拒絕**，
+與 `UNREADABLE_TRAP_ACTION`／`UNJUDGEABLE_ENV_S` 同一套規矩，訊息裡帶著「有幾個開頭讀不出
+來」。預算仍然只是「少做那一次讀取」（成本上限不變，時間表沒有退步），改變的只是「少讀了」不
+再等於「當作讀過了」。
+
+**新的代價，同樣明講**：一條真的帶了 64 個讀不出來的開頭、而且其實沒有刪除的命令，現在也會被
+拒絕——閘門分不出這兩者，這正是重點。價錢的上界在測試裡釘著：同樣形狀、十個開頭照樣放行；人
+手寫得出來的東西都落在放行那一側。另外，`$(` 填充多到把預算花完的那幾列，拒絕理由會從「受保
+護的目錄 /etc」變成「substitution budget exhausted」（4,378 列語料裡有 106 列，全都是
+deny→deny）；在預算用完之前就找到的受保護路徑仍然由它決定訊息。
+
+**先前記在這裡、仍然成立的兩件事**：（a）審查報告建議的 `noCloserBeyond` 記憶化是**不成立的**
+——拿這個檔案自己的 `readBraced` 反證，輸入 `${${}` 時 `readBraced(.,1)` 回 `null` 而
+`readBraced(.,3)` 回 `4`，後面的開頭可以收尾、前面的卻不能，**不要照那個處方實作**；
+（b）如果哪天真的要上輸入長度上限，實測數字是修復前最壞形狀 16KB 746ms、32KB 2,883ms、
+64KB 12,363ms，判定預算最多再加 2,000ms——但線性化之後這條路沒有必要走。
+
+**R5-a — the `$(` quadratic in the tokenizing phase — CLOSED 2026-09-05, made linear
+without an input-size cap.** The judging budget's deadline is set AFTER
+`commandTargets()`, so tokenizing is outside it, and the failed-read budget added
+2026-09-04 (`MAX_FAILED_SUBSTITUTION_READS = 64`) bounded only the three
+in-double-quote readers in `shellWords()`.
+**The cost was ATTRIBUTED before anything was changed**, with a counter on an
+instrumented copy rather than a guess: for 16 KB of `echo "` + `$(` x n +
+`" ; rm -rf /etc` the tokenizer spent exactly its 64 failed reads (its budget was
+already working) while `commandSubstitutions()` failed **8,192 times and scanned
+33.7 M characters** -- the whole cost was there. The unquoted twin spends 8,192 in
+each of two sites, which is why it cost exactly twice as much.
+**The fix** extends the same failed-read budget to the three remaining sites: the
+tokenizer's TOP-LEVEL `$(` arm (sharing the counter with the in-quote arm that
+already had one) and `commandSubstitutions()`'s `$(` and `<(`/`>(` readers (a counter
+of its own, because that function re-reads the RAW text after tokenizing, where the
+tokenizer's per-call counter cannot reach). **No input-size cap was added**: the
+owner's 2026-09-05 ruling was to make the scan linear first and revisit a cap only
+if that proved impossible.
+Measured through the real stdin entry point (arm64 = this Mac's node 26.8.1;
+x86_64 = node 22.17.0, the architecture CI runs): in-quote 382/1,428/5,678 ms before
+-> 48/60/83/130 ms after at 16/32/64/128 KB on arm64, and 758/2,624/9,103/38,557 ms
+before -> 159/177/215/306 ms after on x86_64; the unquoted twin 820/2,870/11,458 ms
+-> 56/74/113/173 ms on arm64 and 1,409/4,788/15,818/80,591 ms -> 205/235/276/407 ms
+on x86_64. Every cell DENIES, and the refusal names the protected directory rather
+than being the out-of-time one -- the second would mean the gate stopped reading
+instead of reading to the end. The `<(` sibling was quadratic on its own (785 ms at
+16 KB, 2,965 ms at 32 KB on arm64) and shares the counter.
+**What pins it is a COUNT, not a millisecond**: `shellWords()` and
+`commandSubstitutions()` each expose `failedSubstitutionReads` on their return value,
+and the rows assert that the counter stops exactly AT the cap and that doubling the
+input buys no extra failed read. A wall-clock assertion on this path measures the
+host (the R4-5 lesson).
+**The cost, stated rather than hidden**: past the cap a `$(` that WOULD have closed
+is no longer read, so its body is not scanned.
+
+> **This paragraph used to say something false, and the falsehood was load-bearing
+> (R5-13, fixed 2026-09-05).** It read: "Reaching that state needs 64 openers that
+> never balance anywhere in the rest of the input, which is a syntax error in every
+> shell this file models (`bash -n` refuses it), so a command that reaches the cap
+> is not a command that runs." **The counter-example is inside the same function**:
+> an UNQUOTED heredoc body is deliberately kept in `scannable`, because the
+> substitutions in it really do expand -- so that text is code to this gate and
+> ordinary DATA to bash. 64 x `$(` in a heredoc body is not a syntax error at all:
+> `bash -n` accepts it, and at run time bash prints a NON-fatal
+> `bad substitution: no closing )` and carries on to the next line. Measured by
+> r5-validate-better-rm-7 against a real target under bash 5.3.15, /bin/bash 3.2.57
+> and /bin/sh: `cat <<EOF` + 64 x `$(` + `EOF` + `echo $(rm -rf /etc)` was **ALLOWED
+> and really removed it**; 63 openers denied, 64 allowed. Six spellings behaved
+> identically (the `<(` twin, `<<-`, `cat <<EOF | wc -l`, a mixed 40+40, and a
+> plausible `cat > notes.txt <<EOF` note).
+>
+> **The general rule, written down so it is not forgotten again**: any bash-LITERAL
+> context this gate still scans is scannable text for the gate and inert text for
+> the shell, so "the padding would be a syntax error" is never an argument for a
+> state being unreachable in this file.
+
+**What happens now (R5-13)**: when any failed-read budget is exhausted, the whole
+invocation is REFUSED, with its own sentinel (`SUBSTITUTION_BUDGET_EXHAUSTED`) and
+its own rule name (`substitution budget exhausted`) -- the same discipline
+`UNREADABLE_TRAP_ACTION` and `UNJUDGEABLE_ENV_S` follow -- and the message carries
+the number of openers it could not read. The budget still only skips the READ, so
+the cost ceiling and the timing table above are unchanged; what changed is that
+"skipped the read" no longer also means "answered as if it had read it".
+
+**The new cost, stated just as plainly**: a command that really does carry 64
+unreadable openers and hides no deletion is now refused as well -- the gate cannot
+tell the two apart, which is the whole point. The bound on that price is pinned in
+the tests: ten unreadable openers in the same shape are still allowed, and anything
+a person writes by hand is on the allowed side of that line. One more consequence,
+measured over a 4,378-row corpus: 106 rows that used to be refused by name
+("protected directory: /etc") are now refused as `substitution budget exhausted`
+instead (all deny -> deny, none allow), because the padding really does hide the
+path from the scan; a protected path found BEFORE the budget ran out still wins the
+message.
+**Two things recorded here earlier that still stand**: (a) the `noCloserBeyond` memo
+a review suggested is UNSOUND, disproved against this file's own `readBraced`
+(`${${}`: index 1 returns null, index 3 returns 4, so a LATER opener can close where
+an earlier one cannot) -- do not implement it; and (b) if an input-size cap is ever
+wanted, the pre-fix worst-shape numbers were 16 KB -> 746 ms, 32 KB -> 2,883 ms,
+64 KB -> 12,363 ms plus up to 2,000 ms of judging -- but with the scan linear there
+is no reason to take that route.
 
 ## R5-b — 產生器標籤取自 `path.basename()`，只有豁免那一支被收窄
 
@@ -395,31 +538,66 @@ the exemption: elsewhere in the file (wrapper unwrapping, carrier detection) a
 basename match is the FAIL-CLOSED direction -- recognising one more name costs a
 refusal, never an allowance -- so it is left as it is.
 
-## R5-c — `trap` 字串裡的命令完全不會被掃描（**OPEN，未修**）
+## R5-c — `trap` 字串裡的命令不會被掃描 — 2026-09-05 **CLOSED**，留作紀錄
 
-`trap 'rm -rf /etc' EXIT` 實測 **放行**，而且真的會在 shell 結束時執行；
-`trap 'echo -e rm -rf /etc | bash' EXIT` 同理。原因是 `trap` 的第一個引數在斷詞後是
-**一個字**，`rm` 從來不在命令位置上，而這個檔案裡沒有任何一支把「某些命令的某個引數其實是
-shell 程式碼」當成掃描來源。
+`trap 'rm -rf /etc' EXIT` 曾經 **放行**，而且真的會在 shell 結束時執行。原因是 `trap` 的第一個
+引數在斷詞後是**一個字**，`rm` 從來不在命令位置上，而這個檔案裡沒有任何一支把「某些命令的某個
+引數其實是 shell 程式碼」當成掃描來源。
 
-**這是既有行為，不是本輪造成的**：2026-09-04 在 campaign base 90ad891、HEAD 5bf41fe 與
-ee2cb0e 上三處量到同一個結果。刻意**不在 2026-09-04 這一輪修**：它是一個新的規則族
-（「引數即程式碼」的命令），至少還有 `eval`、`bash -c`、`sh -c`、`zsh -c`、`awk`／`perl`／
-`python -c`、`find -exec sh -c`、`xargs sh -c`、`ssh <host> '<cmd>'`、`watch`、`timeout … sh -c`
-與 `systemd-run` 同屬此族，而其中幾個（`bash -c`）本來就已經被別的規則掃到。要修就該一次把
-這一族的來源列出來、逐一量測哪些真的會執行，而不是替 `trap` 補一個特例——特例會讓下一個人
-以為這一族已經處理過了。
+**修法**：`trap` 有了自己的分支（`commandTargetsScan`，就在 `eval` 旁邊）。動作字串交給
+`nestedScan`，也就是 `bash -c '…'` 走的同一條路，所以規則只有一份，裡面每一條規則都照樣適用。
+選項字（`-l`／`-p`／`--`）跳過，`-`（重設）與空字串（忽略）不是動作，其餘第一個操作元就是動作。
+動作的文字若要展開後才知道（`trap "$CMD" EXIT`），走新的 `UNREADABLE_TRAP_ACTION` sentinel
+fail closed；`$HOME`／`$PWD`／`$TMPDIR` 用的是 rm 操作元同一個 `resolveKnownExpansions`，所以
+`trap 'rm -rf "$TMPDIR/x"' EXIT` 這種真正的清理 trap 讀得出來、照一般規則放行。
 
-**R5-c — a command inside a `trap` string is never scanned (OPEN).**
-`trap 'rm -rf /etc' EXIT` is measured **ALLOW** and really does run at shell exit, as is
-`trap 'echo -e rm -rf /etc | bash' EXIT`. `trap`'s first argument tokenizes to a single
-WORD, so `rm` is never in command position, and nothing in this file treats "this
-command's argument is shell code" as a scan source. PRE-EXISTING, not introduced here:
-measured identical at 90ad891, 5bf41fe and ee2cb0e. Deliberately NOT fixed in the
-2026-09-04 round -- it is a whole rule FAMILY (`eval`, `sh -c`, `awk`/`perl`/`python -c`,
-`find -exec sh -c`, `xargs sh -c`, `ssh host '<cmd>'`, `watch`, `timeout … sh -c`,
-`systemd-run`, several of which other rules already reach), and a special case for `trap`
-alone would leave the next reader believing the family was handled.
+**實測（touch marker，不是推論；2026-09-05）**：動作真的會執行的拼法是 EXIT、ERR、DEBUG、
+具名訊號（SIGUSR1）、數字 `0`、小寫 `exit`、一次多個訊號、`--` 之後、以及
+`builtin trap`／`command trap`／`\trap`——在 /opt/homebrew/bin/bash 5.3.15、/bin/bash 3.2.57、
+/bin/sh、/bin/zsh、/bin/dash、/bin/ksh 上都一樣。**不會執行**的三種也量了，而且照樣拒絕：
+`trap -p '<動作>' EXIT`（列印模式，bash 不收那個訊號名）、`trap '<動作>'`（沒有訊號名，四種
+shell 都不安裝）、`trap touch <路徑> EXIT`（動作被拆成多個字，bash／zsh／dash／ksh 都報錯）。
+最後一種在新規則下只會掃到 `touch`，不是刪除，所以它本來就不會被擋；前兩種是**刻意多擋**：
+「跳過選項字、讀下一個操作元」是一條規則，再補一條「列印模式就不要看」只會把一個沒人會寫的
+形狀從拒絕改成放行。
+
+**這一族其餘的成員仍然各自為政，別把這一條讀成「引數即程式碼」已經整族解決**：`eval`、
+`sh -c`／`bash -c`／`zsh -c`（本來就被別的規則掃到）、`xargs … sh -c`（同日一併修，見 R4-b）、
+`awk`／`perl`／`python -c`、`find -exec sh -c`、`ssh <host> '<cmd>'`、`watch`、
+`timeout … sh -c`、`systemd-run` —— 這些沒有量、也沒有修。
+
+**R5-c — a command inside a `trap` string is never scanned — CLOSED 2026-09-05,
+kept as the record.** `trap 'rm -rf /etc' EXIT` used to be **ALLOW** and really did
+run at shell exit: `trap`'s first argument tokenizes to a single WORD, so `rm` was
+never in command position, and nothing in this file treated "this command's argument
+is shell code" as a scan source.
+**The fix**: `trap` has a branch of its own in `commandTargetsScan`, beside `eval`,
+and the action string is handed to `nestedScan` -- the same route `bash -c '…'`
+takes -- so there is ONE copy of every rule and all of them apply inside the action.
+Option words (`-l`, `-p`, `--`) are skipped; `-` (reset) and the empty string
+(ignore) are not actions; the first remaining operand is. An action whose TEXT only
+exists after expansion (`trap "$CMD" EXIT`) fails closed through a new
+`UNREADABLE_TRAP_ACTION` sentinel with a message of its own, while $HOME/$PWD/$TMPDIR
+go through the same `resolveKnownExpansions` an rm operand does -- so the cleanup
+trap people actually write, `trap 'rm -rf "$TMPDIR/x"' EXIT`, is read and allowed.
+**Measured with touch markers, not reasoned about (2026-09-05)**: the action really
+executes for EXIT, ERR, DEBUG, a named signal (SIGUSR1), the numeric `0`, the
+lowercase `exit`, several signals at once, after `--`, and through `builtin trap`,
+`command trap` and `\trap` -- under bash 5.3.15, bash 3.2.57, sh, zsh, dash and ksh
+alike. Three spellings measured NOT to execute are refused anyway, and the reason is
+recorded rather than hidden: `trap -p '<action>' EXIT` (print mode; bash rejects that
+sigspec), `trap '<action>'` with no sigspec (no shell of the four installs it), and
+`trap touch <path> EXIT` (the action split across words; bash, zsh, dash and ksh all
+error). The last one is not refused by the new rule at all -- it scans the word
+`touch`, which deletes nothing -- and the first two are a deliberate over-refusal:
+"skip the option word and read the next operand" is one rule, and "…except in print
+mode, where you should not look" would be a second one whose only effect is to turn
+a refusal into an allowance for a command nobody writes.
+**The rest of the family is still on its own, so do not read this as "an argument is
+code" being handled**: `eval`, `sh -c`/`bash -c`/`zsh -c` (already reached by other
+rules), `xargs … sh -c` (fixed the same day, see R4-b), `awk`/`perl`/`python -c`,
+`find -exec sh -c`, `ssh host '<cmd>'`, `watch`, `timeout … sh -c` and `systemd-run`
+are neither measured nor fixed.
 
 
 ## R5-d — 產生器名字被「行外」換掉：PATH 上先種一個 `curl`，或上一次呼叫留下的 `hash -p`

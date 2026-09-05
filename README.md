@@ -535,10 +535,35 @@ macOS 用 firmlink 把資料卷宗接進根目錄，所以 `/Users/you` 與 `/Sy
 `$(`／`${`／`` ` `` 讀不到收尾時會掃到輸入結尾、而呼叫端只前進一個字元，於是「沒收尾的開頭
 數」是平方級的成本。實測（走真正的 stdin 進入點，命令是 `echo "` + 開頭字 ×n + `" ; rm -rf
 /etc`）：`${` 在 117KB 要 6,071ms，超過 live 的 5,000ms 逾時，加上預算之後是 52ms。
-**只有「失敗」的讀取花預算**，所以替換讀得完的真實命令碰不到它。**仍未涵蓋**：`$(` 那一半的
-成本主要在命令替換掃描裡，那是既有的、與這次改動無關的平方級成本——117KB 從 37,015ms 降到
-18,355ms，仍然遠超過逾時。要完全封住只剩「輸入長度上限 + fail-closed 拒絕」一條路，而那是
-姿態改變（實測：上限要壓到 16KB 才有餘裕），屬於使用者的裁決，見 KNOWN-RESIDUALS.md 的 R5-a。
+**只有「失敗」的讀取花預算**，所以替換讀得完的真實命令碰不到它。
+
+**2026-09-05：`$(` 那一半也封住了，斷詞階段不再有平方級成本。** 先前那道預算只框住雙引號裡
+的三個 reader；扛著 `$(` 成本的是另外兩個站點——tokenizer 的「頂層」`$(` 臂，以及
+`commandSubstitutions()` 在斷詞之後重讀原始文字時用的 `$(`／`<(` reader。兩個站點都納入同一
+份預算之後（實測，同一台 Mac，走真正的 stdin 進入點）：
+
+| 形狀 | 16KB | 32KB | 64KB | 128KB |
+|---|---|---|---|---|
+| `$(` 在引號內，修復前 | 382ms | 1,428ms | 5,678ms | — |
+| `$(` 在引號內，修復後 | 48ms | 60ms | 83ms | 130ms |
+| `$(` 未加引號，修復前 | 820ms | 2,870ms | 11,458ms | — |
+| `$(` 未加引號，修復後 | 56ms | 74ms | 113ms | 173ms |
+
+x86_64 上（CI 跑的架構，node 22.17.0）128KB 修復前是 38,557ms、修復後是 306ms，兩者都是
+**拒絕**，而拒絕的理由是「受保護的目錄 /etc」而不是「時間用完」。**輸入長度上限沒有上、也不
+需要上**：使用者 2026-09-05 的裁決是先讓掃描變線性，只有在做不到時才回頭考慮上限。
+`<(` 那個兄弟站點（`echo <(<(… ; rm -rf /etc` 這種形狀，修復前 16KB 785ms、32KB 2,965ms）
+一併納入同一份預算。細節與代價見 KNOWN-RESIDUALS.md 的 R5-a。
+
+**同日補上 fail-closed 的那一半：預算花完＝整條命令拒絕。** 預算原本只是「不再讀」，然後照樣
+放行；而「要花完預算就得寫出 shell 眼中的語法錯誤」這個假設是錯的——**未加引號的 heredoc 內文
+是刻意留著掃的**（那裡的替換真的會展開），所以 `cat <<EOF` + 64 個 `$(` + `EOF` +
+`echo $(rm -rf /etc)` 對這道閘門是「掃得到」的文字、對 bash 只是資料：`bash -n` 接受，執行時
+只有一則非致命警告，下一行照跑，實測**真的刪掉了目標**（63 個開頭拒絕、64 個放行）。現在任何
+一份預算被用完，都會以規則名 `substitution budget exhausted` 拒絕整條命令，訊息裡寫出有幾個
+開頭讀不出來。**代價**：真的帶了 64 個讀不出來的開頭、其實沒有刪除的命令也會被拒（閘門分不出
+兩者）；十個開頭的同形狀仍然放行，手寫得出來的東西都在放行那一側。時間表沒有退步——預算依舊
+只是少做那一次讀取。
 
 **發生頻率：不算罕見。** `$(which X) "$ARG"` 是很常見的寫法；本次修改的覆審者
 在審查過程中自己就踩到兩次。請當成日常會遇到的事，而不是偶爾。
@@ -620,9 +645,24 @@ substitution 進來的，這道閘門必須先讀得到那段腳本，否則**�
 
 **仍然允許、刻意不在這條規則範圍內**：`bash < script.sh`、`bash script.sh`、
 `bash -c "$(curl …)"`（**沒有 pipe 餵著時**——有 pipe 的 `curl … | bash -c "$(cat)"` 是拒絕的）、
-`eval "$(curl …)"`、`… | xargs -I{} bash -c "{}"`（**`-c` 後面帶著字面命令字串時**；
-`… | xargs -0 bash -c` 這種沒有命令字串、由 xargs 把 pipe 內容補上去的寫法不在此列）、
-`curl … > >(bash)`（輸出方向的 process substitution）、`busybox sh` 與其他非 shell 消費端。
+`eval "$(curl …)"`、`curl … > >(bash)`（輸出方向的 process substitution）、
+`busybox sh` 與其他非 shell 消費端。
+**2026-09-05 起 xargs 那一族不再在這個清單上**：`… | xargs -0 bash -c`、`| xargs -0 sh -c`、
+`| xargs -I{} sh -c '{}'`、`| xargs -I{} bash -c '{}'`、`| xargs -0 -- bash -c`、
+`| xargs -P4 -0 bash -c`、`| xargs -0 zsh -c`（七種實測真的會執行 payload），以及裸的
+`| xargs bash -c`、`| xargs -L1 bash -c`、`| xargs -n1 sh -c`（實測腳本一樣來自 stdin），
+現在全部走與 `| bash` 同一條規則：產生器讀得出來就照讀（`echo hi | xargs -0 bash -c` 仍放行），
+讀不出來就拒絕。**`-c` 的腳本寫在命令列上、又沒有替換字串會改寫它**的寫法仍然允許
+（`echo … | xargs -0 bash -c 'echo hi'`）。
+**2026-09-05 補正 xargs 的「選項表」**：命令字在哪裡，是由「每個選項吃幾個字」決定的，所以吃
+錯數量就會走過 shell。GNU 的 `-i[replace-str]`／`-e[eof-str]`／`-l[max-lines]`（以及
+`--replace[=…]`／`--eof[=…]`／`--max-lines[=…]`）引數是「選填且相連」的，裸寫時一個字都不
+吃，先前被當成吃下一個字，於是 `… | xargs -i sh -c '{}'` 把 `sh` 吞掉而放行；BSD 的
+`-J replstr`／`-R replacements`／`-S replsize` 與 GNU 的 `--process-slot-var` 則根本不在表
+裡，走訪會停在它們的「值」上。後三者不是紙上談兵：`-R 3 -I{} sh -c '{}'`、
+`-S 5000 -I{} sh -c '{}'`、`-J % -I{} sh -c '{}'` 在本機用 marker 實測都真的執行了從 stdin
+進來的腳本，而且原本全部放行。現在裸的 `-i`／`--replace` 代表替換字串 `{}`（findutils 手冊
+原話：效果等同 `-I{}`），`-J` 與 `-I` 一樣會記下替換字串。
 `cat f | bash` 被擋而只差一個字元的 `bash < f` 沒被擋，所以知道規則的人繞得過去：
 這條規則買到的是「閘門不再對一種常見寫法視而不見」，不是「對手拿不到執行」。
 完整清單見 KNOWN-RESIDUALS.md 的 R4-b。
@@ -704,6 +744,31 @@ curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install-hoo
 `inWordQuoteRemovalBlocked`、`offLineProducerBlocked` 裡，走真正的 stdin 契約跑過；放寬規則
 而不改測試，測試會紅。`CANONICAL_INSTALL_LINES` 與上面那個程式碼區塊還會被**逐行、照順序、
 逐位元組**比對：只改其中一邊，測試一樣會紅。
+
+### `trap` 的動作字串會被當成腳本掃描（規則：unreadable trap action）
+
+`trap '<動作>' <訊號>` 的第一個引數就是 shell 程式碼，訊號到達時會執行。2026-09-05 之前這道
+閘門完全看不到它：斷詞之後那是**一個字**，`rm` 從來不在命令位置上，所以
+`trap 'rm -rf /etc' EXIT` 放行、而且真的會在 shell 結束時刪掉 `/etc`。現在動作字串會交給與
+`bash -c '…'` 同一條巢狀掃描路徑，裡面每一條規則都照樣適用。
+
+實測（touch marker，2026-09-05）真的會執行、因此現在會被擋的拼法：`EXIT`、`ERR`、`DEBUG`、
+具名訊號（`SIGUSR1`）、數字 `0`、小寫 `exit`、一次多個訊號、`trap -- '…' EXIT`，以及
+`builtin trap`／`command trap`／`\trap`——在 bash 5.3.15、bash 3.2.57、sh、zsh、dash、ksh
+上都一樣。
+
+**仍然允許**：`trap - EXIT`（重設）、`trap '' INT`（忽略）、`trap`／`trap -p`／`trap -l`
+（列印）、`trap 'echo bye' EXIT`、`trap 'rm -rf build' EXIT`，以及真正的清理寫法
+`trap 'rm -rf "$TMPDIR/x"' EXIT`——`$HOME`／`$PWD`／`$TMPDIR` 與 rm 操作元用同一份解析規則。
+
+**動作讀不出來就拒絕**：`trap "$CMD" EXIT`、`trap "$(cat x.sh)" EXIT`、
+`trap "${CLEANUP:-…}" EXIT` 的文字要展開後才知道，訊息會直說「讀不到這段動作」並給出繞法
+（把動作寫成字面命令，或放進腳本檔改成 `trap 'bash /path/cleanup.sh' EXIT`），不會借用
+「piped script」那套說詞去講一條你沒有寫的管線。
+
+**別把這一條讀成「引數即程式碼」整族解決了**：`awk`／`perl`／`python -c`、
+`find -exec sh -c`、`ssh <host> '<cmd>'`、`watch`、`timeout … sh -c`、`systemd-run`
+都還沒有量、也還沒有修（見 KNOWN-RESIDUALS.md 的 R5-c）。
 
 ### `find` 什麼時候被當成刪除工具
 
