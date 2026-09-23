@@ -4490,6 +4490,52 @@ let pipedScriptChecks = 0;
   pipedScriptChecks += 4 + canonicalLines.length * 3;
 }
 
+// Every scratch directory this file makes goes through here, so it is removed
+// even when the block using it fails. The four blocks that build fixtures under
+// os.tmpdir() used to remove their directory on their own last line; a failing
+// assertion throws, the file stops, and that line never runs. By 2026-09-23 the
+// user's TMPDIR held 13 better-rm-hook-limit-* directories, all from the limit
+// block. That fits, but does not prove, a failure of its 120,000-target timing
+// row, whose 3,500 ms budget was missed at 3,727 and 3,662 ms when TMPDIR was a
+// long path. A forced throw inside each of the four blocks at 56121b0 left that
+// block's directory every time.
+// What this does NOT cover is a signal. SIGKILL cannot be caught by any process,
+// so a run killed with it keeps the directory of the block it was in. SIGTERM and
+// SIGINT are left at their default action on purpose: node runs a JavaScript
+// signal listener only from its event loop, and this file's body is one
+// synchronous run, so a listener can never fire while a block holds a directory
+// -- installing one only takes the default action away. Measured on this file
+// with a listener added: under gtimeout's SIGTERM at 38 s the run went on to 41 s
+// and exited 0 without the listener ever running; sent at 27 s, the signal
+// reached the whole process group, killed a hook child mid-row, and the run
+// failed on an unrelated assertion instead of reporting a timeout. So a signal
+// delivered while a block holds its directory still leaves that one directory,
+// whose prefix names the block. This gap is accepted, not fixed: closing it
+// needs a reaper outside this process, a new mechanism not worth it for a case
+// this rare.
+// 本檔案建立的暫存目錄一律經過這裡，所以用到它的區塊失敗時也會被移除。原本在 os.tmpdir()
+// 底下建 fixture 的四個區塊，各自在區塊最後一行才刪目錄；斷言失敗會丟例外、檔案中止，那一行
+// 就不會跑。到 2026-09-23 為止，使用者的 TMPDIR 累積了 13 個 better-rm-hook-limit-*
+// 目錄，全部來自 limit 區塊。這與該區塊 120,000 個目標那一列計時失敗相符，但並未證實：
+// 那一列的預算是 3,500 ms，TMPDIR 為長路徑時實測 3,727 與 3,662 ms 而超時。
+// 在 56121b0 對四個區塊各強制丟一次例外，每次都留下該區塊的目錄。
+// 這裡「不」涵蓋訊號。SIGKILL 任何行程都攔不到，被它砍掉的執行仍會留下當下那個區塊的目錄。
+// SIGTERM 與 SIGINT 刻意維持預設動作：node 只在事件迴圈裡執行 JavaScript 的訊號 listener，
+// 而本檔案主體是一整段同步執行，區塊持有目錄的期間 listener 根本不會觸發——裝了它只會拿掉
+// 預設動作。實測（在本檔案加上 listener）：gtimeout 在 38 秒送 SIGTERM，執行照跑到 41 秒、
+// exit 0，listener 一次都沒跑；在 27 秒送，訊號打到整個行程群組、砍掉正在跑的 hook 子行程，
+// 結果回報成一個不相干的斷言失敗而不是逾時。所以區塊持有目錄期間送達的訊號，仍會留下那一個
+// 目錄（前綴指明是哪個區塊）。這個缺口是接受、不修：要補就得在本行程之外另設回收者，
+// 為這麼罕見的情況新增一套機制不值得。
+function withScratchDir(prefix, body) {
+  const dir = fs.mkdtempSync(`${os.tmpdir()}/${prefix}`);
+  try {
+    body(dir);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // A truncated or 0-byte hook file cannot be told apart from a hook that allows,
 // under the two contracts where allow IS the absence of output: Claude Code and
 // Copilot both receive null from evaluate() and therefore no stdout. (Cursor,
@@ -4503,66 +4549,65 @@ let pipedScriptChecks = 0;
 // writes is never read as an allow.
 const fs = require('fs');
 const denyPayload = JSON.stringify(claude('rm -rf /', '/'));
-const scratch = fs.mkdtempSync(`${os.tmpdir()}/better-rm-hook-shape-`);
 let hookShapeChecks = 0;
+withScratchDir('better-rm-hook-shape-', (scratch) => {
+  const realHook = spawnSync('node', [`${__dirname}/hooks/protect-important-paths.js`], { input: denyPayload, encoding: 'utf8', env: { ...process.env, ...env } });
+  assert.equal(realHook.status, 0, 'the real hook exits 0');
+  assert.match(realHook.stdout, /"permissionDecision":"deny"/, 'the real hook denies a protected deletion');
+  hookShapeChecks += 1;
 
-const realHook = spawnSync('node', [`${__dirname}/hooks/protect-important-paths.js`], { input: denyPayload, encoding: 'utf8', env: { ...process.env, ...env } });
-assert.equal(realHook.status, 0, 'the real hook exits 0');
-assert.match(realHook.stdout, /"permissionDecision":"deny"/, 'the real hook denies a protected deletion');
-hookShapeChecks += 1;
+  const emptyHook = `${scratch}/empty.js`;
+  fs.writeFileSync(emptyHook, '');
+  const emptyResult = spawnSync('node', [emptyHook], { input: denyPayload, encoding: 'utf8' });
+  assert.equal(emptyResult.status, 0, 'a 0-byte hook exits 0');
+  assert.equal(emptyResult.stdout, '', 'a 0-byte hook prints nothing');
+  // Same shape as an explicit allow under both no-output contracts: this is the
+  // disarmed state the installer must never leave behind.
+  assert.equal(evaluate(claude('ls'), env), null, 'Claude Code allow is no output');
+  assert.equal(evaluate(copilot('ls'), env), null, 'Copilot allow is no output');
+  hookShapeChecks += 1;
 
-const emptyHook = `${scratch}/empty.js`;
-fs.writeFileSync(emptyHook, '');
-const emptyResult = spawnSync('node', [emptyHook], { input: denyPayload, encoding: 'utf8' });
-assert.equal(emptyResult.status, 0, 'a 0-byte hook exits 0');
-assert.equal(emptyResult.stdout, '', 'a 0-byte hook prints nothing');
-// Same shape as an explicit allow under both no-output contracts: this is the
-// disarmed state the installer must never leave behind.
-assert.equal(evaluate(claude('ls'), env), null, 'Claude Code allow is no output');
-assert.equal(evaluate(copilot('ls'), env), null, 'Copilot allow is no output');
-hookShapeChecks += 1;
-
-// Read the stub the installer really writes rather than restating it here: a
-// literal copy would keep passing after write_fail_closed_hook_stub was changed
-// to exit 0, which is the exact failure this is meant to catch.
-const stubHook = `${scratch}/stub-from-installer.js`;
-const stubExtraction = spawnSync('bash', [
-  '-c',
-  'eval "$(sed -n "/^write_fail_closed_hook_stub()/,/^}/p" "$1")"; write_fail_closed_hook_stub "$2"',
-  'extract-stub',
-  `${__dirname}/install-hooks.sh`,
-  stubHook,
-], { encoding: 'utf8' });
-assert.equal(stubExtraction.status, 0, `extracting the installer's stub writer failed: ${stubExtraction.stderr}`);
-assert.ok(fs.statSync(stubHook).size > 0, "the installer's stub must not be empty");
-const stubResult = spawnSync('node', [stubHook], { input: denyPayload, encoding: 'utf8' });
-assert.equal(stubResult.status, 2, "the installer's stub exits 2 (blocking for PreToolUse)");
-assert.equal(stubResult.stdout, '', "the installer's stub prints no allow");
-hookShapeChecks += 1;
-
-// The installer's own probe, extracted from install-hooks.sh and exercised
-// directly. Driving it through a real install cannot pin these properties: when
-// the source hook is itself bad, the probe's positive control (which asks
-// whether the SOURCE denies) cannot tell that apart from a broken probe. So the
-// three properties are pinned here, on the function itself.
-function runInstallerProbe(hookFile) {
-  return spawnSync('bash', [
+  // Read the stub the installer really writes rather than restating it here: a
+  // literal copy would keep passing after write_fail_closed_hook_stub was changed
+  // to exit 0, which is the exact failure this is meant to catch.
+  const stubHook = `${scratch}/stub-from-installer.js`;
+  const stubExtraction = spawnSync('bash', [
     '-c',
-    'eval "$(sed -n "/^hook_denies_protected_deletion()/,/^}/p" "$1")"; hook_denies_protected_deletion "$2"',
-    'installer-probe',
+    'eval "$(sed -n "/^write_fail_closed_hook_stub()/,/^}/p" "$1")"; write_fail_closed_hook_stub "$2"',
+    'extract-stub',
     `${__dirname}/install-hooks.sh`,
-    hookFile,
-  ], { encoding: 'utf8', timeout: 120000 });
-}
+    stubHook,
+  ], { encoding: 'utf8' });
+  assert.equal(stubExtraction.status, 0, `extracting the installer's stub writer failed: ${stubExtraction.stderr}`);
+  assert.ok(fs.statSync(stubHook).size > 0, "the installer's stub must not be empty");
+  const stubResult = spawnSync('node', [stubHook], { input: denyPayload, encoding: 'utf8' });
+  assert.equal(stubResult.status, 2, "the installer's stub exits 2 (blocking for PreToolUse)");
+  assert.equal(stubResult.stdout, '', "the installer's stub prints no allow");
+  hookShapeChecks += 1;
 
-assert.equal(runInstallerProbe(`${__dirname}/hooks/protect-important-paths.js`).status, 0,
-  "the installer's probe must accept the real hook");
-hookShapeChecks += 1;
+  // The installer's own probe, extracted from install-hooks.sh and exercised
+  // directly. Driving it through a real install cannot pin these properties: when
+  // the source hook is itself bad, the probe's positive control (which asks
+  // whether the SOURCE denies) cannot tell that apart from a broken probe. So the
+  // three properties are pinned here, on the function itself.
+  function runInstallerProbe(hookFile) {
+    return spawnSync('bash', [
+      '-c',
+      'eval "$(sed -n "/^hook_denies_protected_deletion()/,/^}/p" "$1")"; hook_denies_protected_deletion "$2"',
+      'installer-probe',
+      `${__dirname}/install-hooks.sh`,
+      hookFile,
+    ], { encoding: 'utf8', timeout: 120000 });
+  }
 
-// Denying the first payload only. One payload proves the file is not truncated;
-// it does not prove the hook protects anything, so the probe must use several.
-const selectiveHook = `${scratch}/selective.js`;
-fs.writeFileSync(selectiveHook, `
+  assert.equal(runInstallerProbe(`${__dirname}/hooks/protect-important-paths.js`).status, 0,
+    "the installer's probe must accept the real hook");
+  hookShapeChecks += 1;
+
+  // Denying the first payload only. One payload proves the file is not truncated;
+  // it does not prove the hook protects anything, so the probe must use several.
+  const selectiveHook = `${scratch}/selective.js`;
+  fs.writeFileSync(selectiveHook, `
 const chunks = [];
 process.stdin.on('data', (c) => chunks.push(c));
 process.stdin.on('end', () => {
@@ -4573,32 +4618,31 @@ process.stdin.on('end', () => {
   process.exit(0);
 });
 `);
-assert.notEqual(runInstallerProbe(selectiveHook).status, 0,
-  'a hook that denies only the first payload must be rejected');
-hookShapeChecks += 1;
+  assert.notEqual(runInstallerProbe(selectiveHook).status, 0,
+    'a hook that denies only the first payload must be rejected');
+  hookShapeChecks += 1;
 
-// Printing deny while exiting 1: for Claude Code PreToolUse exit 1 is a
-// NON-blocking error, so the tool would run despite the deny on stdout.
-const denyButExit1 = `${scratch}/deny-exit1.js`;
-fs.writeFileSync(denyButExit1, `
+  // Printing deny while exiting 1: for Claude Code PreToolUse exit 1 is a
+  // NON-blocking error, so the tool would run despite the deny on stdout.
+  const denyButExit1 = `${scratch}/deny-exit1.js`;
+  fs.writeFileSync(denyButExit1, `
 process.stdout.write(JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny' } }));
 process.exit(1);
 `);
-assert.notEqual(runInstallerProbe(denyButExit1).status, 0,
-  'a hook that denies but exits 1 must be rejected');
-hookShapeChecks += 1;
+  assert.notEqual(runInstallerProbe(denyButExit1).status, 0,
+    'a hook that denies but exits 1 must be rejected');
+  hookShapeChecks += 1;
 
-// A hook that never terminates must not hang the installer forever.
-const hangingHook = `${scratch}/hanging.js`;
-fs.writeFileSync(hangingHook, 'setInterval(() => {}, 1000);\n');
-const hangStarted = Date.now();
-const hangResult = runInstallerProbe(hangingHook);
-const hangElapsed = Date.now() - hangStarted;
-assert.notEqual(hangResult.status, 0, 'a hook that never terminates must be rejected');
-assert.ok(hangElapsed < 60000, `the probe must time out, took ${hangElapsed}ms`);
-hookShapeChecks += 1;
-
-fs.rmSync(scratch, { recursive: true, force: true });
+  // A hook that never terminates must not hang the installer forever.
+  const hangingHook = `${scratch}/hanging.js`;
+  fs.writeFileSync(hangingHook, 'setInterval(() => {}, 1000);\n');
+  const hangStarted = Date.now();
+  const hangResult = runInstallerProbe(hangingHook);
+  const hangElapsed = Date.now() - hangStarted;
+  assert.notEqual(hangResult.status, 0, 'a hook that never terminates must be rejected');
+  assert.ok(hangElapsed < 60000, `the probe must time out, took ${hangElapsed}ms`);
+  hookShapeChecks += 1;
+});
 
 // ---------------------------------------------------------------------------
 // What the FILESYSTEM says the argument names.
@@ -4625,13 +4669,13 @@ fs.rmSync(scratch, { recursive: true, force: true });
 // 一列什麼都沒測到的測試。
 // ---------------------------------------------------------------------------
 let resolutionChecks = 0;
-{
+withScratchDir('better-rm-hook-resolve-', (scratchDir) => {
   // realpathSync so the fixture root is the PHYSICAL path: macOS resolves TMPDIR
   // through /var -> /private/var, and a fixture reached through a symlink
   // component would make every row below about that symlink instead.
   // 取實體路徑：macOS 的 TMPDIR 會經過 /var -> /private/var，否則下面每一列測到的都是
   // 那條 symlink。
-  const box = fs.realpathSync(fs.mkdtempSync(`${os.tmpdir()}/better-rm-hook-resolve-`));
+  const box = fs.realpathSync(scratchDir);
   const boxHome = `${box}/home`;
   const declared = `${box}/secrets`;
   const inner = `${declared}/inner`;
@@ -4836,9 +4880,7 @@ let resolutionChecks = 0;
     'a home directory that has not been created yet is still protected',
   );
   resolutionChecks += 1;
-
-  fs.rmSync(box, { recursive: true, force: true });
-}
+});
 
 // The ARITHMETIC of the identity comparison: which fields are read, and at what
 // precision. Three properties live here that no ordinary fixture can produce,
@@ -5895,8 +5937,8 @@ let substitutionScanBudgetChecks = 0;
 // 每個目標最多三次檔案系統呼叫，是 symlink 時二十六次。實測（刪的是真的 /etc）：60,000 個
 // 相對 symlink 操作元在 d3aed08 要 6,215 ms，命令本文只有 300 KB，超過 live 的 5,000 ms。
 let targetLimitChecks = 0;
-{
-  const box = fs.realpathSync(fs.mkdtempSync(`${os.tmpdir()}/better-rm-hook-limit-`));
+withScratchDir('better-rm-hook-limit-', (scratchDir) => {
+  const box = fs.realpathSync(scratchDir);
   fs.mkdirSync(`${box}/actual`);
   fs.symlinkSync(`${box}/actual`, `${box}/link`);
   const time = (command, cwd = '/workspace/project') => {
@@ -6092,9 +6134,7 @@ let targetLimitChecks = 0;
     'a protected path read before the budget ran out keeps the protected-directory wording',
   );
   targetLimitChecks += 2;
-
-  fs.rmSync(box, { recursive: true, force: true });
-}
+});
 
 // What a NESTED scan costs, pinned as a COUNT and not as a clock (r5-fix-better-rm-6).
 //
@@ -6224,8 +6264,8 @@ let envSplitStringChecks = 0;
 }
 
 let deviceChecks = 0;
-{
-  const box = fs.realpathSync(fs.mkdtempSync(`${os.tmpdir()}/better-rm-hook-device-`));
+withScratchDir('better-rm-hook-device-', (scratchDir) => {
+  const box = fs.realpathSync(scratchDir);
   fs.mkdirSync(`${box}/actual`);
   fs.symlinkSync(`${box}/actual`, `${box}/declared-link`);
   fs.symlinkSync(`${box}/actual`, `${box}/other-link`);
@@ -6374,9 +6414,7 @@ let deviceChecks = 0;
   // 上一列的對照：擋下它的是「在清單上」而不是「家目錄底下的連結」。旁邊的普通連結照舊可刪。
   shimAllows(`${box}/self/home/notes`, {},
     'an ordinary symlink under the home directory is not a declared entry');
-
-  fs.rmSync(box, { recursive: true, force: true });
-}
+});
 
 // ---------------------------------------------------------------------------
 // The OpenCode plugin's own decision. install-hooks.sh embeds a byte-identical
