@@ -14,6 +14,22 @@ document was measured; the scripts that measured it used to live only in a sessi
 scratchpad that this machine wipes within 7 days. A reviewer who wants to challenge
 any claim there should re-run it here rather than re-derive it from scratch.
 
+> **未經安全稽核。** 這些腳本 2026-08-20 移植進來時，規定推送前要先做一次安全稽核；那次稽核
+> 從未做過（2026-09-22 的 review lens 把 residual-harness 記為「未讀」），commit 仍然落地了。
+> 沒有人回答過的三個問題：(1) 它們會不會碰到真實的使用者檔案；(2) 下面列出的 better-rm 讀取的
+> 環境變數清單是否完整；(3) repo-write 拒絕（rc=90）在 `TMPDIR` 指進 repo、經 symlink 指進
+> repo、或腳本被搬進 repo 時是否真的觸發。所以上面那句「直接跑」要打折扣：**跑任何一支之前，
+> 先讀它。** 下面「安全性」一節寫的是作者的設計意圖，不是驗證過的保證。
+>
+> **Not security-audited.** When these scripts were ported (2026-08-20), a security audit was
+> required before pushing. It was never done (the 2026-09-22 review lenses recorded
+> residual-harness as not read), and the commits landed anyway. Three questions nobody has
+> answered: (1) can they touch real user files; (2) is the list of environment variables
+> better-rm reads, given below, complete; (3) does the repo-write refusal (rc=90) really fire
+> when `TMPDIR` points into the repo, points into it through a symlink, or a script is moved
+> into the repo. So qualify "re-run it here" above: **read a script before you run it.** The
+> safety section below states the author's design intent, not a verified guarantee.
+
 > **這些腳本不是測試套件的一部分，也不該是。** 它們慢（多數要跑好幾次完整的
 > `test-better-rm.sh`）而且部分對負載敏感。`run-test-suites.sh`、CI workflow 都是
 > 逐一列名的，不吃萬用字元，所以不會意外把這裡掃進去——請維持這個性質。
