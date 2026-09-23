@@ -359,16 +359,59 @@ log_deletion() {
 # Normalize path function
 normalize_path() {
     local path="$1"
-    # 移除多餘的斜線
-    # Remove multiple slashes
-    path=$(echo "$path" | sed 's#/\+#/#g')
-    
+    # 重複斜線不需要在這裡處理：下面 IFS='/' 的分詞本來就會丟掉空段（實測）。
+    # 這裡原本有一行 `path=$(echo "$path" | sed 's#/\+#/#g')`，它做的不是它宣稱的事：
+    # BSD sed 的基本正則沒有 `\+` 量詞，所以那一行在 macOS（也就是本工具出貨的平台）
+    # 上把「字面的 /+」改寫成 /。兩個階段給出的是「不同的值」，而這段文字原本把兩者併成
+    # 一句（2026-09-23 重新實測）：sed 那一步自己把 '/a//b/+c' 變成 '/a//b/c'——它吃掉的
+    # 是 `+` 前面那個斜線連同 `+`，而連續的 '//' 它碰不到；要再經過下面 IFS='/' 的分詞
+    # 丟掉空段，才會變成 '/a/b/c'。GNU sed 4.10 在 sed 那一步就得到 '/a/b/+c'，分詞後
+    # 不變。所以兩個平台的最終值真的不同（BSD 的 '/a/b/c' 對 GNU 的 '/a/b/+c'），而 CI
+    # 只跑 ubuntu，所以只有 GNU 那半邊被驗過。刪掉它讓 BSD 與 GNU 一致（兩邊都得到
+    # '/a/b/+c'），比「BSD 帶著那一行」嚴格更正確，而且每次呼叫省下一個 fork 與一個子行程。
+    # Multiple slashes need nothing here: the IFS='/' split below already drops
+    # empty components (measured). A line reading
+    # `path=$(echo "$path" | sed 's#/\+#/#g')` used to stand here and did not do
+    # what it said: BSD sed's basic regular expressions have no `\+` quantifier, so
+    # on macOS -- the platform this tool ships to -- it rewrote a LITERAL '/+' to
+    # '/'. The two STAGES produce different values and this note used to run them
+    # together (re-measured 2026-09-23): the sed step ALONE turns '/a//b/+c' into
+    # '/a//b/c' -- what it eats is the slash before the `+` together with the `+`,
+    # and it cannot touch the doubled '//' -- and it takes the IFS='/' split below,
+    # dropping the empty component, to reach '/a/b/c'. GNU sed 4.10 gets '/a/b/+c'
+    # out of the sed step itself, and the split leaves that alone. So the final
+    # answers really do differ by platform ('/a/b/c' on BSD against '/a/b/+c' on
+    # GNU), and CI runs only ubuntu, so only the GNU half was ever verified.
+    # Deleting it makes both platforms agree on '/a/b/+c' -- strictly more correct
+    # than BSD with the line -- and saves a fork and a subshell on every call.
     # 處理 ./ 和 ../
     # Handle ./ and ../
     local IFS='/'
     local parts=()
     local part
-    
+
+    # 分詞用的是「未加引號」的 $path，這是刻意的（IFS='/' 就是靠它斷段），但未加引號
+    # 的展開同時也會做「路徑名稱展開」——對「當前工作目錄」展開。於是 '/etc/*' 這個字
+    # 面宣告項在含有檔案的目錄下被展成那些檔名，同一個 BETTER_RM_PROTECTED_DIRS、同
+    # 一個目標，從不同目錄問會得到不同的判定（實測：宣告 "$H/secrets*"、目標
+    # "$H/secrets-2024"，在含有 secrets-2024 這個名字的目錄下 exit 1、在空目錄下
+    # exit 0）。`set -f` 只關掉萬用字元展開，不影響分詞，正是這裡要的；原本的狀態要
+    # 還回去，否則 better-rm 其他地方的萬用字元會無聲地停止展開。
+    # The split uses an UNQUOTED $path on purpose -- that is what IFS='/' acts on --
+    # but an unquoted expansion is also PATHNAME-EXPANDED, against the current
+    # working directory. So the literal entry '/etc/*' expanded to whatever names
+    # happened to sit in the caller's directory, and one BETTER_RM_PROTECTED_DIRS
+    # value with one target drew different verdicts from different directories
+    # (measured: declared "$H/secrets*", target "$H/secrets-2024" -- exit 1 from a
+    # directory holding that name, exit 0 from an empty one). `set -f` disables
+    # pathname expansion only, not word splitting, which is exactly the distinction
+    # needed here. The previous state is restored, or an unrelated glob elsewhere in
+    # better-rm would silently stop expanding.
+    local glob_was_disabled=0
+    case $- in
+        *f*) glob_was_disabled=1 ;;
+    esac
+    set -f
     for part in $path; do
         if [ "$part" = ".." ]; then
             # 移除上一個元素（如果存在）
@@ -380,7 +423,12 @@ normalize_path() {
             parts+=("$part")
         fi
     done
-    
+    # 分詞結束就把萬用字元展開還原。迴圈裡沒有任何 return／exit，所以這一個還原點
+    # 就覆蓋了每一條離開路徑。
+    # Restored as soon as the split is over. The loop above has no return and no
+    # exit, so this one restore point covers every path out.
+    [ "$glob_was_disabled" -eq 1 ] || set +f
+
     # 重建路徑
     local normalized=""
     if [[ "$path" = /* ]]; then
@@ -565,8 +613,17 @@ is_protected() {
     # above, so what is protected is the declared directory and not its contents.
     # The empty entry is not a detail: "" resolves to the current directory, so a
     # single trailing colon would make the user's own working directory undeletable.
-    # read -ra rather than letting the variable word-split: the latter would also
-    # glob an entry containing a wildcard, while the hook only splits.
+    # read -ra rather than letting the variable word-split, which is about the ':'
+    # separation only. It is NOT what keeps a wildcard entry from being globbed:
+    # this comment used to claim that it was, and the claim was false -- every entry
+    # is handed to normalize_path, whose own split WAS pathname-expanding each
+    # component against the working directory, so a declared '$H/secrets*' matched
+    # or did not match depending on where rm was run from. That is fixed in
+    # normalize_path, with `set -f` around the split; see the note there.
+    # read -ra 只負責 ':' 的切分。它「不是」讓含萬用字元的項目不被展開的原因——這句註解
+    # 原本就是這樣宣稱的，而那是假的：每一項都會交給 normalize_path，而它自己的分詞當時
+    # 會對每一段做路徑名稱展開，於是宣告的 '$H/secrets*' 會依「從哪個目錄執行」而時而
+    # 匹配、時而不匹配。修在 normalize_path 裡（分詞外面加 `set -f`）。
     local -a declared_extras=()
     if [ -n "${BETTER_RM_PROTECTED_DIRS:-}" ]; then
         local extra_entry

@@ -765,6 +765,125 @@ function shellWords(command) {
       pushWord('\n', true);
       index = Math.min(position, input.length) - 1;
       atWordStart = true;
+    } else if (char === '(' && word !== '' && word !== '!' && /[!?*+@]$/.test(word)
+      && extglobEnd(input, index) !== -1) {
+      // `word !== '!'` IS THE RESERVED-WORD EXCLUSION, and it is the whole of it.
+      // Bash has exactly one reserved word among the five extglob lead
+      // characters: `!`. A `!` that IS a complete word is the NEGATION operator,
+      // never a pattern -- `bash -c '!(touch M)'` creates the marker on bash
+      // 5.3.20, so the parentheses after it are a REAL subshell whose contents
+      // really run. Without this clause the gate below claimed that subshell as a
+      // pattern and nothing ever scanned inside it: `!(rm -rf /etc)` was ALLOW,
+      // and so was the same line after `;`, after `&&`, after `|`, after a
+      // newline, inside `{ }`, after `then`, after `do` and through `bash -c`
+      // (17 shapes measured 2026-09-23; all 17 are DENY at git HEAD e1e4277,
+      // which is what makes this a REGRESSION and not a gap). That is the exact
+      // failure the paragraph below names as the risk of getting this wrong --
+      // "swallowing a REAL subshell and losing the scan of its contents" -- and
+      // the gate walked into it because a one-character word passes a test for
+      // "the word ENDS in a lead character".
+      // Deliberately NOT "reject a one-character word": `@`, `?`, `*`, `+` are
+      // not reserved words in any position, so `rm -rf @(etc)`, `?(...)`,
+      // `*(...)` and `+(...)` standing alone as a whole operand are patterns and
+      // must keep going down this branch. Rejecting by LENGTH would have thrown
+      // those four away to fix the one that is a reserved word.
+      // The residual this leaves is named in KNOWN-RESIDUALS.md: a BARE `!(...)`
+      // in OPERAND position (`rm -rf !(zzz)`) is a real pattern that this branch
+      // now declines, so it is judged the way git HEAD judges it. Closing that
+      // needs command-position state the tokenizer does not carry, and the
+      // trade is one-directional: this clause can only ever hand the parentheses
+      // BACK to the scanner, so it cannot reopen M1, while a
+      // position-guessing version could.
+      // `word !== '!'` 就是「保留字排除」，而且僅此一條。五個 extglob 開頭字元裡，bash 只有
+      // 一個是保留字：`!`。整個字就是 `!` 時它是「否定」運算子、絕不是樣式，後面那對括號是
+      // 真的 subshell、內容真的會跑。少了這一條，下面的閘門把那個 subshell 當成樣式收走，
+      // 裡面就再也沒有人掃過：17 種形狀實測全部 ALLOW，而它們在 git HEAD e1e4277 上全部
+      // DENY——這正是下面那段自己點名的「弄錯的代價」。
+      // 刻意不寫成「拒絕單字元的字」：`@`、`?`、`*`、`+` 在任何位置都不是保留字，單獨成字時
+      // 是真的樣式，必須繼續走這條分支；按「長度」拒絕會為了修一個保留字而丟掉那四個。
+      // 留下的 residual 寫在 KNOWN-RESIDUALS.md：操作元位置上「裸的」`!(...)` 是真樣式，
+      // 這裡不再認它，於是與 git HEAD 同樣判定。這個取捨是單向的：這一條只會把括號「還給」
+      // 掃描器，所以它關不掉 M1，而「猜位置」的版本會。
+      // AN EXTGLOB PATTERN, not a word followed by a subshell. '(' was pushed as
+      // an operator unconditionally, so `rm -rf /et@(c)` tokenised as the operand
+      // `/et@` plus a subshell, the operand scan stopped on the paren, and the
+      // target this gate judged was the PREFIX `/et@` -- a literal that matches
+      // nothing, so the line was ALLOWED while bash handed rm exactly /etc
+      // (measured with an argv dumper). `/!(zzz)` is the same shape and hands rm
+      // every top-level entry. `?(` and `*(` were refused by ACCIDENT, because
+      // `/et?` and `/et*` are still patterns that can select /etc.
+      // Gated on three things together, because the risk of getting this wrong is
+      // swallowing a REAL subshell and losing the scan of its contents -- a
+      // fail-open traded for a fail-open. (1) The '(' must be ADJACENT to the word:
+      // `word !== ''` is exactly that test in this tokenizer, since whitespace
+      // flushes the buffer. (2) The word must END in one of bash's five extglob
+      // lead characters. (3) There must be a balanced ')' ahead -- without one bash
+      // reads the paren literally too, so falling through is the accurate answer.
+      // With all three, `cmd (subshell)` and `x; (rm -rf /etc)` are untouched:
+      // neither has a word ending in a glob character sitting against the paren,
+      // and `/et@ (c)` with a space is a bash syntax error rather than a shape this
+      // has to keep scanning.
+      // 這是 extglob 樣式，不是「一個字接一個 subshell」。三個條件同時成立才走這條路，因為
+      // 弄錯的代價是吞掉真的 subshell、丟掉它內容的掃描——用一個 fail-open 換一個 fail-open。
+      // (1) 括號必須「緊貼」前一個字（在這個 tokenizer 裡 `word !== ''` 就是這個判斷，因為
+      // 空白會把緩衝區沖掉）；(2) 那個字必須以 bash 五個 extglob 開頭字元之一結尾；(3) 前方
+      // 必須有配對的 ')'——沒有的話 bash 自己也把括號讀成字面，照原路走才是正確答案。
+      //
+      // THE LOOSENING THIS BRANCH ADMITS, characterized and disclosed rather than
+      // left for the next reader to discover. Relative to git HEAD e1e4277 this gate
+      // is NOT purely a tightening. A generated 760-row differential judged against
+      // both trees moves 528 rows DENY -> ALLOW, and every one of them is the same
+      // shape: a COMMAND-position group whose lead is `@`, `?`, `*` or `+`
+      // (22 contexts x 2 cwds x 3 spellings = 528; reproduced here 2026-09-23,
+      // 528/528 DENY at HEAD and 528/528 ALLOW with this branch). HEAD denies them
+      // because it had no gate here AT ALL: '(' was pushed as an operator
+      // unconditionally, so HEAD read the group as a real subshell and scanned its
+      // contents. This branch claims the group as one pattern word, so nothing
+      // scans inside it any more.
+      // ACCEPTED, and the reason is MEASURED rather than argued: in command
+      // position those four leads never run their contents on bash 5.3.20. With
+      // extglob OFF the line is a syntax error at the first word inside the group
+      // (status 2); with extglob ON the whole group is ONE WORD and becomes the
+      // command NAME, so it is `command not found` (status 127). Touch marker
+      // ABSENT 8/8 across the four leads in both states, cross-checked in a second
+      // measurement mode, 16/16 in total (2026-09-23, uid 501, non-destructive).
+      // extglob must be set BEFORE the line is PARSED to measure the on state at
+      // all: `shopt -s extglob` inside the same -c string runs after bash has
+      // already parsed the line, so it silently reports the off answer twice --
+      // `bash -O extglob` and a separate parse unit are the two modes used here.
+      // The NEGATION form is the one that really runs: with extglob off
+      // `!(touch M)` does create the marker, so those parentheses are a genuine
+      // subshell. That is the shape this clause hands back to the scanner, and it
+      // is DENY at HEAD and DENY here (132/132 in the same differential).
+      // So HEAD was OVER-DENYING four shapes that cannot execute, and this gate
+      // denies exactly the one that can. The cost is real: if some future bash ever
+      // made a command-position `@(...)` runnable, HEAD's accidental subshell scan
+      // would have covered it and this does not. That is an accepted reduction in
+      // defence-in-depth, not an oversight -- written up in KNOWN-RESIDUALS.md
+      // under the R6-c section, and pinned in BOTH directions by the extglob
+      // command-position boundary rows in test-hooks.js, so an edit that re-denies
+      // the four, or that stops denying the negation, goes red.
+      // 這條分支「放寬」了什麼，明講而不是留給下一個人自己發現。相對 git HEAD e1e4277 它不是
+      // 純收緊：一份 760 列的差異表在兩棵樹上各判一次，有 528 列從 DENY 變成 ALLOW，而且全
+      // 是同一種形狀——命令位置上開頭是 `@`、`?`、`*`、`+` 的群組（22 種語境 × 2 個 cwd × 3
+      // 種拼法 = 528；2026-09-23 在此重現：HEAD 528/528 拒、本分支 528/528 放）。HEAD 會拒
+      // 是因為它這裡「根本沒有閘門」：'(' 無條件被當成運算子，於是 HEAD 把那個群組讀成真的
+      // subshell 並掃了它的內容；本分支把它收成一個樣式字，內容就不再有人掃。
+      // 裁決是「接受」，而理由是量出來的：命令位置上這四個開頭在 bash 5.3.20 上從來不會執行
+      // 內容。extglob 關 → 在群組內第一個字上語法錯誤（狀態 2）；extglob 開 → 整個群組是
+      // 「一個字」、變成命令名字 → command not found（狀態 127）。四個開頭 × 兩種狀態，touch
+      // marker 全部不存在（8/8），另一種量法交叉驗證後共 16/16。要量到「開」的那一半，
+      // extglob 必須在「解析之前」就設好：`shopt -s extglob` 寫在同一個 -c 字串裡時 bash 早
+      // 就把整行解析完了，量到的其實是「關」的答案兩次。
+      // 真正會跑的是否定形式：extglob 關時 `!(touch M)` 真的會建立 marker，那對括號是真的
+      // subshell；那正是這一條還給掃描器的形狀——HEAD 拒、這裡也拒（同一份差異表 132/132）。
+      // 也就是說：HEAD 多拒了四種「跑不起來」的形狀，而這道閘門正好只拒那個跑得起來的。代價
+      // 是真的：哪天 bash 讓命令位置的 `@(...)` 能跑，HEAD 那個「碰巧的 subshell 掃描」會擋
+      // 到，而這裡不會。這是**接受**的防禦縱深折損，不是漏看——寫在 KNOWN-RESIDUALS.md 的
+      // R6-c 那一節，並由 test-hooks.js 裡那幾列「命令位置邊界」雙向釘住。
+      const close = extglobEnd(input, index);
+      word += input.slice(index, close + 1);
+      index = close;
     } else if (';&|()<>\n'.includes(char)) {
       if (word) pushWord(word), word = '';
       pushWord(char, true);
@@ -1672,6 +1791,33 @@ function resolveKnownExpansions(word, expansionEnv) {
 // 一個「字」變成「目標」的唯一入口。沒有展開就是它自己；展開全部解得開就用解出來的路徑，
 // 之後照舊走一般的受保護路徑判定；其餘一律未知並拒絕。
 function targetFromWord(word, isDynamic, expansionEnv) {
+  // A TILDE FORM THIS GATE CANNOT MODEL IS DANGEROUS, not literal. expandHome()
+  // models exactly `~`, `~/...`, `$HOME`, `${HOME}`, `$HOME/...` and `${HOME}/...`
+  // and returned everything else VERBATIM -- and a word starting `~<name>` carries
+  // no `$`, so it never reached the dynamic-expansion fail-closed path either. It
+  // was therefore judged as a literal RELATIVE path: measured 2026-09-22,
+  // `rm -rf ~sieg/.ssh` resolved to `<cwd>/~sieg/.ssh`, a path that exists nowhere
+  // and matches no list, and every rule above said allow while every shell on this
+  // host really handed rm /Users/sieg/.ssh.
+  // The dirstack forms are the proof this was a defect rather than a posture:
+  // `~+` IS the working directory, so it is byte-equivalent to "$PWD", which this
+  // gate already refuses -- identical semantics, opposite verdicts, inside one
+  // function. `~-`, `~+1`, `~-1`, `~0` and `~1` were allowed the same way.
+  // This is ONE condition and not three more prefixes, deliberately: expanding
+  // `~user` needs the passwd database, which is a larger and separate change, and
+  // an enumeration is what let the dirstack forms through in the first place.
+  // Anything unmodelled goes down the path that already answers for `$W`, so the
+  // refusal carries the workaround the gate already offers (spell it absolutely).
+  // The cost is over-refusal on a benign line naming another user's directory or
+  // using `~+` as a shorthand, which is the safe direction.
+  // 模型裡沒有的波浪號寫法是「危險」，不是「字面」。expandHome 只認六種拼寫、其餘原樣傳回，
+  // 而 `~<name>` 不含 `$`，也就走不到動態展開的 fail-closed 路徑，於是被當成字面的相對路徑。
+  // `~+` 就是工作目錄、與 "$PWD" 等價，而後者本來就被拒絕——同樣的語意、相反的判定，出現在
+  // 同一個函式裡。這裡刻意只加一個條件而不是再加三個前綴：列舉正是漏掉 dirstack 寫法的原因。
+  const spelling = String(word);
+  if (spelling.startsWith('~') && spelling !== '~' && !spelling.startsWith('~/')) {
+    return UNRESOLVED_TARGET + spelling;
+  }
   if (!hasUnresolvedTargetExpansion(isDynamic)) return word;
   const resolved = resolveKnownExpansions(word, expansionEnv);
   return resolved === null ? UNRESOLVED_TARGET + word : resolved;
@@ -1859,6 +2005,61 @@ function bracketMatches(spec, character) {
 // 單一路徑「段」對單一 pattern 段。迭代式、每個 '*' 只留一個回溯點，成本上限是
 // pattern×text 而不會爆炸：它取代的那個正則在約 85 個 '*' 時要五秒以上（實測），對
 // PreToolUse 閘門而言那就是逾時，而逾時的閘門等於沒有回答。
+// The index of the ')' that closes the extglob group whose '(' is at `start`, or
+// -1 when the parentheses never balance. Nested groups are counted, because
+// `@(a|b(c))` is one group and stopping at the first ')' would split it.
+// 回傳與 `start` 的 '(' 配對的 ')' 位置，括號不成對時回傳 -1。巢狀群組要計數。
+function extglobEnd(text, start) {
+  let depth = 0;
+  for (let i = start; i < text.length; i += 1) {
+    if (text[i] === '(') depth += 1;
+    else if (text[i] === ')') {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+// Every extglob group rewritten as '*', which is deliberately WIDER than the
+// group it replaces: `@(c)` matches exactly `c`, `?(c)` matches `` or `c`, `+(c)`
+// and `*(c)` match repetitions of it and `!(zzz)` matches everything except
+// `zzz` -- and '*' inside a component matches any run of non-'/' characters, so
+// it is a superset of all five. Widening is the fail-closed direction: the answer
+// can only OVER-match, which costs an over-refusal and cannot open a hole.
+// Null means "this gate cannot model the pattern": a group containing a '/' does
+// not survive being widened one component at a time, and the caller treats a null
+// as capable of naming anything.
+// 每個 extglob 群組改寫成 '*'——刻意比它取代的群組「更寬」，因為 '*' 在單一路徑段裡匹配任
+// 意一段非 '/' 字元，是那五種的超集。放寬是 fail-closed 的方向：答案只會過度匹配，開不了
+// 洞。回傳 null 表示「這道閘門建模不了」：群組裡含 '/' 時逐段放寬會失真，呼叫端把 null 當
+// 成「可能指到任何東西」。
+function widenExtglob(pattern) {
+  if (!/[!?*+@]\(/.test(pattern)) return pattern;
+  let out = '';
+  let index = 0;
+  while (index < pattern.length) {
+    const lead = pattern[index];
+    if ('!?*+@'.includes(lead) && pattern[index + 1] === '(') {
+      const end = extglobEnd(pattern, index + 1);
+      if (end === -1) {
+        // Unbalanced: bash reads it as a literal paren, and so does this.
+        // 括號不成對時 bash 讀成字面括號，這裡也一樣。
+        out += lead;
+        index += 1;
+        continue;
+      }
+      if (pattern.slice(index + 2, end).includes('/')) return null;
+      out += '*';
+      index = end + 1;
+      continue;
+    }
+    out += lead;
+    index += 1;
+  }
+  return out;
+}
+
 function componentMatches(pattern, text) {
   let p = 0;
   let t = 0;
@@ -1913,7 +2114,15 @@ function componentMatches(pattern, text) {
 // 開頭的點——`dist/*` 選不到 `dist/.git`（bash 實測），所以擋它是錯的；以字面 '.' 開頭的
 // pattern 段則選得到，所以 `.*` 與 `.gi*` 照樣擋。
 function globMatchesPath(pattern, target) {
-  const patternParts = pattern.split('/');
+  // Extglob groups are widened to '*' before anything is asked, so the five
+  // operators need no arm of their own in componentMatches() -- and a pattern this
+  // gate cannot model is treated as naming anything, which is the fail-closed side
+  // of not knowing.
+  // extglob 群組在問任何問題之前就被放寬成 '*'，所以 componentMatches 不需要為那五個運算子
+  // 各寫一條；建模不了的樣式視為「可能指到任何東西」，這是「不知道」的 fail-closed 那一側。
+  const widened = widenExtglob(pattern);
+  if (widened === null) return true;
+  const patternParts = widened.split('/');
   const targetParts = target.split('/');
   if (patternParts.length !== targetParts.length) return false;
   for (let i = 0; i < patternParts.length; i += 1) {
@@ -1924,7 +2133,13 @@ function globMatchesPath(pattern, target) {
 }
 
 function hasGlob(value) {
-  return /[*?[\]{}]/.test(value);
+  // `@(`, `+(` and `!(` carry no character this regex used to look for, so an
+  // extglob whose lead is one of those three was not read as a pattern at all --
+  // it was compared as a literal string, and `/et@(c)` is not the string /etc.
+  // `?(` and `*(` matched by accident, which is why all five are named here.
+  // `@(`、`+(`、`!(` 不含原本這個 regex 在找的任何字元，於是它們根本沒被當成樣式，而是被當
+  // 字面比對——`/et@(c)` 不是 /etc 這個字串。`?(` 與 `*(` 是碰巧中的，所以五個都寫出來。
+  return /[*?[\]{}]/.test(value) || /[!?*+@]\(/.test(value);
 }
 
 // Kept as its own name because test-guard-parity.js asks the hook this exact
@@ -2261,6 +2476,218 @@ function nestedScan(text, depth, bodiesAreCode, expansionEnv) {
 // 進入點，也是 memo 唯一的擁有者：只活在一次頂層掃描裡，並在 `finally` 清掉，即使中途丟出
 // 例外也不會把答案留給下一條命令。設計上可重入——萬一有內層呼叫走到這個函式而不是
 // nestedScan()，它會看到 memo 已經有主人，不會把它清掉。
+// csh/tcsh belong here for the same reason every other name does: a script
+// piped into one really runs. On this stock macOS /bin/csh and /bin/tcsh are the
+// same inode, both are in /etc/shells, and a touch payload through either one
+// executes -- while `fish`, already on this list, is not installed here at all.
+// The four lists derived below are spreads of this one, so this is the only
+// place a carrier name is written.
+// csh／tcsh 屬於這裡的理由與其他每一個名字相同：灌進去的腳本真的會執行。在這台原廠 macOS
+// 上 /bin/csh 與 /bin/tcsh 是同一個 inode、都在 /etc/shells 裡；反倒是清單上的 fish 沒裝。
+// 下面四份清單都是對這一份的展開，所以 carrier 名字只在這裡寫一次。
+// Module scope, not function scope, for the reason SYSTEM_DIRS is: a list a test
+// cannot IMPORT is a list no test can walk, and that is how the three names below
+// went missing for as long as they did.
+// 放在模組層而不是函式層的理由與 SYSTEM_DIRS 相同：測試匯入不到的清單，就沒有任何測試走得過。
+// su belongs on THIS list and not on the exec-wrapper table below, because it
+// does not exec its operand: su(1) says "all command line arguments before the
+// target login name are processed by su itself, everything after the target login
+// name gets passed to the login shell", and its own example is `su -m operator -c
+// poweroff` with the note that "-c is passed to the shell of the user operator".
+// So `su nobody rm -rf /etc` hands `rm` to sh as a SCRIPT FILENAME and removes
+// nothing, while `su nobody -c 'rm -rf /etc'` really removes -- an exec-wrapper
+// row would have modelled the harmless spelling and left the live one open, which
+// is a fix in the fail-OPEN direction. The carrier branch finds `-c` wherever it
+// stands, so the login operand needs no special case. Not probed with a real
+// privilege change (`su nosuchuser -c ...` reaches PAM and reports
+// "Authentication failed", which is the argument walk arriving at the login
+// name); the rest is the man page. The stdin route (`su nobody <<EOF`) follows
+// from the login shell being exec'd with su's stdin and is not probed either.
+// su 屬於這份清單而不是下面那張 exec wrapper 表：它不 exec 自己的操作元，login 名字之後的字
+// 全部交給目標使用者的 login shell，所以 `-c` 是那個 shell 的。當成 exec wrapper 會剛好模型
+// 化「不會刪東西的那個拼法」，把真正會刪的留著——往放行那一側錯。沒有做真的權限切換。
+const shellCarriers = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'fish', 'csh', 'tcsh', 'su']);
+
+// PURE EXEC WRAPPERS: the word is not the command, the command word FOLLOWS it
+// once the wrapper's own options -- and any operand of its own -- are stepped
+// over. Written as a TABLE and not as one branch per name, because a branch per
+// name is precisely what failed: unwrapping was decided by ten hand-written
+// branches in resolveExecutable() plus a bare set for the ones that take no
+// options, and three stock macOS wrappers had neither. Measured 2026-09-22 with
+// HOME=/Users/sieg: `nice rm -rf ~/.ssh` DENY, while `caffeinate rm -rf ~/.ssh`,
+// `caffeinate -t 5 rm -rf /etc`, `stdbuf -o0 rm -rf ~/.ssh`, `stdbuf -o 0 rm -rf
+// /etc`, `script -q /dev/null rm -rf ~/.claude` and `script /tmp/t rm -rf /etc`
+// were all ALLOW -- /usr/bin/caffeinate, /usr/bin/script and /usr/bin/stdbuf all
+// exist on a stock macOS and all three really exec (touch markers, 3/3). The
+// second layer misses them too: `rm` is a .bashrc ALIAS with no PATH shim, and an
+// alias is not consulted in argument position.
+// A table is also the only shape test-hooks.js can ITERATE, which is the other
+// half of the same defect -- see the wrapper-model guards there.
+// `valueOptions` are the options whose VALUE is the next word; `clusteredValue`
+// matches a BSD-style cluster whose last letter is such an option (`caffeinate
+// -ist 5`); `leadingOperands` is how many operands of the wrapper's OWN stand
+// before the command word (script's first non-option word is its typescript
+// FILE, which is why adding the name alone left both script spellings open).
+// 這張表取代「一個名字一個分支」：真正漏掉的三個原廠包裝命令連分支都沒有。valueOptions 是
+// 「值在下一個字」的選項，clusteredValue 是 BSD 式合併選項的最後一個字母就是那種選項，
+// leadingOperands 是命令字之前屬於包裝命令自己的操作元個數（script 的第一個非選項字是
+// typescript 檔名，所以只加名字會留下兩種 script 拼法）。
+const execWrappers = new Map([
+  ['!', { valueOptions: [], clusteredValue: null, leadingOperands: 0 }],
+  ['nohup', { valueOptions: [], clusteredValue: null, leadingOperands: 0 }],
+  ['setsid', { valueOptions: [], clusteredValue: null, leadingOperands: 0 }],
+  // caffeinate(8): `caffeinate [-dimsu] [-t timeout] [-w pid] [utility arguments...]`
+  ['caffeinate', { valueOptions: ['-t', '-w'], clusteredValue: /^-[dimsu]*[tw]$/, leadingOperands: 0 }],
+  // stdbuf(1): `stdbuf [-e bufdef] [-i bufdef] [-o bufdef] [command [...]]`. The
+  // attached spellings (`-o0`, `--output=0`) need no entry: they are one word.
+  ['stdbuf', { valueOptions: ['-e', '-i', '-o', '--error', '--input', '--output'], clusteredValue: null, leadingOperands: 0 }],
+  // script(1), BSD: `script [-aeFkqr] [-t time] [file [command ...]]` -- one
+  // leading operand, the typescript file, before the command.
+  ['script', { valueOptions: ['-t', '-T'], clusteredValue: /^-[adeFkpqr]*[tT]$/, leadingOperands: 1 }],
+  // ROUND 2. The three rows above came from a fix whose guard only walked this
+  // table: it goes red when a name is DELETED from here and stayed quiet when a
+  // name was never added, so the seven names below were still ALLOW after it
+  // shipped. The names themselves were found by a platform sweep that read
+  // man-page sources and reported the tools whose trailing operand is a command
+  // they run.
+  // THAT SWEEP HAS BEEN REMOVED, and nothing in this file or in the tests looks
+  // at the platform any more. It was removed because every examination of it
+  // produced a NEW defect. Its file discovery composed `${name}.${ext}` with ext
+  // taken from the section DIRECTORY name, so it could only open a page already
+  // named <stem>.<suffix of its own directory> -- and BOTH figures are needed to
+  // say how big that hole was, which is why earlier notes quoting one of them were
+  // still wrong. Re-derived 2026-09-23 over /usr/share/man (8 section directories,
+  // 3,007 files): 267 pages carry an extension that is not ANY section-directory
+  // suffix (214 `.ntcl`, 45 `.1m`, 4 `.1tcl`, 4 gzipped `.1.gz`), and the number it
+  // could not open is 274 -- those 267 plus 7 whose extension IS a section suffix
+  // but not their own directory's (six man1/*.8 and one man8/*.1). Naming only the
+  // 45 `.1m` -- which is how the four DTrace rows below stayed missing -- made the
+  // hole look a sixth of its size. Then `.so` redirect stubs were unresolvable for
+  // the whole base system, and its "detects an unlisted name" guarantee shipped
+  // with wrong figures three separate times. It was not converging, and a
+  // guarantee that expires quietly is worse than none.
+  // So these rows are now a PINNED LIST, the same shape SYSTEM_DIRS / HOME_DIRS /
+  // MOUNT_PARENTS already use: test-wrapper-model.js compares the pinned names
+  // against this table in BOTH directions (a deletion goes red, and so does an
+  // addition nobody wrote down) and exercises every row with shapes generated
+  // from the row's own fields. What it deliberately does NOT do is promise
+  // anything about names that are not here. Completeness across unlisted wrappers
+  // is NOT guaranteed; KNOWN-RESIDUALS.md R6-a names the ones known to be
+  // unmodelled and measured ALLOW. Finding a new one is a human reading the
+  // platform, and nothing here will go red until they do.
+  // Each row below still records the SYNOPSIS it was derived from and how the exec
+  // was proven; the touch-marker measurements are written out beside the rows in
+  // `blocked`.
+  // 第二輪。上面三列來自「守衛會走訪這張表」的修法：那道守衛在名字被刪掉時會紅，在名字從
+  // 來沒加進來時安靜，所以下面七個在它出貨之後仍是 ALLOW。這些名字當初是由一道讀 man page
+  // 原始碼的平台掃描找出來的。**那道掃描已經移除**，本檔與測試都不再讀平台：它每被檢查一次
+  // 就生出一個新缺陷，而且「洞有多大」需要兩個數字才講得完——這也正是先前只引用其中一個的
+  // 說法仍然是錯的原因。檔案探索用「章節目錄名」當副檔名，只打得開已經叫做
+  // <名字>.<自己目錄的後綴> 的 page。2026-09-23 對 /usr/share/man（8 個章節目錄、3,007 個
+  // 檔案）重新推導：**267** 份 page 的副檔名不是任何章節後綴（214 個 `.ntcl`、45 個 `.1m`、
+  // 4 個 `.1tcl`、4 個壓縮的 `.1.gz`），而它「打不開」的總數是 **274**——那 267 份再加上 7
+  // 份副檔名確實是章節後綴、但不是所在目錄那一個的（六個 man1/*.8、一個 man8/*.1）。只講
+  // 45 個 `.1m` 會讓這個洞看起來只有六分之一大。此外還有解不開 `.so` stub、保證文字三次帶
+  // 錯數字。不收斂，而會悄悄過期的保證比沒有保證更糟。現在這些列是一份「固定清單」，與 SYSTEM_DIRS ／
+  // HOME_DIRS ／ MOUNT_PARENTS 同一個形狀：test-wrapper-model.js 雙向比對並走訪每一列，但
+  // **刻意不承諾任何關於未列出名字的事**。未列出的包裝命令「完整性不保證」，已知的寫在
+  // KNOWN-RESIDUALS.md R6-a。
+  //
+  // sandbox-exec(1): `sandbox-exec [-f profile-file] [-n profile-name]
+  // [-p profile-string] [-D key=value ...] command [arguments ...]`. Every option
+  // it has takes a value, so there is no boolean letter to cluster with. It
+  // matters more than the others on this machine: ~/bin's own tooling runs
+  // sandbox-exec fences, so `sandbox-exec ... rm -rf <protected>` was a live hole.
+  ['sandbox-exec', { valueOptions: ['-f', '-n', '-p', '-D'], clusteredValue: null, leadingOperands: 0 }],
+  // chroot(8): `chroot [-G group[,group ...]] [-g group] [-u user] newroot
+  // [command [arg ...]]` -- one leading operand, newroot, and three options that
+  // all take a value, so again nothing to cluster.
+  ['chroot', { valueOptions: ['-G', '-g', '-u'], clusteredValue: null, leadingOperands: 1 }],
+  // arch(1): `arch [-32] [-64] [[-arch_name | -arch arch_name]...] [-c]
+  // [-d envname]... [-e envname=value]... [-h] prog [args ...]`. `-arch` and
+  // `--arch` both take the NEXT word (measured: `arch --arch arm64 <cmd>` execs);
+  // a hyphen-prefixed architecture (`-arm64`, `-64`) is one word and needs no
+  // entry. arch does not cluster its boolean letters.
+  ['arch', { valueOptions: ['-arch', '--arch', '-d', '-e'], clusteredValue: null, leadingOperands: 0 }],
+  // lockf(1): `lockf [-knsw] [-t seconds] file command [arguments]` -- the lock
+  // FILE stands before the command, and BSD getopt really does accept the cluster
+  // `-kt 0` (measured).
+  ['lockf', { valueOptions: ['-t'], clusteredValue: /^-[knsw]*t$/, leadingOperands: 1 }],
+  // taskpolicy(8): `taskpolicy [-d policy] [-g policy] [-c clamp] [-b]
+  // [-t thruput_tier] [-l latency_tier] [-a] [-s] [-S shims] [-m limit] [-j pri]
+  // program [arg1 [...]]`. `-bt 0` clusters (measured).
+  ['taskpolicy', {
+    valueOptions: ['-d', '-g', '-c', '-t', '-l', '-S', '-m', '-j', '-p'],
+    clusteredValue: /^-[absB]*[dgctlSmjp]$/,
+    leadingOperands: 0,
+  }],
+  // ssh-agent(1): `ssh-agent [-c | -s] [-DdTU] [-a bind_address]
+  // [-E fingerprint_hash] [-O option] [-P allowed_providers] [-t life]
+  // command [arg ...]`. No clusteredValue, because the cluster does NOT work here:
+  // `ssh-agent -Dt 60 <cmd>` prints usage and execs nothing (measured), so
+  // declaring one would model a spelling the platform does not have.
+  ['ssh-agent', { valueOptions: ['-a', '-E', '-O', '-P', '-t'], clusteredValue: null, leadingOperands: 0 }],
+  // apply(1): `apply [-a c] [-d] [-#] command argument ...`. The `-#` form is a
+  // digit cluster (`-0`, `-2`), one word, skipped as an ordinary option.
+  ['apply', { valueOptions: ['-a'], clusteredValue: null, leadingOperands: 0 }],
+  // ROUND 3, the DTraceToolkit family. The round-2 sweep (since removed, see the
+  // ROUND 2 note above) could not see these at all: its file discovery composed
+  // `${name}.${ext}` with ext taken from the man SECTION DIRECTORY name, and these
+  // pages are man1/*.1m -- no directory is named `.1m`, so they were never
+  // candidates and nothing ever asked for a decision about them. That is one of
+  // the reasons the sweep is gone: these four rows exist because it was wrong.
+  // `dtruss rm -rf /etc` was ALLOW; so was
+  // `sudo dtruss rm -rf /etc`, and THAT one is live, because dtruss needs the
+  // root that the sudo in front of it supplies.
+  // 第三輪，DTraceToolkit 家族。第二輪的掃描根本看不到它們：檔案探索用「man 目錄名」當副檔
+  // 名，而這幾份 page 是 man1/*.1m。`dtruss rm -rf /etc` 是 ALLOW，`sudo dtruss rm -rf /etc`
+  // 也是——而後者是活的，因為 dtruss 需要的 root 正由前面那個 sudo 提供。
+  //
+  // All four really exec their operand, and the proof is the SHIPPED SCRIPT rather
+  // than the man page, because the man page is wrong about the options: each one
+  // does `command="$*"` and then `/usr/sbin/dtrace ... -c "$command"`
+  // (/usr/bin/dtruss:131 and :1026, dappprof:109/235, dapptrace:119/259,
+  // procsystime:101/230). Root is required -- unprivileged every one of them stops
+  // at `dtrace: failed to initialize dtrace: DTrace requires additional
+  // privileges` with the touch marker ABSENT (4/4, measured 2026-09-23 as uid
+  // 501), which is the same proof shape chroot's row carries.
+  // 四個都真的會 exec 自己的操作元，而證據是「出貨的腳本」而不是 man page：man page 把選項寫
+  // 漏了。四個都需要 root；無權限時全部停在 DTrace privileges 錯誤、marker 不存在（4/4）。
+  //
+  // valueOptions and clusteredValue come from the scripts' own getopts strings,
+  // NOT from the SYNOPSIS -- the SYNOPSIS of all four omits `-b bufsize`, and
+  // dtruss's also omits `-W name`. Modelling from the man page would have left
+  // `dtruss -b 8m rm -rf /etc` reading `8m` as the command word. The clusters are
+  // measured, not assumed: `dtruss -at open`, `dappprof -cu lib`,
+  // `dapptrace -cu lib` and `procsystime -an sshd` all reach dtrace, while `-zzz`
+  // is rejected with `illegal option` and a usage dump -- so the cluster really is
+  // parsed and the contrast case really can fail.
+  // 選項表取自腳本自己的 getopts 字串，不取自 SYNOPSIS：四份 SYNOPSIS 都漏了 `-b bufsize`，
+  // dtruss 還漏了 `-W name`。合併選項是實測的，不是假設的，而且有會失敗的對照組（`-zzz`）。
+  //
+  // dtruss(1m), getopts `ab:cdefhln:op:st:LW:`
+  ['dtruss', {
+    valueOptions: ['-b', '-n', '-p', '-t', '-W'],
+    clusteredValue: /^-[acdefhlosL]*[bnptW]$/,
+    leadingOperands: 0,
+  }],
+  // dappprof(1m), getopts `ab:cehop:Tu:U`
+  ['dappprof', { valueOptions: ['-b', '-p', '-u'], clusteredValue: /^-[acehoTU]*[bpu]$/, leadingOperands: 0 }],
+  // dapptrace(1m), getopts `ab:cdeFhlop:u:U`
+  ['dapptrace', { valueOptions: ['-b', '-p', '-u'], clusteredValue: /^-[acdeFhloU]*[bpu]$/, leadingOperands: 0 }],
+  // procsystime(1m), getopts `acehn:op:T`
+  ['procsystime', { valueOptions: ['-n', '-p'], clusteredValue: /^-[acehoT]*[np]$/, leadingOperands: 0 }],
+]);
+
+const wrapperCommands = new Set([
+  ...execWrappers.keys(),
+  'time', 'exec', 'coproc', 'function', 'eval', 'nice', 'timeout',
+  'sudo', 'command', 'builtin', 'noglob', 'env',
+  'echo', 'printf', 'true', 'false',
+  ...shellCarriers,
+  'rm', 'rmdir', 'better-rm',
+]);
+
 function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, expansionEnv = null) {
   const owned = nestedScanMemo === null;
   if (owned) nestedScanMemo = { expansionEnv, scanned: new Set() };
@@ -2377,25 +2804,6 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
     'for', 'while', 'until', 'select', 'do', 'done',
     'case', 'in', 'esac', '{', '}',
   ]);
-  // csh/tcsh belong here for the same reason every other name does: a script
-  // piped into one really runs. On this stock macOS /bin/csh and /bin/tcsh are the
-  // same inode, both are in /etc/shells, and a touch payload through either one
-  // executes -- while `fish`, already on this list, is not installed here at all.
-  // The four lists derived below are spreads of this one, so this is the only
-  // place a carrier name is written.
-  // csh／tcsh 屬於這裡的理由與其他每一個名字相同：灌進去的腳本真的會執行。在這台原廠 macOS
-  // 上 /bin/csh 與 /bin/tcsh 是同一個 inode、都在 /etc/shells 裡；反倒是清單上的 fish 沒裝。
-  // 下面四份清單都是對這一份的展開，所以 carrier 名字只在這裡寫一次。
-  const shellCarriers = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'fish', 'csh', 'tcsh']);
-  const simpleWrappers = new Set(['!', 'nohup', 'setsid']);
-  const wrapperCommands = new Set([
-    ...simpleWrappers,
-    'time', 'exec', 'coproc', 'function', 'eval', 'nice', 'timeout',
-    'sudo', 'command', 'builtin', 'noglob', 'env',
-    'echo', 'printf', 'true', 'false',
-    ...shellCarriers,
-    'rm', 'rmdir', 'better-rm',
-  ]);
   // A heredoc with a QUOTED delimiter is literal: the shell performs no
   // substitution inside it, so neither does this scan. Blanking those spans (and
   // only those) is what keeps ordinary text out of the command reader while a
@@ -2436,9 +2844,17 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
   // eval。不往下傳的話，這一種形狀就是最後一列仍比已推送基準寬鬆的。
   const bodies = words.heredocs || [];
   const carriers = new Set([...shellCarriers, 'eval', 'source', '.']);
+  // Spread from the same table the executable walk uses, so a wrapper added there
+  // is transparent here too. Without it `caffeinate bash <<EOF ... EOF` hid its
+  // carrier from this walk for the same reason `caffeinate rm` hid its command
+  // from the other one. Widening this set can only find MORE carriers, never
+  // fewer, so the cost is an over-refusal.
+  // 與執行檔走訪共用同一張表，那邊新增的包裝命令在這裡也會是透明的。這個集合放寬只會找到
+  // 更多 carrier、不會更少，代價是過度拒絕。
   const transparent = new Set([
-    'sudo', 'env', 'command', 'builtin', 'nohup', 'setsid', 'exec', 'time',
-    'nice', 'timeout', '!', 'coproc', 'noglob',
+    ...execWrappers.keys(),
+    'sudo', 'env', 'command', 'builtin', 'exec', 'time',
+    'nice', 'timeout', 'coproc', 'noglob',
   ]);
   let carrierPresent = bodiesAreCodeFromCaller;
   if (!carrierPresent) {
@@ -2462,11 +2878,59 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
     for (let w = 0; w < words.length; w += 1) {
       const word = words[w];
       if (operatorAt(w, separators)) { atCommandPosition = true; afterEnv = false; continue; }
+      // A RESERVED WORD IS A COMMAND POSITION, exactly as an operator is. This
+      // walk was the only one of the five places that consult `controlWords` that
+      // did not consult them, so a carrier standing after `{`, `do`, `then`, `in`
+      // or `fi` had already had atCommandPosition cleared by the word before it
+      // and was skipped by the `if (!atCommandPosition) continue` below. Measured
+      // 2026-09-22, all ALLOW before this line and DENY after: `{ bash; } <<EOF`,
+      // `for i in 1; do bash; done <<EOF`, `if true; then bash; fi <<EOF`,
+      // `while read x; do bash; done <<EOF` and both here-string spellings, while
+      // the control `( bash ) <<EOF` passed all along because a paren IS an
+      // operator and the walk recovered on it.
+      // This can only find MORE command positions, so it can only find MORE
+      // carriers: the cost is an over-refusal on a benign heredoc whose body is
+      // data and whose line happens to hold a reserved word before a shell name
+      // (`for x in bash; do ... done <<EOF`), never a missed carrier.
+      // 保留字就是命令位置，與運算子完全一樣。會查 controlWords 的幾個地方裡，只有這個走訪
+      // 沒查，於是站在 `{`／`do`／`then`／`in` 後面的 carrier 早就被前一個字把
+      // atCommandPosition 清掉、然後被下面那行跳過。這一行只會找到「更多」命令位置，因此只
+      // 會找到更多 carrier：代價是過度拒絕，不會漏掉 carrier。
+      if (controlWords.has(word)) { atCommandPosition = true; afterEnv = false; continue; }
       if (!atCommandPosition) continue;
       const name = path.basename(word);
       if (carriers.has(name)) { carrierPresent = true; break; }
-      if (transparent.has(name)) { if (name === 'env') afterEnv = true; continue; }
       if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
+      // A COMMAND WORD THIS WALK CANNOT READ IS A CARRIER IT CANNOT RULE OUT.
+      // The walk compared path.basename(word) against the carrier names, so a
+      // command word that is an EXPANSION never matched one: basename('$CMD') is
+      // '$CMD'. Measured 2026-09-22, ALLOW before this and DENY after -- and the
+      // here-string twin `CMD=bash; $CMD <<< "rm -rf /etc"` was already DENY,
+      // through the unresolved-executable rescue arm further down, which is the
+      // asymmetry that says this is a defect: `$CMD <<EOF ... EOF` really runs the
+      // body (verified with touch markers, 4 shapes x 4 shells, 16/16) and was
+      // allowed, while the identical script arriving as a here-string was refused.
+      // The rescue arm cannot be the fix on its own: it is reached only when the
+      // operand scan of an unresolvable command word runs to the redirection, and
+      // `{ $CMD ; } <<EOF`, `( $CMD ) <<EOF`, `if true; then $CMD; fi <<EOF` and
+      // every other compound spelling end that scan on the `;` or `}` long before
+      // the heredoc -- 42 of the 96 grid cells in test-hooks.js, measured. Asking
+      // it HERE, where the whole command line is in view, answers all of them.
+      // Resolved expansions keep the old path: `$HOME/build` is not a carrier
+      // merely because it carries a dollar sign. Only the UNREADABLE ones fail
+      // closed, and failing closed here can only ADD scanned bodies, never remove
+      // one, so the cost is an over-refusal on `$EDITOR <<EOF` whose body is data.
+      // 走訪拿 path.basename(word) 去比對 carrier 名字，所以「命令字是展開」時永遠比不中
+      // （basename('$CMD') 就是 '$CMD'）。它的 here-string 雙胞胎早就被拒了，這個不對稱正是
+      // 「這是缺陷」的證據。下游那個 rescue arm 補不完：複合命令的操作元掃描會在 `;`／`}`
+      // 上就結束，根本走不到 heredoc（實測 96 格裡有 42 格）。在這裡問——整條命令列都在
+      // 視野內——才答得完。解得開的展開走原本的路，只有「讀不出來」的才 fail-closed，而在
+      // 這裡 fail-closed 只會「多」掃內文、不會少掃。
+      if (/[$`]/.test(word) && resolveKnownExpansions(word, expansionEnv) === null) {
+        carrierPresent = true;
+        break;
+      }
+      if (transparent.has(name)) { if (name === 'env') afterEnv = true; continue; }
       if (afterEnv && !word.startsWith('-') && word.includes('=')) continue;
       atCommandPosition = false;
     }
@@ -2838,9 +3302,71 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
         continue;
       }
 
-      if (simpleWrappers.has(executable)) {
+      // One branch for every name in the exec-wrapper table. The option walk is
+      // the one the three original members already had -- skip words starting
+      // with `-` -- plus the two things a name-only fix cannot express: an option
+      // whose VALUE is the next word, and an operand of the wrapper's own that
+      // stands before the command. For a wrapper that declares neither (`!`,
+      // `nohup`, `setsid`) this is byte-for-byte the old walk, including the two
+      // spellings it deliberately does not special-case: a bare `-` and a `--`
+      // are skipped as ordinary option words, because ending the walk on either
+      // would hand `nohup -- -x rm -rf /etc` back as `-x` and turn a DENY into an
+      // ALLOW (measured while writing this).
+      // 一個分支服務表上每一個名字。選項走訪就是原本那三個成員用的那一套，再加上「值在下
+      // 一個字的選項」與「命令字之前屬於包裝命令自己的操作元」——只加名字表達不出這兩件事。
+      // 對沒有宣告這兩者的名字，行為與舊走訪逐字相同：裸 `-` 與 `--` 照舊當普通選項字跳過，
+      // 因為在它們身上結束走訪會把 `nohup -- -x rm -rf /etc` 交回成 `-x`，DENY 變 ALLOW。
+      const wrapperSpec = execWrappers.get(executable);
+      if (wrapperSpec !== undefined) {
         i += 1;
-        while (i < words.length && words[i].startsWith('-')) i += 1;
+        while (i < words.length && words[i].startsWith('-')) {
+          const option = words[i];
+          const takesNextWord = wrapperSpec.valueOptions.includes(option)
+            || (wrapperSpec.clusteredValue !== null && wrapperSpec.clusteredValue.test(option));
+          // A SEPARATOR IS NEVER AN OPTION'S VALUE, and the guard has to stand
+          // HERE -- before the step -- not after it. This walk took the next word
+          // as the value unconditionally, so `lockf -t ; rm -rf /etc` stepped
+          // OVER the `;`. The leadingOperands loop below does ask
+          // operatorAt(i, separators), but by then `i` was one position too late:
+          // it was looking at `rm`, which is not an operator, so it took `rm` as
+          // lockf's lock FILE and handed `-rf` back as the executable. `-rf` is
+          // not rm, nothing scanned the operands, and the line was ALLOW while
+          // the shell really ran the rm after the separator. Measured ALLOW
+          // 2026-09-23 and DENY at git HEAD e1e4277: `lockf -t ; rm -rf /etc`,
+          // `script -aqt | rm -rf /etc`, `chroot -u<newline>rm -rf /usr` and
+          // `sudo lockf -t ; rm -rf /etc`, plus each of `;` `&` `|` and newline
+          // against each of the three leadingOperands:1 rows (script, chroot,
+          // lockf) -- those three are where it is a HOLE, because a wrapper with
+          // no leading operand happens to land ON the next command word and
+          // recovers by accident. Asking here fixes all of them at once instead
+          // of relying on that accident.
+          // The end of input is the same shape: an option whose value is not
+          // there has no value, so the step is 1 and the walk ends rather than
+          // running past `words.length`.
+          // `operatorAt` and not a spelling test, for the reason that pairing was
+          // written for: a QUOTED `';'` is an ordinary operand, so it really can
+          // be an option's value, and refusing it here would model a command bash
+          // does not have.
+          // 分隔符永遠不是某個選項的「值」，而這道守衛必須站在「步進之前」，不是之後。原本這
+          // 個走訪無條件把下一個字當值吃掉，於是 `lockf -t ; rm -rf /etc` 跨過了 `;`。下面
+          // 那個 leadingOperands 迴圈確實有問 operatorAt，但那時 `i` 已經晚了一格：它看的是
+          // `rm`，不是運算子，於是把 `rm` 當成 lockf 的鎖檔、把 `-rf` 當成執行檔交回去——
+          // `-rf` 不是 rm，沒有人掃操作元，整行放行，而 shell 真的執行了分隔符後面的 rm。
+          // 三個 leadingOperands:1 的列（script／chroot／lockf）才是真的洞；沒有 leading
+          // operand 的包裝命令剛好會停在下一個命令字上、碰巧救回來。在這裡問，一次修好全部，
+          // 而不是靠那個巧合。用 operatorAt 而不是比字面，是因為加了引號的 `';'` 是普通操作
+          // 元、真的可以是某個選項的值。
+          i += takesNextWord && i + 1 < words.length && !operatorAt(i + 1, separators) ? 2 : 1;
+        }
+        // The wrapper's OWN operands, for the rows that declare them. Same rule
+        // as the option-value step above: never step over a separator, because a
+        // wrapper that ends exactly on one must not swallow it and hide the
+        // command after it.
+        // 包裝命令「自己的」操作元。規則與上面的選項值步進相同：絕不跨過分隔符。
+        for (let taken = 0; taken < wrapperSpec.leadingOperands; taken += 1) {
+          if (i >= words.length || operatorAt(i, separators)) break;
+          i += 1;
+        }
         executable = '';
         continue;
       }
@@ -2878,18 +3404,59 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
 
       if (executable === 'coproc') {
         i += 1;
-        if (
-          i + 1 < words.length
-          && /^[A-Za-z_][A-Za-z0-9_]*$/.test(words[i])
-          && !wrapperCommands.has(path.basename(words[i]))
-          && (
-            wrapperCommands.has(path.basename(words[i + 1]))
-            || controlWords.has(words[i + 1])
-            || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i + 1])
-            || words[i + 1] === '{'
-            || words[i + 1] === '('
-          )
-        ) i += 1;
+        // WHAT FOLLOWS THE WORD DECIDES WHETHER THE WORD IS A NAME, and when what
+        // follows OPENS A COMPOUND COMMAND the answer does not depend on what the
+        // word spells. bash: "The recommended form to use for a coprocess is
+        // `coproc NAME { command; }` ... simple commands result in the coprocess
+        // always being named COPROC". So before `{`, `(`, `if`, `for`, `while`,
+        // `until`, `case` or `select` the word IS the NAME and the command stands
+        // after it; before a simple command there is no NAME and the word IS the
+        // command.
+        // This walk used to ask `!wrapperCommands.has(word)` about BOTH readings
+        // at once, and that is what `su` broke. `su` belongs in shellCarriers
+        // (su(1): everything after the target login name goes to the login shell,
+        // so `-c` is the SHELL's -- an exec-wrapper row would have modelled
+        // `su nobody rm -rf /etc`, which removes nothing, and left
+        // `su nobody -c '<destructive>'`, which removes, ALLOW). shellCarriers
+        // spreads into wrapperCommands, so adding it there made this walk refuse
+        // to read `su` as a NAME, the `{` was never reached, and
+        // `coproc su { rm -rf /etc; }` was ALLOW -- DENY at git HEAD e1e4277.
+        // The same measurement showed the defect is OLDER than `su`: every
+        // carrier already on the list had it, and `coproc bash { rm -rf /etc; }`
+        // plus the `sh`, `zsh`, `csh` and `tcsh` spellings are ALLOW at HEAD too.
+        // Splitting the question closes all six.
+        // The carrier guard stays on the SIMPLE-command readings, which is the
+        // only place it was ever doing work: `coproc bash -c '<destructive>'` has
+        // no compound opener after `bash`, so `bash` is still read as the command
+        // word and its `-c` script is still scanned.
+        // Only the words that really OPEN a compound command are listed, NOT
+        // `controlWords` whole: `do`, `done`, `then`, `fi`, `in`, `esac` and `}`
+        // CLOSE or continue one. Using the whole set here would have opened a new
+        // hole -- `coproc rm in /etc` is a SIMPLE command, so bash runs
+        // `rm in /etc` and really deletes /etc, and reading `rm` as a NAME
+        // because `in` is a control word would have stepped the walk past it.
+        // 「後面是什麼」決定「前面那個字是不是 NAME」，而後面開啟的是「複合命令」時，答案與
+        // 那個字拼成什麼無關。bash 手冊：`coproc NAME { command; }` 是建議寫法，而「simple
+        // command 的 coprocess 一律叫 COPROC」。原本這個走訪把兩種讀法用同一個
+        // `!wrapperCommands.has(...)` 一起問，這正是 `su` 打破的地方。`su` 屬於
+        // shellCarriers（su(1)：login 名字之後的字全交給目標使用者的 login shell，所以 `-c`
+        // 是那個 shell 的），而 shellCarriers 會展開進 wrapperCommands，於是 `su` 不再被讀成
+        // NAME、`{` 永遠走不到。同一次實測也顯示這個缺陷比 `su` 更老：清單上原有的 carrier
+        // 全都有，`coproc bash|sh|zsh|csh|tcsh { ... }` 在 HEAD 上也是 ALLOW。
+        // 只列「真正開啟」複合命令的字，不用整個 controlWords：`do`／`done`／`then`／`fi`／
+        // `in`／`esac`／`}` 是關閉或延續。用整套會開一個新洞——`coproc rm in /etc` 是 simple
+        // command，bash 真的執行 `rm in /etc`。
+        const compoundOpeners = new Set(['{', '(', 'if', 'for', 'while', 'until', 'case', 'select']);
+        if (i + 1 < words.length && /^[A-Za-z_][A-Za-z0-9_]*$/.test(words[i])) {
+          const next = words[i + 1];
+          const opensCompound = compoundOpeners.has(next);
+          const looksLikeCommandWord = wrapperCommands.has(path.basename(next))
+            || /^[A-Za-z_][A-Za-z0-9_]*=/.test(next);
+          if (
+            opensCompound
+            || (looksLikeCommandWord && !wrapperCommands.has(path.basename(words[i])))
+          ) i += 1;
+        }
         if (words[i] === '{' || words[i] === '(') i += 1;
         executable = '';
         continue;
@@ -4957,4 +5524,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, commandSubstitutions, commandTargets, evaluate, globCanMatchGit, hasGlob, normalizedTarget, protectedReason, shellWords };
+module.exports = { HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, commandSubstitutions, commandTargets, evaluate, execWrappers, globCanMatchGit, hasGlob, normalizedTarget, protectedReason, shellCarriers, shellWords, wrapperCommands };

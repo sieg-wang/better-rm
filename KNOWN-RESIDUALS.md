@@ -922,3 +922,62 @@ KNOWN-RESIDUALS.md's R4-c instead, judged the way the already-adjudicated `bash 
 is, not counted in this section's known cost. Closing the remaining 21 shapes would still need
 this gate to carry a table of every valid xargs option letter, whose failure mode is refusing a
 working command, so it stays undone.
+
+## R6-b — `BETTER_RM_PROTECTED_DIRS` 的萬用字元語意：三個 DENY→ALLOW，已裁決保留
+
+2026-09-22。BRM-B2 的修法（`normalize_path` 的分詞外面加 `set -f`）帶來三個
+DENY→ALLOW，全部在 bash／CLI 那一側（JS hook 那側一列都沒有）：宣告項含萬用字元
+（`secrets*`、`notes?`、`notes[2024]`），目標是那個萬用字元展開後剛好等於的名字，而且是**從
+一個剛好放著那個名字的工作目錄**問的。修前 DENY、修後 ALLOW。
+
+**裁決：保留修法，不是保護退步。** 理由是量出來的，不是推測的：
+
+1. 這個變數在這台機器的 live 設定裡**到處都沒有設**——env、shell rc、Claude settings、
+   LaunchAgent plist 全部沒有。
+2. `README.md` 只用**字面絕對路徑**記載它（`"$HOME/work/secrets"`、
+   `"$HOME/work/secrets:$HOME/vault"`、`"/srv/data:/workspace/secrets"`）。萬用字元語意
+   從來沒有被宣告過。
+3. 修前那個 DENY 本身**就依工作目錄而定**：同一個宣告值、同一個目標，從別的目錄問就是
+   ALLOW。那是不確定性，不是保護。
+4. 專案原本針對這一列的驗收只斷言「三個工作目錄的判定一致」，**從來沒有斷言它收斂到哪個
+   值**——所以那個值是意外，不是決定。
+
+現在它是決定了：`test-better-rm.sh` 的「宣告項裡的萬用字元被當成字面字元」那一列把兩個
+方向都釘住——萬用字元展開後會匹配到的目標必須 ALLOW，而宣告項自己的字面拼法必須 DENY
+（少了後面這半，「這個變數整個失效」也能滿足前面那半）。`README.md` 的〈自行宣告受保護的
+目錄〉一節也明說了「這裡不支援萬用字元」。**不要把展開加回來。**
+
+## R6-c — M1 的修法帶來 528 個 DENY→ALLOW：全是命令位置的 extglob 開頭，已裁決接受
+
+2026-09-23。tokenizer 裡新增的那道閘門（`(` 緊貼一個以 extglob 開頭字元結尾的字 → 整個群組
+當成樣式收走）關掉了「`!(…)` 被當成樣式、內容從此無人掃描」的繞法；但它同時**放寬**了 528
+種形狀。一份 760 列的差異表在 git HEAD e1e4277 與本工作樹上各判一次：**528 列從 DENY 變成
+ALLOW**，而且全是同一種形狀——**命令位置**上開頭是 `@`、`?`、`*`、`+` 的群組（22 種語境 ×
+2 個 cwd × 3 種拼法 = 528）。HEAD 會拒，是因為它這裡根本沒有閘門：`(` 無條件被當成運算子，
+HEAD 於是把那個群組讀成真的 subshell 並掃了它的內容。
+
+**抱怨的點從來不是「放寬很危險」，而是它沒有被刻畫、也沒有被揭露。** 以下是刻畫。
+
+**裁決：接受這個放寬。** 理由是量出來的，不是推測的（bash 5.3.20、uid 501、2026-09-23、
+非破壞性，用 touch marker 判定「內容有沒有真的執行」）：
+
+1. **那四個開頭在命令位置上從來不會執行內容。** extglob 關 → 在群組內第一個字上語法錯誤
+   （狀態 2）；extglob 開 → 整個群組是「一個字」、變成命令**名字** → command not found
+   （狀態 127）。四個開頭 × 兩種狀態，marker 全部不存在（8/8）；換第二種量法交叉驗證後
+   共 16/16。
+2. **量「開」那一半有一個陷阱。** extglob 必須在「解析之前」就設好：`shopt -s extglob` 寫在
+   同一個 `-c` 字串裡時，bash 早就把整行解析完了，量到的其實是「關」的答案兩次。這裡用的是
+   `bash -O extglob` 與「shopt 之後另起一個 parse unit」兩種寫法，兩種答案一致。
+3. **真正會跑的只有否定形式。** extglob 關時 `!(touch M)` 真的會建立 marker——那對括號是真的
+   subshell。那正是這道閘門讓路、把括號還給掃描器的形狀：HEAD 拒、現在也拒（同一份差異表
+   132/132）。
+
+也就是說：**HEAD 多拒了四種「跑不起來」的形狀，而新閘門正好只拒那個跑得起來的。**
+
+**代價是真的，寫下來才算接受。** 這是一次**防禦縱深的折損**：哪天某個版本的 bash 讓命令位置
+的 `@(...)` 真的能跑，HEAD 那個「碰巧把它讀成 subshell 去掃內容」的行為會擋到，而現在不會。
+換到的是操作元位置上 `/et@(c)` 這類真樣式不再被截成 `/et@`（那才是這個修法本來要修的東西）。
+
+釘子在 `test-hooks.js`：命令位置的邊界**雙向**釘住——否定形式必須 DENY，那四個裡至少一個必須
+ALLOW。少了後面那半，「把閘門整個拿掉」也能滿足前面那半；少了前面那半，繞法回來沒人會知道。
+**任何一個方向被翻轉都會紅。**

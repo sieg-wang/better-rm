@@ -683,7 +683,12 @@ else
     # turns no hook test red, because those pin behaviour rather than the document.
     # The '## ' prefix is load-bearing: this loop demands exactly one occurrence and
     # a bare 'R4-b' appears three times (zh heading, en paragraph, R4 cross-reference).
-    for residuals_anchor in 'O_NOFOLLOW' '無法在無 root 的情況下測試' '兩邊都紅' '## R4-b' '## R4-c'; do
+    # '## R6-a' 與 '## R6-b' 同理（章節還在的釘子）。R6-a 記的是「掃描報得出來、而刻意
+    # 沒有建模的真包裝命令」，R6-b 記的是 BETTER_RM_PROTECTED_DIRS 那三個已裁決的
+    # DENY→ALLOW。兩者的程式碼那一半在下面。
+    # '## R6-a' and '## R6-b' pin the same way (the section still exists). Their
+    # code-side halves are below.
+    for residuals_anchor in 'O_NOFOLLOW' '無法在無 root 的情況下測試' '兩邊都紅' '## R4-b' '## R4-c' '## R6-b'; do
         residuals_hits=$(grep -o -- "$residuals_anchor" "$residuals_doc" 2>/dev/null | wc -l | tr -d '[:space:]')
         if [ "$residuals_hits" != "1" ]; then
             residuals_problems="$residuals_problems anchor[$residuals_anchor]在文件裡出現${residuals_hits}次(必須恰好1次);"
@@ -723,6 +728,13 @@ else
     # R3 — 程式碼面：那個牆鐘預算還在，且是活碼。換成不看牆鐘的寫法就該刪這條。
     grep -v '^[[:space:]]*//' "$SCRIPT_DIR/test-hooks.js" | grep -q 'const budgetMs = 1000;' ||
         residuals_problems="$residuals_problems R3所指的1000ms牆鐘預算已不在test-hooks.js的活碼裡;"
+    # R6-b — 程式碼面：`set -f` 還在 normalize_path 的活碼裡。那是讓宣告項被當成字面字元的
+    # 唯一機制；它一旦不在，R6-b 記載的裁決就反過來了，這一節必須跟著刪。
+    # R6-b, code side: `set -f` is still live code in normalize_path. It is the only
+    # mechanism that makes a declared entry literal; without it the adjudication R6-b
+    # records is inverted and the section has to go.
+    grep -v '^[[:space:]]*#' "$BETTER_RM" | grep -q 'set -f' ||
+        residuals_problems="$residuals_problems R6-b所指的set-f已不在better-rm的活碼裡;"
 fi
 if [ -z "$residuals_problems" ]; then
     test_pass "三條殘留的理由與其程式碼事實一致"
@@ -4673,6 +4685,201 @@ if [ -z "$extradirs_unguarded" ] && [ -z "$extradirs_false_positive" ] &&
     test_pass "BETTER_RM_PROTECTED_DIRS 的絕對／相對項受保護，空項與其內容未被誤擋"
 else
     test_fail "宣告的目錄未受保護:${extradirs_unguarded:- 無}；誤擋:${extradirs_false_positive:- 無}；抽取失敗:${extradirs_probe_broken:- 無}"
+fi
+
+test_item "normalize_path 不得對路徑做萬用字元展開（判定不得隨工作目錄改變）"
+# normalize_path 以 IFS='/' 分詞時用的是「未加引號」的 $path，於是每一段都還會做
+# 路徑名稱展開——對「當前工作目錄」展開。宣告項與目標都走這個函式，所以同一個
+# BETTER_RM_PROTECTED_DIRS、同一個目標，在不同工作目錄下會得到不同的判定。
+# better-rm:568-570 的註解剛好講反了（「read -ra 而不是讓變數分詞：後者還會把含萬用
+# 字元的項目展開」），那句保證正是這個缺陷得以留存的原因，已在同一次修改裡改正。
+# 這一列釘的是「性質」而不是兩三種拼寫：對每一個萬用字元，判定必須在三個工作目錄下
+# 一致——空的、含有會被匹配到的名字的、含有誘餌的。清單只會測到某人剛好想到的字元。
+# normalize_path splits on IFS='/' using an UNQUOTED $path, so every component is
+# also pathname-expanded -- against the CURRENT WORKING DIRECTORY. Declared entries
+# and targets both go through it, so one BETTER_RM_PROTECTED_DIRS value and one
+# target draw DIFFERENT verdicts from different directories. The comment at
+# better-rm:568-570 claimed the opposite ("read -ra rather than letting the variable
+# word-split: the latter would also glob an entry containing a wildcard"), and that
+# false assurance is why this sat; it is corrected in the same change.
+# What is pinned here is the PROPERTY, not two or three spellings: for each
+# metacharacter the verdict must be the SAME from three working directories -- one
+# empty, one holding a name the metacharacter would match, and one holding a decoy.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+b2_home="$TEST_WORK_DIR/b2-home"
+mkdir -p "$b2_home"
+mkdir -p "$TEST_WORK_DIR/b2-cwd-empty" "$TEST_WORK_DIR/b2-cwd-match" "$TEST_WORK_DIR/b2-cwd-decoy"
+# 「會被匹配到」的那個工作目錄裡放上每一種萬用字元展開得到的名字，誘餌目錄放不相關的。
+# The matching directory holds the names each metacharacter would expand to; the
+# decoy holds unrelated ones.
+for b2_name in secrets-2024 notes2 seta "two words" etc Users a b c; do
+    : > "$TEST_WORK_DIR/b2-cwd-match/$b2_name"
+done
+for b2_name in unrelated-1 unrelated-2; do
+    : > "$TEST_WORK_DIR/b2-cwd-decoy/$b2_name"
+done
+
+b2_verdict() {
+    # $1 工作目錄 / working directory, $2 宣告值 / declared value, $3 目標 / target
+    (
+        cd "$1" || exit 98
+        HOME="$b2_home" BETTER_RM_PROTECTED_DIRS="$2" bash -c '
+            eval "$(sed -n "/^PROTECTED_DIRS=(/,/^)/p;/^PROTECTED_PATTERNS=(/,/^)/p" "$1")"
+            eval "$(sed -n "/^normalize_path()/,/^}/p;/^is_protected()/,/^}/p" "$1")"
+            if [ "$(type -t is_protected)" != function ] ||
+               [ "$(type -t normalize_path)" != function ] ||
+               [ "${#PROTECTED_DIRS[@]}" -eq 0 ]; then
+                exit 99
+            fi
+            if is_protected "$2" >/dev/null 2>&1; then printf DENY; else printf ALLOW; fi
+        ' better-rm-is-protected "$BETTER_RM" "$3"
+    )
+}
+
+b2_normalize() {
+    (
+        cd "$1" || exit 98
+        bash -c '
+            eval "$(sed -n "/^normalize_path()/,/^}/p" "$1")"
+            [ "$(type -t normalize_path)" = function ] || exit 99
+            normalize_path "$2"
+        ' better-rm-normalize "$BETTER_RM" "$2"
+    )
+}
+
+# 每一列：宣告項、目標。目標與宣告項都在 b2-home 底下，與工作目錄內容無關；唯一的
+# 變數是「從哪個目錄問」。
+# Each row: a declared entry and a target, both under b2-home so the working
+# directory's contents are irrelevant -- the only thing that varies is where the
+# question is asked from.
+b2_rows="*|$b2_home/secrets*|$b2_home/secrets-2024
+?|$b2_home/notes?|$b2_home/notes2
+[|$b2_home/notes[2024]|$b2_home/notes2
+]|$b2_home/notes[2024]|$b2_home/notes[2024]
+{|$b2_home/set{a,b}|$b2_home/seta
+}|$b2_home/set{a,b}|$b2_home/set{a,b}
+space|$b2_home/two words|$b2_home/two words"
+b2_cwd_dependent=""
+b2_probe_broken=""
+b2_rows_seen=0
+while IFS='|' read -r b2_label b2_declared b2_target; do
+    [ -n "$b2_label" ] || continue
+    b2_rows_seen=$((b2_rows_seen + 1))
+    b2_empty=$(b2_verdict "$TEST_WORK_DIR/b2-cwd-empty" "$b2_declared" "$b2_target")
+    b2_match=$(b2_verdict "$TEST_WORK_DIR/b2-cwd-match" "$b2_declared" "$b2_target")
+    b2_decoy=$(b2_verdict "$TEST_WORK_DIR/b2-cwd-decoy" "$b2_declared" "$b2_target")
+    case "$b2_empty$b2_match$b2_decoy" in
+        *99*|"") b2_probe_broken="$b2_probe_broken $b2_label" ; continue ;;
+    esac
+    if [ "$b2_empty" != "$b2_match" ] || [ "$b2_empty" != "$b2_decoy" ]; then
+        b2_cwd_dependent="$b2_cwd_dependent ${b2_label}(empty=$b2_empty,match=$b2_match,decoy=$b2_decoy)"
+    fi
+done <<B2_ROWS
+$b2_rows
+B2_ROWS
+# 反恆真：探針必須是雙值的，否則「三個目錄一致」可以靠「永遠 ALLOW」達成。
+# Anti-tautology: the probe has to be two-valued, or "all three agree" is
+# satisfied by a probe that always says ALLOW.
+b2_two_valued_deny=$(b2_verdict "$TEST_WORK_DIR/b2-cwd-match" "$b2_home/plain" "$b2_home/plain")
+b2_two_valued_allow=$(b2_verdict "$TEST_WORK_DIR/b2-cwd-match" "$b2_home/plain" "$b2_home/other")
+# 單元列：宣告項是字面的萬用字元時，正規化後必須還是它自己，不能變成工作目錄裡的名字。
+# Unit row: a literal wildcard entry must normalise to itself, never to the names
+# that happen to sit in the working directory.
+b2_unit_match=$(b2_normalize "$TEST_WORK_DIR/b2-cwd-match" '/etc/*')
+b2_unit_empty=$(b2_normalize "$TEST_WORK_DIR/b2-cwd-empty" '/etc/*')
+b2_unit_problem=""
+[ "$b2_unit_match" = '/etc/*' ] || b2_unit_problem="$b2_unit_problem normalize_path('/etc/*')=$b2_unit_match"
+[ "$b2_unit_empty" = '/etc/*' ] || b2_unit_problem="$b2_unit_problem normalize_path-empty-cwd('/etc/*')=$b2_unit_empty"
+if [ "$b2_rows_seen" -eq 7 ] && [ -z "$b2_cwd_dependent" ] && [ -z "$b2_probe_broken" ] &&
+   [ -z "$b2_unit_problem" ] && [ "$b2_two_valued_deny" = DENY ] && [ "$b2_two_valued_allow" = ALLOW ]; then
+    test_pass "宣告項與目標的判定不隨工作目錄改變，且字面萬用字元未被展開"
+else
+    test_fail "隨 cwd 改變:${b2_cwd_dependent:- 無}；探針壞:${b2_probe_broken:- 無}；單元:${b2_unit_problem:- 無}；列數=$b2_rows_seen （應為 7）；雙值=$b2_two_valued_deny/$b2_two_valued_allow"
+fi
+
+test_item "宣告項裡的萬用字元被當成字面字元，而不是樣式"
+# 上一列釘的是「三個工作目錄給同一個答案」——它刻意沒有說那個答案是什麼，而「是什麼」
+# 正是 BRM-B2 的修法改掉的東西：`set -f` 之後，宣告項 '$H/secrets*' 只保護字面那條
+# 路徑，不再保護萬用字元「本來會展開到」的任何名字。獨立驗收在 CLI 側量到三個
+# DENY→ALLOW 轉移就是這個機制（宣告 'secrets*'、目標 'secrets-2024'，從一個剛好有
+# 'secrets-2024' 這個名字的目錄問，修前 DENY、修後 ALLOW）。那個轉移被裁定為「不是保護
+# 退步」：這個變數在這台機器的 live 設定裡（env、shell rc、Claude settings、LaunchAgent
+# plist）到處都沒有設；README 只用字面絕對路徑記載它；從來沒有宣告支援萬用字元語意；而
+# 修前那個 DENY 本身就依工作目錄而定——同一條命令從別的目錄問就是 ALLOW，那是不確定性，
+# 不是保護。
+# 所以這一列把「新的意思」釘成刻意的：萬用字元是字面字元。兩個方向都釘，否則「永遠
+# ALLOW」就能滿足它——這也正是上一列的反恆真檢查在教的事。不要把展開加回來。
+# The row above pins "three working directories give the same answer" -- it
+# deliberately does not say WHICH answer, and which answer is exactly what BRM-B2's
+# fix changed: after `set -f`, a declared '$H/secrets*' protects that literal path
+# and no longer protects any name the wildcard would have expanded to. The
+# independent validation measured three DENY->ALLOW transitions on the CLI side from
+# this mechanism (declared 'secrets*', target 'secrets-2024', asked from a directory
+# that happened to hold the name 'secrets-2024': DENY before, ALLOW after). That
+# transition was adjudicated as NOT a protection regression, on grounds that are
+# measured rather than assumed: the variable is unset everywhere in this machine's
+# live configuration (env, shell rc files, Claude settings, LaunchAgent plists);
+# README.md documents it only with literal absolute paths; glob semantics were never
+# advertised; and the pre-fix DENY was itself cwd-dependent -- the same command was
+# ALLOW from a different directory, which is nondeterminism, not protection.
+# So this row makes the new meaning DELIBERATE: a metacharacter is a literal
+# character. Both directions are pinned, or "always ALLOW" would satisfy it. Do not
+# put the expansion back.
+b2_lit_problem=""
+b2_lit_rows=0
+# 每一列：宣告項（含萬用字元）、萬用字元本來會匹配到的目標、期望。
+# Each row: the declared entry, a target the metacharacter would have matched, and
+# the expectation. The literal spelling of the entry itself is the DENY partner.
+b2_lit_rows_spec="*|$b2_home/secrets*|$b2_home/secrets-2024
+?|$b2_home/notes?|$b2_home/notes2
+[|$b2_home/notes[2024]|$b2_home/notes2
+{|$b2_home/set{a,b}|$b2_home/seta"
+while IFS='|' read -r b2_lit_label b2_lit_declared b2_lit_expanded; do
+    [ -n "$b2_lit_label" ] || continue
+    b2_lit_rows=$((b2_lit_rows + 1))
+    # 從「剛好放著那個展開後名字」的目錄問，因為那是修前唯一會答 DENY 的目錄；在別的
+    # 目錄問，修前修後都是 ALLOW，這一列就會因為錯的理由通過。
+    # Asked from the directory that HOLDS the expanded name, because that is the only
+    # directory where the pre-fix code answered DENY; asked from anywhere else this
+    # row would pass for the wrong reason.
+    b2_lit_wide=$(b2_verdict "$TEST_WORK_DIR/b2-cwd-match" "$b2_lit_declared" "$b2_lit_expanded")
+    [ "$b2_lit_wide" = ALLOW ] || b2_lit_problem="$b2_lit_problem ${b2_lit_label}:matched-expansion($b2_lit_wide)"
+    # 反恆真的另一半：宣告項自己的字面拼法必須還是 DENY，否則上面那一半可以靠「這個變數
+    # 整個失效」達成。
+    # The other half: the entry's own literal spelling must still be DENY, or the half
+    # above is satisfied by the variable having stopped working altogether.
+    b2_lit_self=$(b2_verdict "$TEST_WORK_DIR/b2-cwd-match" "$b2_lit_declared" "$b2_lit_declared")
+    [ "$b2_lit_self" = DENY ] || b2_lit_problem="$b2_lit_problem ${b2_lit_label}:literal-self($b2_lit_self)"
+done <<B2_LIT_ROWS
+$b2_lit_rows_spec
+B2_LIT_ROWS
+if [ "$b2_lit_rows" -eq 4 ] && [ -z "$b2_lit_problem" ]; then
+    test_pass "宣告項裡的 * ? [ { 都是字面字元：只保護宣告的那條路徑本身"
+else
+    test_fail "字面性:${b2_lit_problem:- 無}；列數=$b2_lit_rows （應為 4）"
+fi
+
+test_item "normalize_path 收斂重複斜線，但不得改寫字面的 '/+'"
+# better-rm:362-364 的 `sed 's#/\+#/#g'` 在 BSD sed 上沒有 `\+` 量詞：它把字面的
+# '/+' 改寫成 '/'。而它對「收斂重複斜線」這個本職是死碼——後面 IFS='/' 的分詞本來就
+# 會丟掉空段（實測）。刪掉它讓 BSD 與 GNU 一致，而且比「BSD 帶著那一行」更正確。
+# 這兩列一起才有意義：上面那列是缺陷，下面那列是那行本來要提供、而分詞已經提供的性質。
+# `sed 's#/\+#/#g'` at better-rm:362-364 has no `\+` BRE quantifier under BSD sed:
+# it rewrites a LITERAL '/+' to '/'. For its stated purpose it is dead code -- the
+# IFS='/' split below already drops empty components (measured). Deleting it makes
+# BSD agree with GNU and is strictly more correct than BSD with the line.
+# The two rows only mean something together: the first is the defect, the second is
+# the property the line was supposed to provide and the split already does.
+a5_plus=$(b2_normalize "$TEST_WORK_DIR/b2-cwd-empty" '/a//b/+c')
+a5_slashes=$(b2_normalize "$TEST_WORK_DIR/b2-cwd-empty" '/a//b///c')
+a5_problem=""
+[ "$a5_plus" = '/a/b/+c' ] || a5_problem="$a5_problem normalize_path('/a//b/+c')=$a5_plus （應為 /a/b/+c）"
+[ "$a5_slashes" = '/a/b/c' ] || a5_problem="$a5_problem normalize_path('/a//b///c')=$a5_slashes （應為 /a/b/c）"
+if [ -z "$a5_problem" ]; then
+    test_pass "字面的 '/+' 原樣保留，重複斜線照舊收斂"
+else
+    test_fail "$a5_problem"
 fi
 
 test_item "BETTER_RM_PROTECTED_DIRS 真的攔在 move_to_trash 前面（端到端）"

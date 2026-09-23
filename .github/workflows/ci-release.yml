@@ -24,9 +24,29 @@ defaults:
 
 jobs:
   test:
-    name: Test source tree
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Two legs, because better-rm branches on `uname -s` and the Darwin/BSD arm is
+    # the one that moves a file into the trash WITHOUT following a symlink
+    # (`mv "$1" -h -- "$2" "$3"`); so is the BSD half of every
+    # `stat -c ... || stat -f ...` pair, and so is the BSD `readlink -f`
+    # partial-resolution defence. With one ubuntu runner and no local pre-push
+    # hook, all of those shipped through zero automated verification -- the macOS
+    # run was a thing a human remembered to do. test-run-test-suites.sh enumerates
+    # the platform tokens the script branches on and fails when one of them is
+    # neither run here nor exempted by name, so this matrix cannot quietly shrink.
+    # fail-fast is off: when one userland disagrees with the other, the useful
+    # output is BOTH legs' results, not the first one to stop.
+    # 兩腳並跑，因為 better-rm 會依 `uname -s` 分支，而 Darwin/BSD 那條臂正是「搬進垃圾桶時
+    # 不穿過 symlink」的那一條。原本只有一台 ubuntu runner、本機也沒有 pre-push hook，那些臂
+    # 全部是零自動驗證出貨。矩陣縮水會被 test-run-test-suites.sh 的平台清查抓到。
+    name: Test source tree (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-15
 
     steps:
       - name: Check out pushed revision

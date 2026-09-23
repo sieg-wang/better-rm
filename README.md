@@ -308,6 +308,23 @@ export BETTER_RM_PROTECTED_DIRS="$HOME/work/secrets:$HOME/vault"
 - 以 `:` 分隔，空項會被略過（所以結尾多一個冒號不會把你的工作目錄變成刪不掉的）。
 - 相對路徑以目前的工作目錄為基準解析。
 - 與內建清單一樣是完全比對：保護的是宣告的那個目錄本身，`secrets/notes.txt` 仍可刪除。
+- **這裡不支援萬用字元。** `*`、`?`、`[`、`{` 都被當成**字面字元**，不是樣式：宣告
+  `"$HOME/work/secrets*"` 保護的是名字結尾真的有一個星號的那個目錄，`secrets-2024`
+  **不會**被它保護。這是刻意的，而且兩道守衛都一樣（`rm` 替身與 PreToolUse hook）。
+  要保護多個目錄，就把它們一條一條列出來、用 `:` 分隔。
+  （這一點值得明說：早期的 `rm` 替身會把宣告項對「當你執行 `rm` 時所在的那個目錄」做
+  路徑名稱展開，於是同一個 `BETTER_RM_PROTECTED_DIRS`、同一個目標，從不同目錄問會得到
+  不同的判定——那是不確定性，不是保護。現在宣告值一律照字面比對。）
+- **No wildcards here.** `*`, `?`, `[` and `{` are **literal characters**, not
+  patterns: declaring `"$HOME/work/secrets*"` protects a directory whose name really
+  ends in an asterisk, and does **not** protect `secrets-2024`. This is deliberate
+  and both guards agree on it (the `rm` replacement and the PreToolUse hook). To
+  protect several directories, list them all, `:` separated.
+  (Worth stating outright: an earlier `rm` replacement pathname-expanded each
+  declared entry against whatever directory you happened to run `rm` from, so one
+  `BETTER_RM_PROTECTED_DIRS` value with one target drew different verdicts from
+  different directories -- that is nondeterminism, not protection. Declared values
+  are now compared literally.)
 
 ## 受保護的目錄
 
@@ -578,6 +595,9 @@ x86_64 上（CI 跑的架構，node 22.17.0）128KB 修復前是 38,557ms、修�
 ```bash
 export BETTER_RM_PROTECTED_DIRS="/srv/data:/workspace/secrets"
 ```
+
+條目是**字面路徑**，不是樣式：`*`、`?`、`[`、`{` 都不會展開，詳見上面〈自行宣告受保護的
+目錄〉那一節。Entries are **literal paths**, not patterns — see the section above.
 
 hooks 執行時需要 `node` 可用。Codex 還會要求使用者透過 `/hooks` 審閱並信任
 專案 hook；其他代理也可能依各自的安全設定要求確認。
