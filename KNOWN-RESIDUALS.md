@@ -923,6 +923,61 @@ is, not counted in this section's known cost. Closing the remaining 21 shapes wo
 this gate to carry a table of every valid xargs option letter, whose failure mode is refusing a
 working command, so it stays undone.
 
+## R6-a — 沒有建模的包裝命令，與「把引數當 shell 文字執行」的工具（**OPEN，僅記錄**）
+
+2026-09-25 建立。hook 的 execWrappers 註解、`run-test-suites.sh`、`test-better-rm.sh` 與
+56121b0 的 commit message 都說「沒建模的包裝命令記在 R6-a」，但這一節在那之前**從來不存在**
+（對這個檔案做 `git log --all -S`，找不到任何一個曾經含有這個標題的 commit）——那些名字唯一的紀錄
+只有一則 commit message。現在它存在，並由 `test-better-rm.sh` 的 anchor 迴圈釘住（刪掉這一節
+會紅）。**包裝命令的完整性不保證**：exec-wrapper 表是一份釘住的清單，`test-wrapper-model.js`
+只保證「表上的名字」被雙向比對、每一列被走訪，對表外的名字什麼都不承諾。
+
+56121b0 點名的七個名字，2026-09-25 在本機用 touch marker 逐一量過「會不會 exec 自己的操作元」，
+hook 判定走真正的 stdin 進入點：
+
+| 名字 | 會 exec 操作元嗎（實測） | hook 判定 `<名字> rm -rf /etc` | 狀態 |
+|---|---|---|---|
+| `xcrun` | **會**，PATH 上任何工具都會（`xcrun touch M` 建立 marker） | 修前 ALLOW，現在 DENY | **BRM-ab-08 已建模**（加上 `knownOptions`：它不認得的選項一律讓命令字變成不可知） |
+| `gcov` | 不會（把操作元當輸入檔，`touch.gcno: No such file`） | ALLOW | 不是殘留：判定正確 |
+| `lipo` | 不會（印用法） | ALLOW | 不是殘留 |
+| `vtool` | 不會（`only one input file must be specified`） | ALLOW | 不是殘留 |
+| `python3` | 不會（把 `rm` 當腳本檔開啟，`can't open file`） | ALLOW | 不是包裝命令；見下面「直譯器」 |
+| `swift` | 不會執行操作元本身；它找 PATH 上的 `swift-<名字>`（`unable to invoke subcommand: swift-touch`） | ALLOW | 不是包裝命令 |
+| `git` | 不會：`git rm` 是 git 自己的子命令（移除受版控的檔案），`git <名字>` 找 `git-<名字>` | ALLOW | 不是包裝命令；但見下一段 |
+
+**仍然開著、而且實測會執行的**（2026-09-25，marker 建立、hook ALLOW）：
+
+- `git -c 'alias.<名字>=!<shell 文字>' <名字>`——git 的 `!` alias 把後面的文字交給 shell。
+- `osascript -e 'do shell script "<shell 文字>"'`。
+- **直譯器的 `-c`／`-e`**（`python3 -c`、`perl -e`、`ruby -e`、`node -e`…）：這一輪**沒有量**，
+  也沒有建模；它們跑的是自己語言的程式碼，不是 shell，要判定得讀那個語言。
+
+**這台 Mac 上沒有、但 ubuntu CI runner 與 Linux 使用者會有的 exec 包裝命令**，全部沒建模：
+`flock`、`ionice`、`chrt`、`taskset`、`unshare`、`nsenter`、`setpriv`、`runuser`、`watch`、
+`doas`。hook 對 `flock /tmp/lk rm -rf /etc`、`ionice -c3 rm -rf /etc`、`runuser -u root --
+rm -rf /etc` 等實測都是 ALLOW；「它們會 exec 操作元」這一半來自各自的 man page，**本機無法執行、
+未實測**。
+
+上面每一列（連同 xcrun）在 e1e4277 也都是 ALLOW（2026-09-25 實測），所以它們是**既有的**殘留，
+不是 56121b0 或之後的回歸。
+
+**為什麼不在這一輪修**：每一個都需要自己的 exec 證據與選項模型（xcrun 就是照這個做的），而 BRM-ab-08
+的裁決範圍只有 xcrun。第一線（Claude Code 的 Bash 工具裡的 `rm` alias）對 `/bin/rm` 以外的寫法
+照樣看不到這些。
+
+**Wrapper completeness is not guaranteed.** This section is the register the hook's
+execWrappers comment, `run-test-suites.sh` and the 56121b0 commit message cite, and until
+2026-09-25 it did not exist. Of the seven names 56121b0 listed, only `xcrun` execs its
+operand (measured with touch markers); it is modelled since BRM-ab-08, with a `knownOptions`
+list so an option it does not list makes the command word unknowable. `gcov`, `lipo`, `vtool`,
+`python3`, `swift` and `git` do not exec their operand, so their ALLOW verdicts are correct.
+Still open and measured to execute while ALLOWED: `git -c 'alias.x=!<shell text>' x` and
+`osascript -e 'do shell script "<shell text>"'`. Interpreter `-c`/`-e` flags were not measured.
+Linux-only exec wrappers (`flock`, `ionice`, `chrt`, `taskset`, `unshare`, `nsenter`, `setpriv`,
+`runuser`, `watch`, `doas`) are not modelled and are ALLOW here; that they exec their operand is
+from their man pages, not measured on this Mac. Every row above, xcrun included, is ALLOW
+at e1e4277 as well (measured), so these are pre-existing rather than regressions.
+
 ## R6-b — `BETTER_RM_PROTECTED_DIRS` 的萬用字元語意：三個 DENY→ALLOW，已裁決保留
 
 2026-09-22。BRM-B2 的修法（`normalize_path` 的分詞外面加 `set -f`）帶來三個

@@ -95,6 +95,8 @@ const PINNED_WRAPPERS = [
   'sandbox-exec', 'chroot', 'arch', 'lockf', 'taskpolicy', 'ssh-agent', 'apply',
   // Round 3: the DTraceToolkit family.
   'dtruss', 'dappprof', 'dapptrace', 'procsystime',
+  // Round 4: xcrun (BRM-ab-08).
+  'xcrun',
 ].sort();
 
 // `su` is deliberately NOT here: su(1) does not exec its operand. Everything

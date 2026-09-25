@@ -1359,6 +1359,34 @@ const blocked = [
   'procsystime -n sshd rm -rf /etc',
   'procsystime -an sshd rm -rf /etc',
   'procsystime -p 1 rm -rf /workspace/secrets',
+  // ROUND 4, BRM-ab-08: xcrun. The 56121b0 commit named it as an unmodelled
+  // wrapper recorded in KNOWN-RESIDUALS.md R6-a -- a section that did not exist --
+  // and it execs any tool on PATH: touch markers (2026-09-25) for the bare form
+  // and behind `-v`, `-n`, `-k`, `-l`, `-r`, `--run`, `--sdk X`, `-sdk X`,
+  // `--toolchain X`, `-toolchain X` and `--`. It rejects every option it does not
+  // have (rc 64, no marker for `--weird`, `-z`, `--sdk=X` and the clusters `-nk`,
+  // `-rv`), so an option the row does not list makes the command word unknowable
+  // rather than skippable -- the last row is that fail-closed answer.
+  // 第四輪（BRM-ab-08）：xcrun。56121b0 說它記在 KNOWN-RESIDUALS.md R6-a——那一節根本不存在——而它
+  // 會 exec PATH 上的任何工具（touch marker 實測，上列每一種選項都會）。它拒絕自己沒有的選項（rc 64、
+  // 沒有 marker），所以表上沒列的選項讓命令字變成不可知，而不是可以跳過——最後一列就是那個答案。
+  'xcrun rm -rf /etc',
+  'xcrun rm -rf ~/.ssh',
+  'sudo xcrun rm -rf /etc',
+  'xcrun -v rm -rf /etc',
+  'xcrun -r rm -rf /etc',
+  'xcrun --run rm -rf /etc',
+  'xcrun --sdk macosx rm -rf /etc',
+  'xcrun -sdk macosx rm -rf /etc',
+  'xcrun --toolchain default rm -rf /etc',
+  'xcrun -- rm -rf /etc',
+  // An option the row does not list, followed by a word that is not rm: skipped
+  // as a boolean, `value` would be the command and the line would pass. Today's
+  // xcrun rejects the option and runs nothing, so this is the fail-closed answer
+  // for an option nobody measured, not a deletion anyone can run now.
+  // 表上沒列的選項、後面接的不是 rm：當布林跳過的話 `value` 會變成命令字、整行放行。今天的 xcrun
+  // 會拒絕這個選項、什麼都不跑，所以這是對「沒人量過的選項」fail-closed 的答案。
+  'xcrun --future-option value rm -rf /etc',
   // su is NOT on the exec-wrapper table, because it does not exec its operand:
   // su(1) says "all command line arguments before the target login name are
   // processed by su itself, everything after the target login name gets passed to
@@ -2264,12 +2292,15 @@ for (const name of wrapperCommands) {
 const requiredExecWrapperNames = [
   '!', 'nohup', 'setsid', 'nice', 'timeout', 'env', 'sudo', 'command', 'builtin',
   'exec', 'time', 'xargs', 'caffeinate', 'script', 'stdbuf',
-  // Round 2. Every one of these was ALLOW until the row beside it was written,
-  // and every one is a candidate the PLATFORM SWEEP below reports -- which is the
-  // point: this list no longer has to be remembered, it has to agree with the
-  // machine. Each name's exec proof is recorded beside its rows in `blocked`.
-  // 第二輪。這幾個在寫下對應的表格列之前全都是 ALLOW，而且每一個都是下面那道「平台掃描」
-  // 會報出來的候選名字——這才是重點：這份清單不再靠記性，它必須與機器一致。
+  // Round 2. Every one of these was ALLOW until the row beside it was written.
+  // They were found by a platform sweep that has since been removed (see the
+  // execWrappers comment in the hook), so nothing compares this list with the
+  // machine any more: it is a pin that keeps a name from being deleted, and the
+  // names known to be missing are written down in KNOWN-RESIDUALS.md R6-a. Each
+  // name's exec proof is recorded beside its rows in `blocked`.
+  // 第二輪。這幾個在寫下對應的表格列之前全都是 ALLOW。找到它們的平台掃描已經移除（見 hook 的
+  // execWrappers 註解），所以已經沒有東西拿這份清單跟機器比對：它是防止名字被刪掉的釘子，已知漏掉的
+  // 名字寫在 KNOWN-RESIDUALS.md R6-a。
   'sandbox-exec', 'chroot', 'arch', 'lockf', 'taskpolicy', 'ssh-agent', 'apply',
   // Round 3. Four more, and the same story a third time: the round-2 guard walked
   // the table and stayed quiet about a name never added, and these four could not
@@ -2279,6 +2310,10 @@ const requiredExecWrapperNames = [
   // 第三輪，又四個，同樣的故事第三次：第二輪的守衛走訪那張表，對「從來沒加進去的名字」保持
   // 沉默，而這四個連「被找到」都做不到，因為掃描要求副檔名等於 man 目錄名。
   'dtruss', 'dappprof', 'dapptrace', 'procsystime',
+  // Round 4 (BRM-ab-08): xcrun, which 56121b0 said was recorded as unmodelled in a
+  // register that did not exist. Measured: it execs any tool on PATH.
+  // 第四輪（BRM-ab-08）：xcrun。實測會 exec PATH 上的任何工具。
+  'xcrun',
 ];
 for (const name of requiredExecWrapperNames) {
   assert.ok(execWrappers.has(name) || handBranchedWrappers.has(name),

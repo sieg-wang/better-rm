@@ -2907,6 +2907,33 @@ const execWrappers = new Map([
   ['dapptrace', { valueOptions: ['-b', '-p', '-u'], clusteredValue: /^-[acdeFhloU]*[bpu]$/, leadingOperands: 0 }],
   // procsystime(1m), getopts `acehn:op:T`
   ['procsystime', { valueOptions: ['-n', '-p'], clusteredValue: /^-[acehoT]*[np]$/, leadingOperands: 0 }],
+  // ROUND 4 (BRM-ab-08): xcrun(1), `xcrun [options] <tool name> ... arguments`.
+  // It runs ANY tool on PATH, not only developer tools: touch markers
+  // (2026-09-25) for the bare form and behind `-v`, `-n`, `-k`, `-l`, `-r`,
+  // `--run`, `--sdk X`, `-sdk X`, `--toolchain X`, `-toolchain X` and `--`.
+  // 56121b0 named it as an unmodelled wrapper recorded in KNOWN-RESIDUALS.md R6-a,
+  // a section that did not exist. `knownOptions` is the one field no other row
+  // has: xcrun rejects every option it does not know (rc 64, no marker, for
+  // `--weird`, `-z`, `--sdk=X` and the clusters `-nk`, `-rv`), so an option
+  // outside the list cannot be skipped as a boolean -- the walk marks the command
+  // word unknowable instead (`unmodelledOption`), which is the fail-closed answer
+  // for an option this row did not measure. `-f`/`--find` prints a path and runs
+  // nothing; reading the word after it as the command is an over-refusal only.
+  // 第四輪（BRM-ab-08）：xcrun(1) 會執行 PATH 上的「任何」工具（上列每種選項都有 touch marker）。
+  // 56121b0 說它記在 KNOWN-RESIDUALS.md R6-a，那一節不存在。`knownOptions` 是只有這一列有的欄位：
+  // xcrun 拒絕自己不認得的選項（rc 64、沒有 marker），所以清單外的選項不能當布林旗標跳過——走訪改把
+  // 命令字標成不可知，這是對「這一列沒量過的選項」fail-closed 的答案。
+  ['xcrun', {
+    valueOptions: ['--sdk', '-sdk', '--toolchain', '-toolchain'],
+    clusteredValue: null,
+    leadingOperands: 0,
+    knownOptions: [
+      '-v', '--verbose', '-n', '--no-cache', '-k', '--kill-cache', '-l', '--log',
+      '-r', '--run', '-f', '--find', '-h', '--help', '--version', '--',
+      '--show-sdk-path', '--show-sdk-version', '--show-sdk-build-version',
+      '--show-sdk-platform-path', '--show-sdk-platform-version', '--show-toolchain-path',
+    ],
+  }],
 ]);
 
 const wrapperCommands = new Set([
@@ -3576,6 +3603,7 @@ function commandTargetsScanOneReading(
           const commandWord = words[behind.executableIndex];
           if (
             carriers.has(path.basename(commandWord)) || behind.unparseableRedirection
+            || behind.unmodelledOption
             || (/[$`]/.test(commandWord) && resolveKnownExpansions(commandWord, expansionEnv) === null)
           ) {
             carrierPresent = true;
@@ -3670,6 +3698,10 @@ function commandTargetsScanOneReading(
     // instead of substituting them.
     // xargs 的替換字串（沒有就是 null，那時 xargs 是把 stdin 的字「接在後面」）。
     let xargsReplaceString = null;
+    // Set when a wrapper row that lists its options met one it does not list
+    // (BRM-ab-08); the command word after it is then unknowable.
+    // 列出自己選項的包裝命令遇到沒列出的選項時設起（BRM-ab-08）；後面的命令字因此不可知。
+    let unmodelledOption = false;
     // BRM-ab-05: apply(1) RUNS ITS COMMAND OPERAND AS A SHELL STRING. It builds
     // `exec <command> <args>` and hands that to $SHELL -c -- `apply -d 'rmx -rf
     // /%1' etc` prints `exec rmx -rf /etc` -- so the table row below, which hands
@@ -3872,6 +3904,12 @@ function commandTargetsScanOneReading(
           const option = words[i];
           const takesNextWord = wrapperSpec.valueOptions.includes(option)
             || (wrapperSpec.clusteredValue !== null && wrapperSpec.clusteredValue.test(option));
+          // A row that lists its options (xcrun) does not get to skip one it does
+          // not list: see `knownOptions` on the row.
+          // 列出自己選項的列（xcrun）不能跳過沒列出的選項：見該列的 `knownOptions`。
+          if (wrapperSpec.knownOptions && !takesNextWord && !wrapperSpec.knownOptions.includes(option)) {
+            unmodelledOption = true;
+          }
           // A SEPARATOR IS NEVER AN OPTION'S VALUE, and the guard has to stand
           // HERE -- before the step -- not after it. This walk took the next word
           // as the value unconditionally, so `lockf -t ; rm -rf /etc` stepped
@@ -4251,6 +4289,7 @@ function commandTargetsScanOneReading(
       stdinCompletesOperands,
       xargsReplaceString,
       unparseableRedirection,
+      unmodelledOption,
     };
   }
 
@@ -5219,6 +5258,7 @@ function commandTargetsScanOneReading(
     }
     const {
       executable, executableIndex, index, stdinCompletesOperands, unparseableRedirection,
+      unmodelledOption,
     } = resolveExecutable(i);
     i = index;
 
@@ -5234,6 +5274,7 @@ function commandTargetsScanOneReading(
     // 命令字前面有一個讀不懂的重導向，那個字就跟展開一樣不可知（BRM-ab-02）。
     const unresolvedExecutable = executable !== '' && (
       hasUnresolvedTargetExpansion(dynamicExpansions[executableIndex]) || unparseableRedirection
+      || unmodelledOption
     );
     if (executable) i += 1;
     if (['rm', 'rmdir'].includes(executable) && stdinCompletesOperands) {

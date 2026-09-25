@@ -683,12 +683,17 @@ else
     # turns no hook test red, because those pin behaviour rather than the document.
     # The '## ' prefix is load-bearing: this loop demands exactly one occurrence and
     # a bare 'R4-b' appears three times (zh heading, en paragraph, R4 cross-reference).
-    # '## R6-a' 與 '## R6-b' 同理（章節還在的釘子）。R6-a 記的是「掃描報得出來、而刻意
-    # 沒有建模的真包裝命令」，R6-b 記的是 BETTER_RM_PROTECTED_DIRS 那三個已裁決的
-    # DENY→ALLOW。兩者的程式碼那一半在下面。
-    # '## R6-a' and '## R6-b' pin the same way (the section still exists). Their
-    # code-side halves are below.
-    for residuals_anchor in 'O_NOFOLLOW' '無法在無 root 的情況下測試' '兩邊都紅' '## R4-b' '## R4-c' '## R6-b'; do
+    # '## R6-a' 與 '## R6-b' 同理（章節還在的釘子）。R6-a 記的是「已知沒有建模的包裝命令
+    # 與把引數當 shell 文字執行的工具」（實測逐一列出），R6-b 記的是 BETTER_RM_PROTECTED_DIRS
+    # 那三個已裁決的 DENY→ALLOW。R6-b 的程式碼那一半在下面；R6-a 沒有程式碼那一半——它記的
+    # 是「沒有」的東西，由 test-wrapper-model.js 的固定清單守住表上那一邊。
+    # 2026-09-25 以前 '## R6-a' 不在這個迴圈裡，而上面這段註解早就說它在：hook、runner 與
+    # 56121b0 引用的那一節根本不存在，而這裡什麼都抓不到（BRM-ab-08）。
+    # '## R6-a' and '## R6-b' pin the same way (the section still exists). R6-b's code-side
+    # half is below; R6-a has none -- it records what is NOT modelled, and the pinned list in
+    # test-wrapper-model.js guards the table side. Until 2026-09-25 '## R6-a' was not in this
+    # loop although this comment already said it was, and the section it cited did not exist.
+    for residuals_anchor in 'O_NOFOLLOW' '無法在無 root 的情況下測試' '兩邊都紅' '## R4-b' '## R4-c' '## R6-a' '## R6-b'; do
         residuals_hits=$(grep -o -- "$residuals_anchor" "$residuals_doc" 2>/dev/null | wc -l | tr -d '[:space:]')
         if [ "$residuals_hits" != "1" ]; then
             residuals_problems="$residuals_problems anchor[$residuals_anchor]在文件裡出現${residuals_hits}次(必須恰好1次);"
