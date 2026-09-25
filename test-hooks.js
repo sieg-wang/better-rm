@@ -354,6 +354,34 @@ const blocked = [
   'rm -rf ~-',
   'rm -rf ~0',
   'rm -rf ~+1',
+  // BRM-ab-03: A TILDE INSIDE A BRACE GROUP. bash expands braces BEFORE tildes,
+  // so each brace alternative that begins with `~` is a real tilde prefix:
+  // printf under /opt/homebrew/bin/bash 5.3.20, /bin/bash 3.2.57 and /bin/zsh
+  // prints /Users/sieg/.ssh for `{~/.ssh,x}` and /Users/sieg for `{~,/tmp/x}`
+  // (2026-09-25). The gate applied its tilde rules to the WORD's first character
+  // only, expanded the braces later, and resolved each alternative against the
+  // working directory -- `<cwd>/~/.ssh`, which matches nothing -- so every row
+  // below was ALLOW at 41878e9 and at e1e4277. The rows put the `~` first, after
+  // an empty alternative, inside a nested group and after a leading group, in
+  // every tilde form bash has, and through /bin/rm, sudo, bash -c and find.
+  // BRM-ab-03：大括號群組裡的波浪號。bash 先展開大括號、再展開波浪號，所以每個以 `~` 開頭的
+  // 分支都是真的波浪號前綴（三種 shell 用 printf 實測）。閘門只看整個字的第一個字元、之後才展開
+  // 大括號，每個分支再對著工作目錄解析——`<cwd>/~/.ssh` 什麼都不符合，所以下面每一列在
+  // 41878e9 與 e1e4277 都放行。
+  'rm -rf {~,/tmp/x}',
+  'rm -rf {~/.ssh,x}',
+  '/bin/rm -rf {~/.claude,/tmp/x}',
+  'rm -rf {~sieg/.ssh,x}',
+  'rm -rf {,~sieg/.ssh}',
+  'rm -rf {~+,x}',
+  'rm -rf {x,{~,y}}',
+  'rm -rf {~,}',
+  'rm -rf {~/.s,x}sh',
+  'rm -rf {,}{~,x}',
+  'sudo rm -rf {~,/tmp/x}',
+  "bash -c 'rm -rf {~/.ssh,x}'",
+  'find {~/.ssh,/tmp/x} -delete',
+  "find . -exec rm -rf {~/.ssh,x} ';'",
   // A3: A CARRIER STANDING AFTER A RESERVED WORD. The carrierPresent walk never
   // consulted `controlWords`, although the other walks in the same file do, so
   // `{`, `do`, `then`, `in` and `fi` cleared atCommandPosition and the shell
@@ -1352,6 +1380,21 @@ const allowed = [
   'rm -rf build 2>&1',
   'ls >/dev/null 2>&1 && echo ok',
   'echo x >/dev/null rm -rf /etc',
+  // BRM-ab-03's benign twins. A `~` alternative still expands to an ordinary path
+  // under the home directory, and a `~` that is not at the START of an expanded
+  // word is literal in bash (printf: `a~/.ssh`, `x/~`, `a~`), so the fix cannot be
+  // "refuse any word with a brace and a tilde". The first row sits two levels
+  // below the home directory on purpose: one level below it, `{~/build,x}` is
+  // refused by the older rule that a pattern whose parent is protected names that
+  // directory's contents -- the rule that already refuses `rm -rf ~/{a,b}`.
+  // BRM-ab-03 的良性雙胞胎。`~` 分支照樣展開成家目錄底下的普通路徑；不在展開後字首的 `~`
+  // 在 bash 裡是字面（printf 實測），所以修法不能是「有大括號又有波浪號就拒絕」。第一列刻意放在
+  // 家目錄往下兩層：往下一層的 `{~/build,x}` 會被較早那條「父目錄受保護的樣式」規則擋掉——
+  // 正是那條規則在 HEAD 就擋掉了 `rm -rf ~/{a,b}`。
+  'rm -rf {~/projects/x/build,/tmp/x}',
+  'rm -rf a{,~/.ssh}',
+  'rm -rf x/{~,y}',
+  'rm -f {a,b}~',
   'rm -rf build',
   'rm file.txt',
   'rm -rf /mnt/c/project',

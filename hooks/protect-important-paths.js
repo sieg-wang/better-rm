@@ -1857,6 +1857,28 @@ function targetFromWord(word, isDynamic, expansionEnv) {
   if (spelling.startsWith('~') && spelling !== '~' && !spelling.startsWith('~/')) {
     return UNRESOLVED_TARGET + spelling;
   }
+  // BRM-ab-03: THE SAME RULE, PER BRACE ALTERNATIVE. bash expands braces before
+  // tildes, so every word brace expansion produces is a word of its own for the
+  // tilde rules: `{~/.ssh,x}` hands rm /Users/sieg/.ssh (measured, printf under
+  // bash 5.3.20, 3.2.57 and zsh). The test above reads only this word's first
+  // character, so it is asked again of each expanded word, and an expansion too
+  // big to read in full is not read at all. The modelled forms (`~`, `~/...`) are
+  // expanded later, in protectedSpelling(), where the alternatives are judged.
+  // Only a word's LEADING `~` is a tilde prefix, which is what bash does:
+  // `a{,~/.ssh}` is the literal `a~/.ssh` (measured), and stays ordinary.
+  // A quoted brace word is literal in bash and is refused here all the same: the
+  // quoting is gone by now, and that over-refusal is the one ab-10 records.
+  // BRM-ab-03：同一條規則，逐一套在大括號分支上。bash 先展開大括號再展開波浪號，所以大括號展開出來
+  // 的每一個字，對波浪號規則而言都是獨立的字（三種 shell 用 printf 實測）。上面那條只看這個字的第一
+  // 個字元，所以對展開出來的每個字再問一次；大到讀不完的展開就不讀。建模內的寫法（`~`、`~/...`）
+  // 留到 protectedSpelling() 判分支時再展開。只有字首的 `~` 是波浪號前綴，與 bash 相同。
+  if (spelling.includes('{') && spelling.includes('~')) {
+    const expansion = expandBraces(spelling);
+    if (expansion.truncated) return UNRESOLVED_TARGET + spelling;
+    if (expansion.patterns.some((alternative) => (
+      alternative.startsWith('~') && alternative !== '~' && !alternative.startsWith('~/')
+    ))) return UNRESOLVED_TARGET + spelling;
+  }
   if (isDynamic === UNMODELLED_EXTGLOB) return UNRESOLVED_TARGET + spelling;
   if (!hasUnresolvedTargetExpansion(isDynamic)) return word;
   const resolved = resolveKnownExpansions(word, expansionEnv);
@@ -2317,7 +2339,17 @@ function protectedSpelling(spelling, home, extraDirs, cwd) {
       // 這段註解原本結尾寫「折疊只會讓規則 match 更多、不會更少」——那是錯的，而且已被實測
       // 推翻：`userlink -> /Users` 時，shell 從 `userlink/../[U]sers` 會走到 /Users，而折疊
       // 落在 `<cwd>/[U]sers`，於是放行。這一類仍是開著的。
-      const absolute = path.posix.normalize(pattern.startsWith('/') ? pattern : `${base}/${pattern}`);
+      // A brace alternative that begins with `~` is a tilde prefix (BRM-ab-03):
+      // bash expands braces first, so `{~/.ssh,x}` names the home directory's
+      // .ssh, never `<cwd>/~/.ssh`. targetFromWord() has already refused every
+      // other tilde form, so these two are all that reach here.
+      // 以 `~` 開頭的大括號分支是波浪號前綴（BRM-ab-03）：bash 先展開大括號。其餘的波浪號寫法
+      // targetFromWord() 已經拒絕了，走到這裡的只有這兩種。
+      const alternative = pattern === '~' ? home
+        : pattern.startsWith('~/') ? path.posix.join(home, pattern.slice(2)) : pattern;
+      const absolute = path.posix.normalize(
+        alternative.startsWith('/') ? alternative : `${base}/${alternative}`,
+      );
       const patternBase = absolute.slice(absolute.lastIndexOf('/') + 1);
       if (globMatchesPath(patternBase, '.git')) return normalized;
       if (exactDirs.some((directory) => globMatchesPath(absolute, directory))) return normalized;
