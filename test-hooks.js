@@ -5999,8 +5999,11 @@ let findClauseTimingChecks = 0;
   //   - BRM-ab-05's apply(1) line builder scanned one line per argument, each as
   //     long as the command operand: `apply '<30 KB>' 1..2000; rm -rf /etc` took
   //     7,652 ms through the stdin entry point (41878e9: about 100 ms).
+  //   - BRM-cd-01's reassignment check re-read the rest of a segment for each
+  //     name-taking builtin word, in each of up to nine readings:
+  //     `echo read x 200 KB <256 backslashes>x; /bin/rm -rf /etc` took 4.2-4.8 s.
   // 同一個預算，套在本輪「第一版是平方級」的其他掃描上（本輪獨立驗證找到，都是 fail-open：
-  // 跑贏 live 5,000 ms 逾時的 hook 不做任何裁決）：ab-05 的 apply 行產生器。
+  // 跑贏 live 5,000 ms 逾時的 hook 不做任何裁決）：ab-05 的 apply 行產生器，與 cd-01 的改名檢查。
   const kilobytesOf = (unit, kb) => unit.repeat(Math.ceil((kb * 1024) / unit.length));
   const argumentsUpTo = (n) => Array.from({ length: n }, (_, k) => String(k + 1)).join(' ');
   for (const [label, command, verdict] of [
@@ -6010,6 +6013,10 @@ let findClauseTimingChecks = 0;
       `apply '${kilobytesOf('echo x; ', 30)}' ${argumentsUpTo(2000)}; rm -rf /etc`, 'deny'],
     ['rm, then a 30 KB apply operand x 2000 arguments',
       `rm -rf /etc; apply '${kilobytesOf('echo x; ', 30)}' ${argumentsUpTo(2000)}`, 'deny'],
+    ['200 KB of `read` words and a run of backslashes in one segment',
+      `echo ${kilobytesOf('read ', 200)} ${'\\'.repeat(256)}x; /bin/rm -rf /etc`, 'deny'],
+    ['200 KB of `printf -v` words and a run of backslashes in one segment',
+      `echo ${kilobytesOf('printf -v ', 200)} ${'\\'.repeat(256)}x; rm -rf "$HOME/.ssh"`, 'deny'],
     // An apply inside apply's command: each outer line carries the inner clause,
     // and the outer `%1` makes each inner clause different, so the two sizes
     // MULTIPLY. Each layer alone stays under a per-call budget; only a budget
@@ -7174,7 +7181,7 @@ async function runOpenCodePluginChecks() {
 // 現在都會「指名」失敗，而不是留下一次更短、更安靜、看起來仍然是綠的執行。
 const PINNED_TIMING_COUNTERS = [
   ['globTimingChecks', globTimingChecks, 4],
-  ['findClauseTimingChecks', findClauseTimingChecks, 24],
+  ['findClauseTimingChecks', findClauseTimingChecks, 28],
   ['targetLimitChecks', targetLimitChecks, 9],
 ];
 for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {

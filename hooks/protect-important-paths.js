@@ -2016,23 +2016,43 @@ function onlyReadIn(text, name) {
   for (const match of text.matchAll(occurrence)) {
     const at = match.index + match[1].length;
     if (text[at - 1] === '$') continue;
-    if (text[at - 1] === '{' && text[at - 2] === '$' && !/^:?=/.test(text.slice(at + name.length))) continue;
+    if (text[at - 1] === '{' && text[at - 2] === '$' && !/^:?=/.test(text.slice(at + name.length, at + name.length + 2))) continue;
     return false;
   }
   return true;
 }
+// LINEAR, and the equivalence is why (round 2, blocker B2 of the independent
+// validation): the first version sliced and re-read the rest of the segment for
+// EVERY builtin word in it, so `echo` + 200 KB of `read ` + a run of backslashes
+// (nine readings) took 4.2-4.8 s -- in evaluate(), before commandTargets() and
+// outside the judging budget, and past the live 5,000 ms timeout at 400 KB. Only
+// the FIRST occurrence of each kind needs asking: the rest of a segment after a
+// later builtin is a suffix of the rest after the first, so an expansion after a
+// later one is also after the first; for printf and wait, the first `-v`/`-p`
+// after the first occurrence comes no later than any `-v`/`-p` after a later one.
+// 線性，而「為什麼等價」是理由所在（第二輪，獨立驗證的 B2）：第一版對一個段落裡的「每一個」內建字都
+// 切出並重讀段落剩下的部分，於是 `echo` + 200 KB 的 `read ` + 一串反斜線（九種讀法）要 4.2-4.8 秒——
+// 發生在 evaluate() 裡、commandTargets() 之前、判定預算之外，400 KB 就超過 live 5,000 ms 逾時。
+// 每一種只需要問「第一次出現」：較後出現的那個之後的剩餘部分，是第一次之後剩餘部分的後綴；
+// printf 與 wait 在第一次出現之後的第一個 `-v`／`-p`，不會晚於較後出現者之後的任何一個。
 function buildsANameAtRunTime(text) {
   for (const command of text.split(/[;&|\n()]/)) {
+    const firstAfter = new Map();
     for (const match of command.matchAll(NAME_TAKING_BUILTIN)) {
-      let rest = command.slice(match.index + match[0].length);
+      const kind = match[1] === 'printf' || match[1] === 'wait' ? match[1] : 'name';
+      if (!firstAfter.has(kind)) firstAfter.set(kind, match.index + match[0].length);
+      if (firstAfter.size === 3) break;
+    }
+    for (const [kind, after] of firstAfter) {
+      let from = after;
       // printf and wait take a NAME only through one option.
       // printf 與 wait 只透過一個選項吃名字。
-      if (match[1] === 'printf' || match[1] === 'wait') {
-        const option = rest.search(match[1] === 'printf' ? /(?:^|\s)-v/ : /(?:^|\s)-p/);
+      if (kind !== 'name') {
+        const option = command.slice(after).search(kind === 'printf' ? /(?:^|\s)-v/ : /(?:^|\s)-p/);
         if (option === -1) continue;
-        rest = rest.slice(option);
+        from = after + option;
       }
-      if (/[$`]/.test(rest.replace(KNOWN_REFERENCE, ''))) return true;
+      if (/[$`]/.test(command.slice(from).replace(KNOWN_REFERENCE, ''))) return true;
     }
   }
   return false;
