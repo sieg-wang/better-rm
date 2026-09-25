@@ -3615,6 +3615,63 @@ for (const command of documentedAllowances) {
   stdinChecks += 1;
 }
 
+// BRM-cd-02: A COMMAND THAT IS NOT A STRING. extractInput() took `command` as it
+// came and the tokenizer did String(command), so the argv array
+// ["rm","-rf","/etc"] became the one word `rm,-rf,/etc` -- no rm anywhere -- and
+// every payload below was ALLOW at 41878e9 through this stdin contract, while
+// the STRING twin was refused. Codex's PreToolUse schema types tool_input as
+// anything, and a shell tool that takes an argv array is a documented shape, so
+// this is the input edge failing open, not a hypothetical. The decision
+// (recorded 2026-09-25) is to refuse any non-string command rather than to
+// reconstruct a shell line from it: joining the array with spaces is the measured
+// wrong fix -- ["bash","-lc","rm -rf /etc"] joins to `bash -lc rm -rf /etc`,
+// which runs only `rm` and is ALLOW -- and a quoting join would be this gate
+// guessing how an agent meant its argv to be run. So the benign array is refused
+// too, and says why; the benign string beside it stays ordinary.
+// BRM-cd-02：不是字串的命令。extractInput() 原樣收下 `command`、tokenizer 做 String(command)，
+// 於是 argv 陣列 ["rm","-rf","/etc"] 變成一個字 `rm,-rf,/etc`——哪裡都沒有 rm——下面每一個 payload
+// 在 41878e9 經 stdin 契約全部放行，而字串雙胞胎被拒。裁決（2026-09-25）是：非字串的命令一律拒絕，
+// 不從它重組一條 shell 命令列——用空白 join 是實測過的錯誤修法，加引號的 join 則是閘門在猜 agent
+// 想怎麼執行它的 argv。所以良性的陣列也拒絕並說明理由；旁邊的良性字串照舊放行。
+const NON_STRING_COMMAND_WORDING = /Refused to run: .*Rule: non-string command/s;
+for (const [label, payload, read] of [
+  ['argv array', { tool_input: { command: ['rm', '-rf', '/etc'] }, cwd: '/workspace/project' },
+    (out) => out?.hookSpecificOutput],
+  ['argv array through a shell', {
+    hook_event_name: 'PreToolUse', tool_name: 'Bash',
+    tool_input: { command: ['bash', '-lc', 'rm -rf /etc'] }, cwd: '/workspace/project',
+  }, (out) => out?.hookSpecificOutput],
+  ['one-element array', { tool_input: { command: ['rm -rf /etc'] }, cwd: '/workspace/project' },
+    (out) => out?.hookSpecificOutput],
+  ['object', { tool_input: { command: { x: 'rm -rf /etc' } }, cwd: '/workspace/project' },
+    (out) => out?.hookSpecificOutput],
+  ['number', { tool_input: { command: 1 }, cwd: '/workspace/project' },
+    (out) => out?.hookSpecificOutput],
+  ['benign argv array', { tool_input: { command: ['ls', '-l', '/tmp'] }, cwd: '/workspace/project' },
+    (out) => out?.hookSpecificOutput],
+  ['Copilot toolArgs array', {
+    toolName: 'bash', toolArgs: JSON.stringify({ command: ['rm', '-rf', '/etc'] }), cwd: '/workspace/project',
+  }, (out) => out],
+  ['Codex cmd array', { tool_input: { cmd: ['rm', '-rf', '/etc'] }, cwd: '/workspace/project' },
+    (out) => out?.hookSpecificOutput],
+]) {
+  const { status, stdout } = runHookOverStdin(payload);
+  assert.equal(status, 0, `non-string command (${label}): exit`);
+  let parsed = null;
+  try { parsed = JSON.parse(stdout); } catch (_) { parsed = null; }
+  assert.equal(read(parsed)?.permissionDecision, 'deny',
+    `a non-string command must be refused, not stringified (${label}): ${JSON.stringify(stdout)}`);
+  assert.match(read(parsed)?.permissionDecisionReason || '', NON_STRING_COMMAND_WORDING,
+    `a non-string command is refused for being one, by name (${label})`);
+  stdinChecks += 2;
+}
+{
+  const { status, stdout } = runHookOverStdin(claude('ls -l /tmp'));
+  assert.equal(status, 0, 'the string twin exits 0');
+  assert.equal(stdout, '', 'the string twin of the benign argv array stays allowed');
+  stdinChecks += 1;
+}
+
 // The line-continuation rows again, through the REAL stdin contract rather than
 // evaluate(). The tables above prove the parser; these prove the file that
 // every agent actually executes, which is the seam the bypass was found on.

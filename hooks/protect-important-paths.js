@@ -5872,8 +5872,42 @@ function denialShape(message, isCopilot, isAntigravity, isCursor, isGrok) {
       };
 }
 
+// The refusal for a command that is not a string (BRM-cd-02). Its own rule and
+// wording for the reason every "could not read" refusal here has one: nothing was
+// found to be dangerous, the input was not something this gate reads at all.
+// 「命令不是字串」的拒絕（BRM-cd-02）。自成一條規則與措辭，理由與本檔其他「讀不到」的拒絕相同：
+// 沒有找到任何危險的東西，是輸入根本不是這道閘門讀的那種東西。
+function nonStringCommandDenial(command, isCopilot, isAntigravity, isCursor, isGrok) {
+  const kind = Array.isArray(command) ? 'an array' : `a ${command === null ? 'null' : typeof command}`;
+  const zh = `拒絕執行：這次工具呼叫的命令不是一段 shell 文字（收到的是 ${kind}），`
+    + '這道閘門只判定 shell 命令字串，把其他形狀轉成文字就是在猜它會怎麼被執行'
+    + '（這不是說它一定危險，是說這道閘門讀不了它）。規則：non-string command。'
+    + '繞法：把命令寫成一整段字串。';
+  const en = `Refused to run: this tool call's command is not a shell string (it is ${kind}),`
+    + ' and this gate judges shell command strings only -- turning any other shape into text'
+    + ' would be guessing how it is run (this does not say it is dangerous; it says this gate'
+    + ' cannot read it). Rule: non-string command.'
+    + ' Workaround: pass the command as one string.';
+  return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
+}
+
 function evaluate(payload, env = process.env) {
   const { command, cwd, isCopilot, isAntigravity, isCursor, isGrok } = extractInput(payload);
+  // BRM-cd-02: a command that is not a string is refused, never stringified.
+  // String(["rm","-rf","/etc"]) is the one word `rm,-rf,/etc`, which is no command
+  // at all, so an argv array was ALLOWED whatever it ran (measured through the
+  // stdin contract at 41878e9). Joining it with spaces is no better -- ["bash",
+  // "-lc","rm -rf /etc"] joins to `bash -lc rm -rf /etc`, which runs only `rm` and
+  // was measured ALLOW -- and re-quoting it would be this gate guessing how the
+  // agent runs its argv. Checked before the empty-command allowance below, so a
+  // falsy non-string (0, false) is refused rather than read as "no command".
+  // BRM-cd-02：不是字串的命令一律拒絕，絕不轉成文字。String 後是一個不是任何命令的字，於是 argv
+  // 陣列不管跑什麼都被放行（41878e9 經 stdin 契約實測）。用空白 join 也不行（實測放行），重新加引號
+  // 則是閘門在猜 agent 怎麼執行它的 argv。放在下面「空命令放行」之前，讓 0、false 這類非字串被拒絕，
+  // 而不是被當成「沒有命令」。
+  if (command !== '' && typeof command !== 'string') {
+    return nonStringCommandDenial(command, isCopilot, isAntigravity, isCursor, isGrok);
+  }
   if (!command) {
     if (isGrok) return { decision: 'allow' };
     if (isCursor) return { permission: 'allow' };
