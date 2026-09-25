@@ -699,7 +699,7 @@ else
     # behaviour half is pinned both ways by the tilde block in test-hooks.js.
     # '## R6-e' 釘的是 cd-01 名字解析的已知邊界（點命令只看命令位置、展開後才是命令字的看不到）。
     # '## R6-e' pins the known limits of cd-01's name resolution.
-    for residuals_anchor in 'O_NOFOLLOW' '無法在無 root 的情況下測試' '兩邊都紅' '## R4-b' '## R4-c' '## R6-a' '## R6-b' '## R6-d' '## R6-e'; do
+    for residuals_anchor in 'O_NOFOLLOW' '無法在無 root 的情況下測試' '兩邊都紅' '## R4-b' '## R4-c' '## R6-a' '## R6-b' '## R6-d' '## R6-e' 'bare-name mention'; do
         residuals_hits=$(grep -o -- "$residuals_anchor" "$residuals_doc" 2>/dev/null | wc -l | tr -d '[:space:]')
         if [ "$residuals_hits" != "1" ]; then
             residuals_problems="$residuals_problems anchor[$residuals_anchor]在文件裡出現${residuals_hits}次(必須恰好1次);"

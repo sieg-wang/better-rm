@@ -1047,7 +1047,7 @@ ALLOW。少了後面那半，「把閘門整個拿掉」也能滿足前面那半
 - `rm -f '~$report.docx'`（Office 開檔時留下的 owner file）、`rm -f "~lock.tmp"`、`rm -f \~lock.tmp`、
   `rm -f '~$Report Q3.xlsx'` —— 以「無法確定會展開成哪條路徑」拒絕；e1e4277 全部放行。
 - `rm -rf '{~,x}'` —— 加了引號的大括號在 bash 裡是字面檔名；BRM-ab-03 讓每個大括號分支都走同一條
-  波浪號規則之後，它也被拒絕（e1e4277 與 41878e9 放行）。
+  波浪號規則之後，它也被拒絕（e1e4277 與 41878e9 放行）——理由是「受保護目錄：家目錄」，不是「解不開」。
 - `rm -rf '~'`、`rm -f "~"` —— 這兩個**更早就被拒**（e1e4277 就是），而且是以「受保護目錄：家目錄」
   為由，因為 `expandHome()` 同樣看不到引號。不是這一輪帶來的，一併記在這裡。
 
@@ -1064,9 +1064,10 @@ ALLOW。少了後面那半，「把閘門整個拿掉」也能滿足前面那半
 **R6-d, accepted over-refusal (BRM-ab-10).** The tilde gate refuses any word that starts with
 `~` and is not `~` or `~/...`, which closed real holes (`~sieg/.ssh`, `~+`, `~-`), but the word
 reaches `targetFromWord()` after quote removal, so a QUOTED or escaped literal tilde is refused
-too: `rm -f '~$report.docx'`, `rm -f "~lock.tmp"`, `rm -f \~lock.tmp` (all ALLOW at e1e4277),
-and since BRM-ab-03 also `rm -rf '{~,x}'`. `rm -rf '~'` was already refused at e1e4277, as the
-home directory. Accepted rather than loosened: it fails closed, the ways through are measured
+too: `rm -f '~$report.docx'`, `rm -f "~lock.tmp"`, `rm -f \~lock.tmp` (all ALLOW at e1e4277).
+Since BRM-ab-03 `rm -rf '{~,x}'` is refused as well, but as the home directory (protected
+directory), not as unresolvable. `rm -rf '~'` was already refused at e1e4277, as the home
+directory. Accepted rather than loosened: it fails closed, the ways through are measured
 open (`./~name` and a literal absolute path), and fixing it would mean carrying a "first character
 was quoted" flag from the tokenizer to `targetFromWord()`. Pinned both ways in test-hooks.js.
 
@@ -1083,7 +1084,21 @@ README 記載為放行的 `$(which cat) $HOME/.zshrc` 變成拒絕，而那個�
 `eval` 以外的間接執行（例如 shell 快照裡的使用者函式在函式本體裡 `cd` 或改 HOME）——閘門只讀得到
 這一條命令的文字。
 
-**R6-e, known limits of the `$HOME`/`$PWD`/`$TMPDIR` resolution (BRM-cd-01).** OPEN, recorded:
+**二、名字只要不是以 `$NAME` 引用出現，就關掉它的解析（已裁決接受的誤擋）。** 註解裡的
+`# clean HOME build`、`echo PWD is $PWD`、`grep HOME .env` 都會讓同一條命令裡的
+`rm -rf "$HOME/…"`／`"$PWD/…"` 以「無法確定會展開成哪條路徑」拒絕；41878e9 全部放行，本輪獨立
+驗證的 358 條日常命令語料裡有 4 條碰到。這是 cd-01 規則的本意：它不列舉會改名字的內建與寫法，而是
+要求名字只以引用形式出現，因此分不出「提到」與「指派」。出路一直開著：寫字面的絕對路徑
+（`rm -rf /home/you/projects/foo/build` 實測放行）。test-hooks.js 雙向釘住：四種寫法必須以
+「解不開」的措辭拒絕，字面絕對路徑必須放行。
+
+**R6-e, known limits of the `$HOME`/`$PWD`/`$TMPDIR` resolution (BRM-cd-01).** Accepted: a
+bare-name mention -- the name anywhere but a `$NAME`/`${NAME...}` reference, as in a comment
+(`# clean HOME build`), echo text (`echo PWD is $PWD`) or a grep pattern (`grep HOME .env`) --
+turns that name's resolution off, so an `rm` of `"$HOME/..."` in the same command is refused as
+unresolvable. All four were ALLOW at 41878e9; the rule cannot tell a mention from an assignment
+without listing the builtins, which is what failed before. The literal absolute path stays open.
+OPEN, recorded:
 a dot command that only becomes a command word after expansion -- `x='. ./env.sh'; $x; rm -rf
 "$HOME/etc"` -- sources the file (printf under bash 5.3.20 shows HOME=/) and is ALLOW, because
 the dot command is decided from command position in the word stream and `$x` is an unreadable word

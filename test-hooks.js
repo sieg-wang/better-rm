@@ -5841,6 +5841,31 @@ let variableResolutionChecks = 0;
     variableResolutionChecks += 1;
   }
 
+  // ACCEPTED over-refusal, KNOWN-RESIDUALS.md R6-e: the bare NAME anywhere but a
+  // `$NAME` reference turns its resolution off -- in a comment, in echo text, as a
+  // grep pattern -- because the rule cannot tell a mention from an assignment
+  // without modelling every builtin. The rows below were ALLOW at 41878e9, and the
+  // independent validation's corpus hit them. Pinned both ways: the refusal, so that
+  // loosening it has to move the record too, and the literal absolute path that
+  // stays open.
+  // 已接受的誤擋（KNOWN-RESIDUALS.md R6-e）：名字只要不是以 `$NAME` 引用的形式出現——註解裡、echo 的
+  // 文字裡、grep 的樣式——就關掉它的解析。兩邊都釘：拒絕本身（放寬要連同紀錄一起改），以及仍然開著的
+  // 字面絕對路徑。
+  for (const command of [
+    'rm -rf "$HOME/projects/foo/build" # clean HOME build',
+    'echo PWD is $PWD; rm -rf "$PWD/dist"',
+    'grep HOME .env; rm -rf "$HOME/tmp/x"',
+    'echo "PWD: $PWD" && rm -rf "$PWD/tmp"',
+  ]) {
+    assert.equal(decisionFor(command), 'deny', `the accepted bare-name over-refusal moved: ${command}`);
+    assert.match(reasonFor(command), /cannot determine before execution which path/,
+      `the bare-name over-refusal says the path is unknown: ${command}`);
+    variableResolutionChecks += 2;
+  }
+  assert.equal(decisionFor('rm -rf /home/tester/projects/foo/build # clean HOME build'), undefined,
+    'the literal absolute path stays open beside the bare-name over-refusal');
+  variableResolutionChecks += 1;
+
   // commandTargets() is exported, and a caller that does not pass an environment
   // must get the fail-closed answer rather than an exception. An exception here
   // is not a refusal: on the live gate it exits non-zero and the tool call runs
