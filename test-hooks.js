@@ -473,6 +473,95 @@ const blocked = [
   'rm >/dev/null /etc',
   'rm 2>/dev/null -rf /etc',
   'rm >out -rf /etc',
+  // BRM-ab-02: A REDIRECTION BEFORE THE COMMAND WORD. bash removes every
+  // redirection from a simple command's argv wherever it stands, so
+  // `2>/dev/null /bin/rm -rf /etc` runs /bin/rm. The gate read `<` and `>` as
+  // command SEPARATORS: the redirect target became the command word, the fd
+  // number in front of it did too, and the rm after it was an operand of
+  // `/dev/null`. The multi-character operators were worse, because the tokenizer
+  // emits them as pieces -- the `&` of `2>&1` and `&>` read as a background
+  // separator, the `|` of `>|` as a pipe. Every row below was ALLOW at 41878e9
+  // and at e1e4277, and the shell really runs it: touch markers under
+  // /opt/homebrew/bin/bash 5.3.20 for all of them, and for the rows spelled with
+  // POSIX operators under /bin/bash 3.2.57, /bin/zsh and /bin/dash too
+  // (2026-09-25). They cover every operator shape rather than the reported one:
+  // the fd prefix, `{name}`, `>>`, `>|`, `<>`, `>&`, `<&`, `&>`, `&>>`, `<<`,
+  // `<<<`, a process substitution as the target, and the same shapes after a
+  // wrapper, inside a wrapper's own options, after a separator, before a carrier,
+  // a trap, an eval and an `env -S` string, between find's roots, and between rm's
+  // own operands.
+  // BRM-ab-02：命令字「前面」的重導向。bash 會把重導向從 argv 裡整個拿掉，不管它站在哪裡，
+  // 所以 `2>/dev/null /bin/rm -rf /etc` 執行的就是 /bin/rm。閘門把 `<`、`>` 讀成命令「分隔符」：
+  // 重導向的目標變成命令字、前面的 fd 數字也是，後面的 rm 成了 `/dev/null` 的操作元。多字元運算子
+  // 更糟：tokenizer 把它們拆成碎片，`2>&1`、`&>` 的 `&` 被讀成背景分隔符，`>|` 的 `|` 被讀成
+  // 管線。下面每一列在 41878e9 與 e1e4277 都是 ALLOW，而 shell 真的會執行（2026-09-25 touch
+  // marker 實測）。列的是「每一種運算子形狀」，不是被回報的那一種。
+  '>/dev/null rm -rf /etc',
+  '2>/dev/null /bin/rm -rf /etc',
+  '2>/dev/null rm -rf /etc',
+  '> /dev/null rm -rf /etc',
+  '2> /dev/null rm -rf /etc',
+  '</dev/null rm -rf /etc',
+  '3</dev/null rm -rf /etc',
+  '2>&1 rm -rf /etc',
+  '>&2 rm -rf /etc',
+  '&>/dev/null rm -rf /etc',
+  '&>>/tmp/log rm -rf /etc',
+  '>>/tmp/log rm -rf /etc',
+  '>|/tmp/x rm -rf /etc',
+  '<>/tmp/x rm -rf /etc',
+  '{fd}>/tmp/x rm -rf /etc',
+  '<<<x rm -rf /etc',
+  '<<EOF rm -rf /etc\nhi\nEOF',
+  'sudo 2>/dev/null rm -rf /usr',
+  'sudo 2>/dev/null -u root rm -rf /usr',
+  'nohup >/dev/null rm -rf ~/.ssh',
+  'env 2>/dev/null rm -rf ~/.claude',
+  'command >/dev/null /bin/rm -rf /etc',
+  'chroot 2>/dev/null / rm -rf /etc',
+  'lockf -t 2>/dev/null 0 /tmp/lk rm -rf /etc',
+  'nice >/dev/null -n 5 rm -rf /etc',
+  'time >/dev/null rm -rf /etc',
+  'caffeinate 2>/dev/null -i rm -rf /etc',
+  '>/dev/null xargs rm -rf <<< /etc',
+  'true && 2>/dev/null rm -rf ~/.ssh',
+  '{ >/dev/null rm -rf /etc; }',
+  '>/dev/null find /etc -delete',
+  ">/dev/null bash -c 'rm -rf /etc'",
+  "bash -c '>/dev/null rm -rf /etc'",
+  "bash 2>/dev/null -c 'rm -rf /etc'",
+  '{ >/dev/null bash; } <<EOF\nrm -rf /etc\nEOF',
+  '( 2>/dev/null bash ) <<< "rm -rf /etc"',
+  "trap 2>/dev/null 'rm -rf /etc' EXIT",
+  "eval 2>&1 'rm -rf /etc'",
+  "env -S 'rm' 2>/dev/null -rf /etc",
+  'find /tmp 2>&1 /etc -delete',
+  // Between rm's OWN operands: the operand scan stopped on the `&` of `2>&1` or
+  // `&>`, on the `|` of `>|` and on the '(' of a process substitution, so every
+  // operand after one of them went unread.
+  // 在 rm 自己的操作元之間：掃描停在 `2>&1`／`&>` 的 `&`、`>|` 的 `|`、process
+  // substitution 的 '(' 上，之後的操作元全部沒讀到。
+  'rm -rf x 2>&1 /etc',
+  'rm -rf x &>/dev/null /etc',
+  'rm -rf x &>>/tmp/y /etc',
+  'rm -rf x >|/tmp/y /etc',
+  'rm -rf x <&0 /etc',
+  'rm -rf x >&2 /etc',
+  'rm -rf x < <(true) /etc',
+  'rm -rf x > >(cat) /etc',
+  'rm -rf <(true) /etc',
+  // `&>` IS TWO THINGS, and the gate has to read both. bash and zsh read it as one
+  // redirection; dash -- /bin/sh on Debian and Ubuntu -- reads a background `&`
+  // followed by `>`. Measured 2026-09-25: `true &>/dev/null touch M` creates M
+  // under /bin/dash and does not under bash or zsh, and `touch x &>/dev/null M`
+  // is the reverse. So each row below is a deletion under one reading or the
+  // other, and the gate cannot know which shell it is.
+  // `&>` 是兩件事，閘門兩種讀法都得讀。bash／zsh 讀成一個重導向；dash（Debian／Ubuntu 的
+  // /bin/sh）讀成背景 `&` 接 `>`。實測兩個方向都有會刪東西的那一邊。
+  'true & >/dev/null rm -rf /etc',
+  "true &>/dev/null bash -c 'rm -rf /etc'",
+  'sudo -u &>/dev/null rm -rf ~/.ssh',
+  'sudo &>/dev/null -u root rm -rf /usr',
   // ANSI-C escapes that mint a NUL: real shells truncate the arg at the NUL,
   // so the guard must compare the pre-NUL path (/etc), not '/etc\0'.
   "bash -c $'rm -rf /etc\\x00'",
@@ -1252,6 +1341,17 @@ const allowed = [
   // after it deletes, so the fix cannot be "refuse any line with a quote in a group".
   // BRM-ab-01 的良性雙胞胎：群組裡有引號、但後面沒有刪除，就照舊放行。
   "[[ x == x@(a')'b) ]] ; ls -l /tmp",
+  // BRM-ab-02's benign twins: a redirection is skipped, not refused. The last row
+  // is the one that would go red for "every word after a redirection is a new
+  // command": bash hands `rm -rf /etc` to echo as text.
+  // BRM-ab-02 的良性雙胞胎：重導向是被跳過，不是被拒絕。最後一列會抓到「重導向後面每個字都是
+  // 新命令」這種讀法——bash 只是把 `rm -rf /etc` 當文字交給 echo。
+  '>/dev/null ls -l /tmp',
+  '2>/dev/null rm -rf build',
+  'ls 2>&1 | grep x',
+  'rm -rf build 2>&1',
+  'ls >/dev/null 2>&1 && echo ok',
+  'echo x >/dev/null rm -rf /etc',
   'rm -rf build',
   'rm file.txt',
   'rm -rf /mnt/c/project',
@@ -5464,6 +5564,31 @@ let findClauseTimingChecks = 0;
     + `${clauseAbsoluteBudgetMs.toFixed(0)}ms budget`,
   );
   findClauseTimingChecks += 3;
+  // BRM-ab-02. Reading past a redirection needs the argv WITHOUT the redirections,
+  // and that projection is built once per scan. The first version built it per
+  // resolveExecutable() call, which made two walks quadratic -- both measured
+  // while writing it, both commands whose answer came too late to be one: 6,000
+  // closed `-exec rm {} \;` clauses (find calls it once per clause) took 2,782 ms
+  // against 12 ms before, and `sudo &>/dev/null ` x 20,000 (the R4 walk calls it
+  // once per segment) took 104 s. At 6,000 each these cost tens of milliseconds
+  // now, so a quadratic regression overshoots this budget by a wide margin.
+  // BRM-ab-02：讀過重導向需要「拿掉重導向的 argv」，而那份投影每次掃描只建一次。第一版每次呼叫
+  // resolveExecutable() 都建一份，讓兩個走訪變成平方級（寫它時實測：6,000 個 `-exec rm {} \;`
+  // 子句 2,782 ms，原本 12 ms；20,000 個 `sudo &>/dev/null ` 要 104 秒）。
+  const projectionBudgetMs = 1500 * hostFactor();
+  for (const [label, command, verdict] of [
+    ['6000 closed -exec rm clauses', `find . ${'-exec rm {} \\; '.repeat(6000)}`, undefined],
+    ['6000 `sudo &>/dev/null` prefixes', `${'sudo &>/dev/null '.repeat(6000)}rm -rf /etc`, 'deny'],
+  ]) {
+    const run = time(command);
+    assert.equal(run.verdict, verdict, `${label}: the verdict moved`);
+    assert.ok(
+      run.ms < projectionBudgetMs,
+      `${label} took ${run.ms.toFixed(1)}ms against a ${projectionBudgetMs.toFixed(0)}ms budget: `
+      + 'a per-clause or per-segment walk is re-reading the rest of the command',
+    );
+    findClauseTimingChecks += 2;
+  }
   // Advancing past a consumed clause must land ON the separator that ended it,
   // never past it: skipping one would swallow the command after it, and the rm
   // that follows would stop being read as an rm at all.
@@ -6608,7 +6733,7 @@ async function runOpenCodePluginChecks() {
 // 現在都會「指名」失敗，而不是留下一次更短、更安靜、看起來仍然是綠的執行。
 const PINNED_TIMING_COUNTERS = [
   ['globTimingChecks', globTimingChecks, 4],
-  ['findClauseTimingChecks', findClauseTimingChecks, 14],
+  ['findClauseTimingChecks', findClauseTimingChecks, 18],
   ['targetLimitChecks', targetLimitChecks, 9],
 ];
 for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {
@@ -6638,8 +6763,8 @@ for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {
 // 用 __filename 而不是用 __dirname 組出來的路徑：清查必須讀「它自己」這個檔案。
 const ownSource = require('fs').readFileSync(__filename, 'utf8');
 const wallClockRows = ownSource.match(/\.ms\s*[<>]=?\s*[A-Za-z0-9_.]+/g) || [];
-assert.equal(wallClockRows.length, 5,
-  `this file holds ${wallClockRows.length} wall-clock comparisons, not the 5 pinned here: `
+assert.equal(wallClockRows.length, 6,
+  `this file holds ${wallClockRows.length} wall-clock comparisons, not the 6 pinned here: `
   + `${wallClockRows.join(', ')}. A new one needs a scaled budget and a pinned counter, `
   + 'which is what this number is for');
 const constantBudgetRows = wallClockRows.filter((row) => /[<>]=?\s*[0-9]/.test(row));

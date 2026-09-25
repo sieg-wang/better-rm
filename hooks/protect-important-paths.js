@@ -2763,7 +2763,35 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
   }
 }
 
+// BRM-ab-02: `&>` IS READ BOTH WAYS. bash and zsh read `&>` (and `&>>`) as one
+// redirection, so `touch x &>/dev/null M` touches M; dash -- /bin/sh on Debian
+// and Ubuntu -- reads a background `&` followed by `>`, so
+// `true &>/dev/null touch M` touches M. Both measured 2026-09-25, and neither is
+// the other's harmless twin: each reading has a spelling that deletes. The gate
+// cannot know which shell will read the line, so a word stream holding an operator
+// `&` directly followed by an operator `>` is scanned once under each reading and
+// the targets are the union. Every other operator shape has one reading in every
+// shell this file models, so only this one pays for a second pass, and only on a
+// line that has it; the nested texts the second pass reaches again are answered by
+// the memo, which is correct because the first pass already pushed their targets.
+// BRM-ab-02：`&>` 兩種讀法都讀。bash／zsh 把 `&>`（與 `&>>`）讀成一個重導向；dash（Debian／
+// Ubuntu 的 /bin/sh）讀成背景 `&` 接 `>`。2026-09-25 兩個方向都實測到會刪東西的寫法。閘門不知道
+// 哪個 shell 會讀這一行，所以字流裡有「運算子 `&` 緊接運算子 `>`」時，兩種讀法各掃一次、目標取
+// 聯集。其他運算子形狀在本檔建模的每個 shell 裡都只有一種讀法，所以只有這一種要付第二次的成本。
 function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false, expansionEnv = null) {
+  const asRedirection = commandTargetsScanOneReading(
+    command, depth, bodiesAreCodeFromCaller, expansionEnv, true,
+  );
+  if (!asRedirection.ampersandRedirectionSeen) return asRedirection;
+  const asBackground = commandTargetsScanOneReading(
+    command, depth, bodiesAreCodeFromCaller, expansionEnv, false,
+  );
+  return [...asRedirection, ...asBackground];
+}
+
+function commandTargetsScanOneReading(
+  command, depth, bodiesAreCodeFromCaller, expansionEnv, ampersandStartsRedirection,
+) {
   const words = shellWords(command);
   const dynamicExpansions = words.dynamicExpansions || [];
   // Which words were written as unquoted shell operators. `;`, `\;` and `';'`
@@ -2860,10 +2888,106 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
   // rm 的 stdin,而 rm 從不讀 stdin,把它當目標收走會讓 `rm -rf ./build <<< /etc` 以「/etc」
   // 為由被拒——那條命令根本不碰 /etc。在這裡跳過是安全的,正因為上面兩條 carrier 路徑已經
   // 把同一個操作元當成腳本接手了:它不是到處都被跳過,只在原本把它讀成檔名的那個掃描裡。
-  const redirectors = new Set(['<', '>', '<<', '<<-', '<<<']);
+  // (All of that is now answered by redirectionSpan() below, which every walk
+  // shares; the rm operand scan is one of its callers.)
+  // （以上現在都由下面的 redirectionSpan() 回答，每一個走訪共用它；rm 操作元掃描是其中之一。）
   // operator word index -> the heredoc body it introduced.
   const heredocBodies = new Map((words.heredocs || []).map((entry) => [entry.operatorIndex, entry.body]));
   const terminators = new Set([';', '&', '|', '(', ')', '\n']);
+  // Matching ')' for every operator '(' , computed once for the whole word
+  // stream. Scanning per substitution instead was quadratic on nested
+  // `<( <( … ) )`, and a gate that outruns the live 5,000 ms hook timeout makes
+  // NO decision and does not block the command -- slow is the same as absent,
+  // which is the measurement the JUDGING_BUDGET_MS comment below was written for.
+  // Computed here, before the first walk, because redirectionSpan() needs it.
+  // 每個運算子 '(' 的對應 ')' 只算一次。改成「每個替換各掃一次」在
+  // `<( <( … ) )` 這種嵌套下是平方級，而跑贏 5,000 ms 逾時的閘門不做任何裁決、也不會擋下
+  // 命令——「慢」等於「不存在」。放在第一個走訪之前，因為 redirectionSpan() 要用。
+  const closingParen = new Map();
+  {
+    const openParens = [];
+    for (let k = 0; k < words.length; k += 1) {
+      if (!operatorTokens[k]) continue;
+      if (words[k] === '(') openParens.push(k);
+      else if (words[k] === ')' && openParens.length > 0) closingParen.set(openParens.pop(), k);
+    }
+  }
+  // BRM-ab-02: WHERE A REDIRECTION ENDS, asked by every walk in this scan. bash
+  // removes each redirection from a simple command's argv wherever it stands --
+  // `2>/dev/null /bin/rm -rf /etc` runs /bin/rm -- and this file used to read `<`
+  // and `>` as command SEPARATORS in the walks that look for a command word, so
+  // the redirect target became the command word and the rm behind it an operand.
+  // The tokenizer emits a multi-character operator as pieces, so the pieces are
+  // reassembled HERE, once, by grammar rather than by spelling:
+  //   [fd] op target
+  // where fd is a digit run or `{name}` in front of the operator (read as an fd
+  // whether or not a space separates them: spaced, bash would run the digits as a
+  // command, which runs nothing, so reading more commands is the safe side), op is
+  // `<` or `>` optionally followed by the one piece bash joins to it (`>>`, `>|`,
+  // `>&`, `<>`, `<&`), a heredoc `<<`/`<<-` with its delimiter, a here-string
+  // `<<<`, or `&>`/`&>>` in the reading where `&` starts a redirection (see
+  // commandTargetsScan), and target is one word or a process substitution.
+  // A shape that does not fit -- an operator with no target before a separator or
+  // the end, which every shell here rejects as a syntax error -- is returned as
+  // `unparseable`, and the span stops AT the offending token, so nothing after it
+  // is ever consumed. A process-substitution WORD (`<(…)` as an argument) is not
+  // a redirection; it is returned as `{ substitutionWord: true }` so a walk can
+  // keep it as the one argv word it is.
+  // BRM-ab-02：重導向在哪裡結束，這個掃描裡每一個走訪都問它。bash 會把重導向從簡單命令的 argv
+  // 裡拿掉，不管它站在哪裡；本檔原本在找命令字的走訪裡把 `<`、`>` 讀成命令分隔符，於是重導向
+  // 目標變成命令字、後面的 rm 成了操作元。tokenizer 會把多字元運算子拆成碎片，所以在這裡、只在
+  // 這裡依「文法」而不是依「拼寫」把碎片組回來。形狀不合的（運算子後面在分隔符或結尾之前沒有
+  // 目標——每個 shell 都當語法錯誤）回報為 unparseable，而且在出錯的那個 token 上停住，不會吞
+  // 掉後面任何東西。process substitution「字」不是重導向，回報為 substitutionWord，讓走訪把它
+  // 當成它本來就是的那一個 argv 字。
+  const isOperatorAt = (k, spelling) => operatorTokens[k] === true && words[k] === spelling;
+  const substitutionEnd = (k) => {
+    if (!(isOperatorAt(k, '<') || isOperatorAt(k, '>')) || !isOperatorAt(k + 1, '(')) return -1;
+    return closingParen.has(k + 1) ? closingParen.get(k + 1) + 1 : words.length;
+  };
+  const redirectionTarget = (j, span) => {
+    if (j >= words.length) return { ...span, end: j, unparseable: true };
+    const substitution = substitutionEnd(j);
+    if (substitution !== -1) return { ...span, end: substitution, targetStart: j };
+    if (operatorTokens[j]) return { ...span, end: j, unparseable: true };
+    return { ...span, end: j + 1 };
+  };
+  const redirectionSpan = (k) => {
+    if (k >= words.length) return null;
+    const substitution = substitutionEnd(k);
+    if (substitution !== -1) return { end: substitution, substitutionWord: true };
+    let j = k;
+    if (
+      !operatorTokens[j] && /^(?:[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})$/.test(words[j])
+      && (isOperatorAt(j + 1, '<') || isOperatorAt(j + 1, '>') || isOperatorAt(j + 1, '<<<')
+        || heredocBodies.has(j + 1))
+    ) j += 1;
+    if (heredocBodies.has(j)) return { end: Math.min(j + 2, words.length), heredocAt: j };
+    if (isOperatorAt(j, '<<<')) return redirectionTarget(j + 1, { hereStringAt: j });
+    if (ampersandStartsRedirection && j === k && isOperatorAt(j, '&') && isOperatorAt(j + 1, '>')) {
+      j += 2;
+      if (isOperatorAt(j, '>') && !isOperatorAt(j + 1, '(')) j += 1;
+      return redirectionTarget(j, {});
+    }
+    if (isOperatorAt(j, '>')) {
+      j += 1;
+      if (
+        (isOperatorAt(j, '>') && !isOperatorAt(j + 1, '('))
+        || isOperatorAt(j, '|') || isOperatorAt(j, '&')
+      ) j += 1;
+      return redirectionTarget(j, {});
+    }
+    if (isOperatorAt(j, '<')) {
+      j += 1;
+      if (isOperatorAt(j, '>') || isOperatorAt(j, '&')) j += 1;
+      return redirectionTarget(j, {});
+    }
+    return null;
+  };
+  // Whether this word stream holds the one ambiguous shape, `&` then `>`; read
+  // by commandTargetsScan to decide whether the second reading is needed.
+  // 這個字流有沒有那一種有歧義的形狀（`&` 接 `>`）；commandTargetsScan 讀它決定要不要第二種讀法。
+  const ampersandRedirectionSeen = words.some((word, k) => isOperatorAt(k, '&') && isOperatorAt(k + 1, '>'));
   const controlWords = new Set([
     'if', 'then', 'elif', 'else', 'fi',
     'for', 'while', 'until', 'select', 'do', 'done',
@@ -2941,6 +3065,20 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
     // 真的被建立（`bash` 與 `bash -s` 都是），而 hook 放行了那一行。
     let afterEnv = false;
     for (let w = 0; w < words.length; w += 1) {
+      // A REDIRECTION LEAVES COMMAND POSITION WHERE IT WAS (BRM-ab-02): bash drops
+      // it from the argv, so the shell in `{ >/dev/null bash; } <<EOF` is the
+      // command word. It used to be read as a separator, which made the redirect
+      // TARGET the command word and cleared the position before `bash`. A
+      // process substitution is not skipped: its '(' still opens a command
+      // position here, as it always did, so a shell inside one is still seen.
+      // 重導向不改變命令位置（BRM-ab-02）：bash 把它從 argv 拿掉，所以
+      // `{ >/dev/null bash; } <<EOF` 的命令字是 bash。原本把它讀成分隔符，重導向「目標」就成了
+      // 命令字、把 bash 前面的位置清掉。process substitution 不跳過：它的 '(' 照舊開一個命令位置。
+      const redirection = redirectionSpan(w);
+      if (redirection !== null && !redirection.substitutionWord) {
+        const skipTo = redirection.targetStart ?? redirection.end;
+        if (skipTo > w) { w = skipTo - 1; continue; }
+      }
       const word = words[w];
       if (operatorAt(w, separators)) { atCommandPosition = true; afterEnv = false; continue; }
       // A RESERVED WORD IS A COMMAND POSITION, exactly as an operator is. This
@@ -3240,6 +3378,51 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
       }
     }
   }
+  // THE WORD STREAM AS bash BUILDS ARGV, once per scan (BRM-ab-02): every real
+  // redirection removed wherever it stands, operator for operator exactly as the
+  // stream has them otherwise -- terminators and process substitutions stay.
+  // resolveExecutable() walks THIS instead of the raw stream, so every wrapper's
+  // option and operand walk (`sudo 2>/dev/null -u root rm`, `lockf -t 2>/dev/null
+  // 0 /tmp/lk rm`) sees the argv the program really receives, with no per-wrapper
+  // redirection handling to forget. Built once rather than per call: a per-call
+  // copy of the rest of the command made find's per-clause walk and the R4
+  // per-segment walk quadratic (measured 2,782 ms for 6,000 `-exec rm {} \;`
+  // clauses against 12 ms before, while writing this).
+  // `source` maps each entry back to the stream, `positionOf` maps a stream index
+  // to the first entry at or after it, and `afterUnparseable` marks an entry that
+  // a redirection this file could not parse stands in front of.
+  // 照 bash 組 argv 的方式看字流，每次掃描只建一次（BRM-ab-02）：每個「真的」重導向不管站在哪裡
+  // 都拿掉，其餘運算子原樣保留（終止符與 process substitution 都在）。resolveExecutable() 走的是
+  // 這個而不是原始字流，所以每個包裝命令的選項與操作元走訪看到的都是程式真正收到的 argv。只建一
+  // 次而不是每次呼叫各建一份：每次都複製「命令剩下的部分」會讓 find 逐子句的走訪與 R4 逐段的
+  // 走訪變成平方級（寫這段時實測：6,000 個 `-exec rm {} \;` 子句 2,782 ms，原本 12 ms）。
+  const argv = {
+    words: [], operatorTokens: [], source: [], afterUnparseable: [],
+    positionOf: new Array(words.length + 1),
+  };
+  {
+    let pendingUnparseable = false;
+    let k = 0;
+    while (k < words.length) {
+      const span = redirectionSpan(k);
+      if (span !== null && !span.substitutionWord) {
+        if (span.unparseable) pendingUnparseable = true;
+        const next = Math.max(span.end, k + 1);
+        for (let s = k; s < next; s += 1) argv.positionOf[s] = argv.words.length;
+        k = next;
+        continue;
+      }
+      argv.positionOf[k] = argv.words.length;
+      argv.words.push(words[k]);
+      argv.operatorTokens.push(operatorTokens[k]);
+      argv.source.push(k);
+      argv.afterUnparseable.push(pendingUnparseable);
+      pendingUnparseable = false;
+      k += 1;
+    }
+    argv.positionOf[words.length] = argv.words.length;
+  }
+  const streamLength = words.length;
   // Wrapper commands can be chained arbitrarily (for example
   // `sudo env SAFE=1 command bash -c ...`). Unwrap each layer until the
   // actual executable is reached; every branch advances i, so malformed
@@ -3256,7 +3439,18 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
   // （實測 `-exec nice rm`、`-exec env SAFE=1 command rm` 也一樣放行）。抄第二份清單就是
   // 日後會走鐘的那一份，所以只留一份。
   function resolveExecutable(start) {
-    let i = start;
+    // Shadowed on purpose: the walk below was written against the raw stream and
+    // reads it unchanged, but from here on "the stream" is the argv projection.
+    // 刻意遮蔽：下面的走訪原本寫給原始字流，原封不動地讀；從這裡起「字流」就是 argv 投影。
+    const words = argv.words;
+    const operatorAt = (index, set) => argv.operatorTokens[index] === true && set.has(words[index]);
+    const envArgvAfter = (from) => {
+      const rest = [];
+      for (let k = from; k < words.length && !operatorAt(k, separators); k += 1) rest.push(words[k]);
+      return rest;
+    };
+    const first = argv.positionOf[Math.min(start, streamLength)];
+    let i = first;
     let executable = '';
     let executableIndex = -1;
     // Set when a wrapper hands the command its operands on stdin (xargs), where
@@ -3753,8 +3947,20 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
 
       break;
     }
+    // Back to stream indices for every caller.
+    // 對所有呼叫端換回字流索引。
+    let unparseableRedirection = false;
+    const lastRead = Math.min(executableIndex === -1 ? i : executableIndex, words.length - 1);
+    for (let p = first; p <= lastRead; p += 1) {
+      if (argv.afterUnparseable[p]) unparseableRedirection = true;
+    }
     return {
-      executable, executableIndex, index: i, stdinCompletesOperands, xargsReplaceString,
+      executable,
+      executableIndex: executableIndex === -1 ? -1 : argv.source[executableIndex],
+      index: i < argv.source.length ? argv.source[i] : streamLength,
+      stdinCompletesOperands,
+      xargsReplaceString,
+      unparseableRedirection,
     };
   }
 
@@ -3802,23 +4008,7 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
   // `/proc/self/fd/0` 是旁邊那兩個 /dev 項目在 Linux 上的寫法，而本專案有出貨到 Linux。
   // 這裡它只是命令列上的文字，不會被 stat，所以在 macOS 上不花任何代價。
   const stdinScriptPaths = new Set(['/dev/stdin', '/dev/fd/0', '/proc/self/fd/0', '-']);
-  // Matching ')' for every operator '(' , computed once for the whole word
-  // stream. Scanning per substitution instead was quadratic on nested
-  // `<( <( … ) )`, and a gate that outruns the live 5,000 ms hook timeout makes
-  // NO decision and does not block the command -- slow is the same as absent,
-  // which is the measurement the JUDGING_BUDGET_MS comment below was written for.
-  // 每個運算子 '(' 的對應 ')' 只算一次。改成「每個替換各掃一次」在
-  // `<( <( … ) )` 這種嵌套下是平方級，而跑贏 5,000 ms 逾時的閘門不做任何裁決、也不會擋下
-  // 命令——「慢」等於「不存在」。
-  const closingParen = new Map();
-  {
-    const openParens = [];
-    for (let k = 0; k < words.length; k += 1) {
-      if (!operatorTokens[k]) continue;
-      if (words[k] === '(') openParens.push(k);
-      else if (words[k] === ')' && openParens.length > 0) closingParen.set(openParens.pop(), k);
-    }
-  }
+  // (closingParen, the matching-')' map, is built near the top of this scan.)
   // A command boundary for this rule. '<' and '>' are NOT boundaries: a
   // redirection stays inside its simple command. An '&' that FOLLOWS a '<' or
   // '>' operator is part of that redirection (`2>&1`), not a terminator --
@@ -3832,6 +4022,15 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
     const word = words[k];
     if (word === ';' || word === '|' || word === '\n' || word === '(' || word === ')') return true;
     if (word !== '&') return false;
+    // In the reading where `&>` is one redirection (see commandTargetsScan) its
+    // `&` is not a boundary either. Treating it as one while the argv projection
+    // did not made every segment's executable walk run on across the rest of
+    // the command: `sudo &>/dev/null ` x 20,000 + `rm -rf /etc` took 104 s
+    // (measured while writing this), where the hook's own timeout is 5 s.
+    // 在「`&>` 是一個重導向」那一種讀法裡，它的 `&` 也不是邊界。這裡當成邊界、而 argv 投影不當時，
+    // 每一段的執行檔走訪都會一路走過命令剩下的部分：寫這段時實測 20,000 個 `sudo &>/dev/null `
+    // 接 `rm -rf /etc` 要 104 秒，而 hook 自己的逾時是 5 秒。
+    if (ampersandStartsRedirection && isOperatorAt(k + 1, '>')) return false;
     return !(k > 0 && operatorTokens[k - 1] && (words[k - 1] === '>' || words[k - 1] === '<'));
   };
   // Exactly one '|' in the boundary run, so `||` -- which this tokenizer emits
@@ -4686,17 +4885,50 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
     }
   }
 
+  // Where the walk over the simple command running at `from` stops: the first
+  // terminator, with every real redirection in between stepped over whole
+  // (BRM-ab-02). The walks below used to stop at `<` and `>` as if they ended
+  // the command, and the words after a redirection were then read as a NEW
+  // command. A process substitution still stops it, exactly as before, so the
+  // main loop goes on reading the commands inside one; that includes the target
+  // of a redirection when the target is a process substitution.
+  // 在 `from` 執行中的那條簡單命令的走訪停在哪裡：第一個終止符，中間「真的」重導向整段跨過
+  // （BRM-ab-02）。原本這些走訪把 `<`、`>` 當成命令結尾，重導向後面的字就被讀成「新命令」。
+  // process substitution 照舊會讓它停下，讓主迴圈繼續讀裡面的命令（重導向的目標是 process
+  // substitution 時也一樣）。
+  const endOfSimpleCommand = (from) => {
+    let k = from;
+    while (k < words.length) {
+      const redirection = redirectionSpan(k);
+      if (redirection !== null && !redirection.substitutionWord) {
+        const skipTo = redirection.targetStart ?? redirection.end;
+        k = Math.max(skipTo, k + 1);
+        continue;
+      }
+      if (redirection !== null || operatorAt(k, terminators)) break;
+      k += 1;
+    }
+    return k;
+  };
+
   let i = 0;
 
   while (i < words.length) {
-    while (i < words.length && operatorAt(i, separators)) i += 1;
+    // Terminators and process-substitution openers only (BRM-ab-02): any other
+    // `<` or `>` here begins a redirection in front of the command word, and
+    // resolveExecutable() reads past it. The opener of a process substitution is
+    // skipped as it always was, so the commands inside one are read here.
+    // 只跳過終止符與 process substitution 的開頭（BRM-ab-02）：其餘的 `<`、`>` 是命令字前面的
+    // 重導向，由 resolveExecutable() 讀過去。process substitution 的開頭照舊跳過，裡面的命令在
+    // 這裡讀。
+    while (i < words.length && (operatorAt(i, terminators) || substitutionEnd(i) !== -1)) i += 1;
     if (i >= words.length) break;
     if (controlWords.has(words[i])) {
       i += 1;
       continue;
     }
     const {
-      executable, executableIndex, index, stdinCompletesOperands,
+      executable, executableIndex, index, stdinCompletesOperands, unparseableRedirection,
     } = resolveExecutable(i);
     i = index;
 
@@ -4707,8 +4939,12 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
     // `"$CMD" -rf /`, backticks) is unknowable here, so it must be assumed to be
     // rm: its operands are scanned exactly like rm operands. Matching on the
     // literal word alone let every dynamic spelling of rm through.
-    const unresolvedExecutable = executable !== ''
-      && hasUnresolvedTargetExpansion(dynamicExpansions[executableIndex]);
+    // A redirection this file could not parse in front of the command word makes
+    // that word as unknowable as an expansion does (BRM-ab-02).
+    // 命令字前面有一個讀不懂的重導向，那個字就跟展開一樣不可知（BRM-ab-02）。
+    const unresolvedExecutable = executable !== '' && (
+      hasUnresolvedTargetExpansion(dynamicExpansions[executableIndex]) || unparseableRedirection
+    );
     if (executable) i += 1;
     if (['rm', 'rmdir'].includes(executable) && stdinCompletesOperands) {
       // The literal operands below are still scanned, but the ones arriving on
@@ -4719,9 +4955,19 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
       targets.push('/');
     }
     if (['rm', 'rmdir'].includes(executable) || unresolvedExecutable) {
-      for (; i < words.length && !operatorAt(i, terminators); i += 1) {
+      for (; i < words.length; i += 1) {
         const candidate = words[i];
-        if (operatorAt(i, redirectors)) {
+        // Every redirection shape, not the three spellings this arm used to know
+        // (BRM-ab-02): the operand scan stopped on the `&` of `2>&1` and `&>`, on
+        // the `|` of `>|` and on the '(' of a process substitution, and every
+        // operand after one of them was unread -- `rm -rf x 2>&1 /etc` was ALLOW.
+        // A process substitution operand names /dev/fd/N, never a protected
+        // path, so it is stepped over too.
+        // 每一種重導向形狀（BRM-ab-02）：掃描原本停在 `2>&1`／`&>` 的 `&`、`>|` 的 `|`、process
+        // substitution 的 '(' 上，之後的操作元全部沒讀到。process substitution 操作元指的是
+        // /dev/fd/N，不會是受保護路徑，一樣跨過。
+        const redirection = redirectionSpan(i);
+        if (redirection !== null) {
           // ...but this loop also runs for an UNRESOLVABLE command word, and
           // that word may be a shell carrier, in which case its here-string is
           // the script -- the same rule the shellCarriers branch applies. Before
@@ -4735,15 +4981,24 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
           // 加進跳過清單之前,這些操作元會被當目標收走、再由下面那個空白字元的分支當成命令
           // 讀,所以 `CMD=bash; $CMD <<< "rm -rf /etc"` 是拒絕;直接跳過會讓它變成放行
           // (實測)。只針對 here-string:'<' 與 '<<' 接的是檔名,不是腳本。
-          if (unresolvedExecutable && candidate === '<<<' && i + 1 < words.length) {
+          if (
+            unresolvedExecutable && redirection.hereStringAt !== undefined
+            && redirection.end === redirection.hereStringAt + 2
+          ) {
             if (depth >= 8) targets.push('/');
-            else targets.push(...nestedScan(words[i + 1], depth + 1, false, expansionEnv));
+            else targets.push(...nestedScan(words[redirection.hereStringAt + 1], depth + 1, false, expansionEnv));
           }
-          // Skip the redirection and its filename operand (not an rm target),
-          // but never skip a command terminator that follows a bare redirect.
-          if (i + 1 < words.length && !operatorAt(i + 1, terminators)) i += 1;
+          // The whole span: the redirection and its filename operand (not an rm
+          // target). A span never reaches past a terminator, so one that follows
+          // a bare redirect still ends the scan.
+          // 整段跨過：重導向與它的檔名操作元（不是 rm 的目標）。span 不會跨過終止符。
+          i = Math.max(redirection.end, i + 1) - 1;
           continue;
         }
+        // The redirection test comes FIRST: the `&` of `&>` is a terminator only
+        // when it does not start a redirection (see commandTargetsScan).
+        // 先問重導向：`&>` 的 `&` 只有在不開始一個重導向時才是終止符。
+        if (operatorAt(i, terminators)) break;
         if (candidate === '--') continue;
         // An unresolvable command word may also be a shell carrier, so an
         // operand holding a whole command string (`$CMD -c 'rm -rf /'`) has to
@@ -4760,38 +5015,59 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
       }
     } else if (shellCarriers.has(executable)) {
       const nestedCommands = [];
-      for (; i < words.length && !separators.has(words[i]); i += 1) {
-        // `bash <<EOF` has no -c: the heredoc body IS the script, and every rm in
-        // it runs. This is the one place a body is code rather than data, and it
-        // is why the body is kept beside the word stream instead of discarded.
-        // `bash <<EOF` 沒有 -c：那段內文就是腳本本身，裡面的每一個 rm 都會執行。這是
-        // 內文唯一算「程式碼」的地方，也正是它被留在旁邊而不是丟掉的理由。
-        if (heredocBodies.has(i)) {
-          nestedCommands.push(heredocBodies.get(i));
+      // The next ARGV word at or after `k`: a redirection between an option and
+      // its value is not the value (`bash -c 2>/dev/null 'rm -rf /etc'` runs the
+      // script, BRM-ab-02).
+      // 從 `k` 起的下一個 argv 字：選項與它的值之間的重導向不是那個值（BRM-ab-02）。
+      const nextArgvWord = (k) => {
+        let at = k;
+        for (let span = redirectionSpan(at); span !== null && !span.substitutionWord; span = redirectionSpan(at)) {
+          at = Math.max(span.end, at + 1);
+        }
+        return at;
+      };
+      for (; i < words.length; i += 1) {
+        // Redirections first (BRM-ab-02), so `bash 2>/dev/null -c '…'` reaches
+        // its `-c`: this loop used to stop at the `>` as a separator.
+        // 重導向先處理（BRM-ab-02），`bash 2>/dev/null -c '…'` 才走得到 `-c`：原本這個迴圈會把
+        // `>` 當分隔符停下來。
+        const redirection = redirectionSpan(i);
+        if (redirection !== null && !redirection.substitutionWord) {
+          // `bash <<EOF` has no -c: the heredoc body IS the script, and every rm in
+          // it runs. This is the one place a body is code rather than data, and it
+          // is why the body is kept beside the word stream instead of discarded.
+          // `bash <<EOF` 沒有 -c：那段內文就是腳本本身，裡面的每一個 rm 都會執行。這是
+          // 內文唯一算「程式碼」的地方，也正是它被留在旁邊而不是丟掉的理由。
+          if (redirection.heredocAt !== undefined) {
+            nestedCommands.push(heredocBodies.get(redirection.heredocAt));
+          }
+          // `bash <<< "rm -rf /etc"` has no -c either: the here-STRING is what
+          // bash reads on stdin, so it is the script, exactly like the heredoc
+          // body above. Measured with the deletion replaced by a touch: the
+          // marker appeared under /bin/bash 3.2.57, 5.3.15, `bash -s` and `sh`.
+          // It reaches this loop as an operator word because the tokenizer emits
+          // '<<<' as one -- the operatorTokens check (inside redirectionSpan) is
+          // what keeps a literal `echo '<<<'` from being read as the operator.
+          // `bash <<< "rm -rf /etc"` 同樣沒有 -c:here-string 就是 bash 從 stdin 讀到的
+          // 東西,也就是腳本本身,與上面的 heredoc 內文完全同理(把刪除換成 touch 實測,
+          // 3.2.57、5.3.15、`bash -s`、`sh` 都產生了標記檔)。它以運算子字的身分進到這個
+          // 迴圈,而 operatorTokens 的檢查是防止字面的 `echo '<<<'` 被當成運算子。
+          if (
+            redirection.hereStringAt !== undefined
+            && redirection.end === redirection.hereStringAt + 2
+          ) {
+            nestedCommands.push(words[redirection.hereStringAt + 1]);
+          }
+          i = Math.max(redirection.end, i + 1) - 1;
           continue;
         }
-        // `bash <<< "rm -rf /etc"` has no -c either: the here-STRING is what
-        // bash reads on stdin, so it is the script, exactly like the heredoc
-        // body above. Measured with the deletion replaced by a touch: the
-        // marker appeared under /bin/bash 3.2.57, 5.3.15, `bash -s` and `sh`.
-        // It reaches this loop as an operator word because the tokenizer emits
-        // '<<<' as one -- the operatorTokens check is what keeps a literal
-        // `echo '<<<'` from being read as the operator.
-        // `bash <<< "rm -rf /etc"` 同樣沒有 -c:here-string 就是 bash 從 stdin 讀到的
-        // 東西,也就是腳本本身,與上面的 heredoc 內文完全同理(把刪除換成 touch 實測,
-        // 3.2.57、5.3.15、`bash -s`、`sh` 都產生了標記檔)。它以運算子字的身分進到這個
-        // 迴圈,而 operatorTokens 的檢查是防止字面的 `echo '<<<'` 被當成運算子。
-        if (operatorTokens[i] && words[i] === '<<<') {
-          if (i + 1 < words.length) nestedCommands.push(words[i + 1]);
-          i += 1;
-          continue;
-        }
+        if (separators.has(words[i])) break;
         const option = words[i];
         if (
           executable === 'fish'
           && (option === '-C' || option === '--init-command')
         ) {
-          i += 1;
+          i = nextArgvWord(i + 1);
           nestedCommands.push(words[i] || '');
         } else if (
           executable === 'fish'
@@ -4804,7 +5080,7 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
         ) {
           nestedCommands.push(option.slice('--command='.length));
         } else if (option === '--command' || /^-[^-]*c/.test(option)) {
-          i += 1;
+          i = nextArgvWord(i + 1);
           nestedCommands.push(words[i] || '');
           if (executable !== 'fish') break;
         }
@@ -4816,7 +5092,7 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
         if (depth >= 8) targets.push('/');
         else targets.push(...nestedScan(nestedCommand, depth + 1, false, expansionEnv));
       }
-      while (i < words.length && !operatorAt(i, separators)) i += 1;
+      i = endOfSimpleCommand(i);
     } else if (executable === 'find') {
       // find deletes on its own with -delete, and through the -exec family when
       // the command it runs is rm. Either way the paths it walks are literal
@@ -4838,7 +5114,7 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
       // 讓 `find -x /etc -delete` 一個 root 都沒收到、退回 '.'，於是它拿到的那條路徑根本
       // 沒被判——實測那條命令會刪掉 /etc。
       const leadingOptions = new Set(['-x', '-d', '-s', '-E', '-H', '-L', '-P', '-h', '-X']);
-      while (i < words.length && !operatorAt(i, terminators)) {
+      while (i < words.length) {
         // A root that only exists after expansion is unknowable, exactly as an rm
         // operand is: `find $DIR -delete` and `find "$DIR" -delete` both delete
         // (measured), and the rm branch already folds that shape to '/'. The find
@@ -4847,6 +5123,18 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
         // `find "$DIR" -delete` 實測都會刪。rm 那邊早就把這種形狀折成 '/'，find 這邊卻推
         // 原字，同一種不可知得到兩種答案。
         const asRoot = (index) => targetFromWord(words[index], dynamicExpansions[index], expansionEnv);
+        // A redirection between the roots is not a root and does not end them
+        // (BRM-ab-02): the `&` of `2>&1` stopped this loop, and
+        // `find /tmp 2>&1 /etc -delete` deleted /etc unjudged. A process
+        // substitution root names /dev/fd/N and is stepped over the same way.
+        // 夾在 root 之間的重導向不是 root、也不結束它們（BRM-ab-02）。process substitution
+        // root 指的是 /dev/fd/N，一樣跨過。
+        const redirection = redirectionSpan(i);
+        if (redirection !== null) {
+          i = Math.max(redirection.end, i + 1);
+          continue;
+        }
+        if (operatorAt(i, terminators)) break;
         if (words[i] === '-f') {
           if (i + 1 < words.length && !operatorAt(i + 1, terminators)) searchRoots.push(asRoot(i + 1));
           i += 2;
@@ -4870,6 +5158,16 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
         // 跳脫或加引號的 `|`、`&`、`(` 真的會結束 find 對子句的讀取——實測 BSD find 回
         // 「no terminating ";" or "+"」、exit 1、什麼都沒刪。test-hooks.js 裡那三列
         // `find /etc -exec cat {} '|' -delete` 就是釘它的，把這裡接上會把三列都變成誤擋。
+        // A REAL redirection is stepped over first (BRM-ab-02): its `&` or `|` is
+        // an operator piece, not the quoted or escaped word the paragraph above is
+        // about, and stopping on it hid every find operator after `2>&1`.
+        // 「真的」重導向先跨過（BRM-ab-02）：它的 `&`、`|` 是運算子碎片，不是上面那段講的加引號
+        // 或跳脫的字；停在它上面會把 `2>&1` 之後的每個 find 運算子藏起來。
+        const findRedirection = redirectionSpan(i);
+        if (findRedirection !== null) {
+          i = Math.max(findRedirection.end, i + 1) - 1;
+          continue;
+        }
         if (terminators.has(words[i])) {
           // The `;` that closes an -exec clause has to be hidden from the shell,
           // so it is written `\;` or `';'` -- and the tokenizer turns all three
@@ -4941,11 +5239,20 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
             // 掃描從拆完外殼的那個命令字之後開始，外殼自己的引數不會被當成 rm 的目標。
             for (
               clauseEnd = execCommand.index + 1;
-              clauseEnd < words.length
-                && !terminators.has(words[clauseEnd])
-                && words[clauseEnd] !== '+';
+              clauseEnd < words.length && words[clauseEnd] !== '+';
               clauseEnd += 1
             ) {
+              // A real redirection inside the clause is the shell's, not rm's
+              // (BRM-ab-02), and its `&` must not end the clause early -- so it is
+              // asked before the terminator test.
+              // 子句裡「真的」重導向屬於 shell 而不是 rm（BRM-ab-02），它的 `&` 不可以提早結束子句，
+              // 所以先於終止符判斷。
+              const clauseRedirection = redirectionSpan(clauseEnd);
+              if (clauseRedirection !== null) {
+                clauseEnd = Math.max(clauseRedirection.end, clauseEnd + 1) - 1;
+                continue;
+              }
+              if (terminators.has(words[clauseEnd])) break;
               if (words[clauseEnd] === '{}' || words[clauseEnd].startsWith('-')) continue;
               execOperands.push(
                 targetFromWord(words[clauseEnd], dynamicExpansions[clauseEnd], expansionEnv),
@@ -4978,6 +5285,13 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
           // 仍是線性的：夾限掃描與主迴圈各只走過每個字一次。
           let clauseStop = clauseEnd;
           for (let k = i + 1; k < clauseStop && k < words.length; k += 1) {
+            // A real redirection's `&` is not a terminator (BRM-ab-02).
+            // 真的重導向裡的 `&` 不是終止符（BRM-ab-02）。
+            const clampRedirection = redirectionSpan(k);
+            if (clampRedirection !== null) {
+              k = Math.max(clampRedirection.end, k + 1) - 1;
+              continue;
+            }
             if (terminators.has(words[k])) { clauseStop = k; break; }
           }
           // `- 1` because this loop's own header increments before it re-tests:
@@ -5012,7 +5326,18 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
       // `bash -c '…'` 同一條路，所以規則只有一份。
       let actionIndex = -1;
       let sawDoubleDash = false;
-      for (; i < words.length && !separators.has(words[i]); i += 1) {
+      for (; i < words.length; i += 1) {
+        // A redirection is not the action (BRM-ab-02): `trap 2>/dev/null
+        // '<action>' EXIT` read the fd number `2` as the action and never saw the
+        // real one.
+        // 重導向不是動作（BRM-ab-02）：`trap 2>/dev/null '<動作>' EXIT` 原本把 fd 數字 `2`
+        // 當成動作，真正的動作從沒被看到。
+        const trapRedirection = redirectionSpan(i);
+        if (trapRedirection !== null && !trapRedirection.substitutionWord) {
+          i = Math.max(trapRedirection.end, i + 1) - 1;
+          continue;
+        }
+        if (separators.has(words[i])) break;
         const word = words[i];
         if (operatorTokens[i] || heredocBodies.has(i)) continue;
         if (!sawDoubleDash && word === '--') { sawDoubleDash = true; continue; }
@@ -5049,10 +5374,18 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
         else if (depth >= 8) targets.push('/');
         else targets.push(...nestedScan(actionText, depth + 1, false, expansionEnv));
       }
-      while (i < words.length && !operatorAt(i, separators)) i += 1;
+      i = endOfSimpleCommand(i);
     } else if (executable === 'eval') {
       const nestedCommand = [];
-      for (; i < words.length && !separators.has(words[i]); i += 1) {
+      for (; i < words.length; i += 1) {
+        // eval's argv, which a redirection is not part of (BRM-ab-02).
+        // eval 的 argv，重導向不在其中（BRM-ab-02）。
+        const evalRedirection = redirectionSpan(i);
+        if (evalRedirection !== null && !evalRedirection.substitutionWord) {
+          i = Math.max(evalRedirection.end, i + 1) - 1;
+          continue;
+        }
+        if (separators.has(words[i])) break;
         nestedCommand.push(words[i]);
       }
       if (nestedCommand.length > 0) {
@@ -5060,9 +5393,10 @@ function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false,
         else targets.push(...nestedScan(nestedCommand.join(' '), depth + 1, false, expansionEnv));
       }
     } else {
-      while (i < words.length && !operatorAt(i, separators)) i += 1;
+      i = endOfSimpleCommand(i);
     }
   }
+  Object.defineProperty(targets, 'ampersandRedirectionSeen', { value: ampersandRedirectionSeen });
   return targets;
 }
 
