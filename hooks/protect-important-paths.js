@@ -3133,6 +3133,51 @@ function commandTargetsScanOneReading(
   // by commandTargetsScan to decide whether the second reading is needed.
   // 這個字流有沒有那一種有歧義的形狀（`&` 接 `>`）；commandTargetsScan 讀它決定要不要第二種讀法。
   const ampersandRedirectionSeen = words.some((word, k) => isOperatorAt(k, '&') && isOperatorAt(k + 1, '>'));
+  // THE WORD STREAM AS bash BUILDS ARGV, once per scan (BRM-ab-02): every real
+  // redirection removed wherever it stands, operator for operator exactly as the
+  // stream has them otherwise -- terminators and process substitutions stay.
+  // resolveExecutable() walks THIS instead of the raw stream, so every wrapper's
+  // option and operand walk (`sudo 2>/dev/null -u root rm`, `lockf -t 2>/dev/null
+  // 0 /tmp/lk rm`) sees the argv the program really receives, with no per-wrapper
+  // redirection handling to forget. Built once rather than per call: a per-call
+  // copy of the rest of the command made find's per-clause walk and the R4
+  // per-segment walk quadratic (measured 2,782 ms for 6,000 `-exec rm {} \;`
+  // clauses against 12 ms before, while writing this).
+  // `source` maps each entry back to the stream, `positionOf` maps a stream index
+  // to the first entry at or after it, and `afterUnparseable` marks an entry that
+  // a redirection this file could not parse stands in front of.
+  // 照 bash 組 argv 的方式看字流，每次掃描只建一次（BRM-ab-02）：每個「真的」重導向不管站在哪裡
+  // 都拿掉，其餘運算子原樣保留（終止符與 process substitution 都在）。resolveExecutable() 走的是
+  // 這個而不是原始字流，所以每個包裝命令的選項與操作元走訪看到的都是程式真正收到的 argv。只建一
+  // 次而不是每次呼叫各建一份：每次都複製「命令剩下的部分」會讓 find 逐子句的走訪與 R4 逐段的
+  // 走訪變成平方級（寫這段時實測：6,000 個 `-exec rm {} \;` 子句 2,782 ms，原本 12 ms）。
+  const argv = {
+    words: [], operatorTokens: [], source: [], afterUnparseable: [],
+    positionOf: new Array(words.length + 1),
+  };
+  {
+    let pendingUnparseable = false;
+    let k = 0;
+    while (k < words.length) {
+      const span = redirectionSpan(k);
+      if (span !== null && !span.substitutionWord) {
+        if (span.unparseable) pendingUnparseable = true;
+        const next = Math.max(span.end, k + 1);
+        for (let s = k; s < next; s += 1) argv.positionOf[s] = argv.words.length;
+        k = next;
+        continue;
+      }
+      argv.positionOf[k] = argv.words.length;
+      argv.words.push(words[k]);
+      argv.operatorTokens.push(operatorTokens[k]);
+      argv.source.push(k);
+      argv.afterUnparseable.push(pendingUnparseable);
+      pendingUnparseable = false;
+      k += 1;
+    }
+    argv.positionOf[words.length] = argv.words.length;
+  }
+  const streamLength = words.length;
   const controlWords = new Set([
     'if', 'then', 'elif', 'else', 'fi',
     'for', 'while', 'until', 'select', 'do', 'done',
@@ -3190,100 +3235,6 @@ function commandTargetsScanOneReading(
     'sudo', 'env', 'command', 'builtin', 'exec', 'time',
     'nice', 'timeout', 'coproc', 'noglob',
   ]);
-  let carrierPresent = bodiesAreCodeFromCaller;
-  if (!carrierPresent) {
-    let atCommandPosition = true;
-    // `afterEnv` is the same env(1)-versus-shell distinction the executable walk
-    // makes below: BEFORE any wrapper, an assignment prefix must be a shell
-    // IDENTIFIER (`FOO%%=1 bash -c '...'` runs nothing -- bash reports
-    // `FOO%%=1: command not found`, measured), but AFTER `env` any word with an
-    // `=` is an assignment and the shell behind it really runs. Without this,
-    // `env "F-O=1" bash <<'EOF' ... EOF` stopped the walk at the odd name, no
-    // carrier was seen, and the heredoc body was read as data -- measured
-    // 2026-09-05, the body's touch marker was created (both for `bash` and for
-    // `bash -s`) while the hook allowed the line.
-    // `afterEnv` 就是底下那個「env(1) 不是 shell」的區分：在任何包裝命令之前，指派前綴必須
-    // 是 shell 識別字（`FOO%%=1 bash -c '…'` 什麼都不會跑，bash 會說
-    // `FOO%%=1: command not found`，實測），但在 `env` 之後，任何含 `=` 的字都是指派，它後
-    // 面的 shell 是真的會跑的。少了這一條，`env "F-O=1" bash <<'EOF' … EOF` 會在那個怪名字
-    // 上停住、看不到 carrier、heredoc 內文被當成資料——2026-09-05 實測，內文的 touch marker
-    // 真的被建立（`bash` 與 `bash -s` 都是），而 hook 放行了那一行。
-    let afterEnv = false;
-    for (let w = 0; w < words.length; w += 1) {
-      // A REDIRECTION LEAVES COMMAND POSITION WHERE IT WAS (BRM-ab-02): bash drops
-      // it from the argv, so the shell in `{ >/dev/null bash; } <<EOF` is the
-      // command word. It used to be read as a separator, which made the redirect
-      // TARGET the command word and cleared the position before `bash`. A
-      // process substitution is not skipped: its '(' still opens a command
-      // position here, as it always did, so a shell inside one is still seen.
-      // 重導向不改變命令位置（BRM-ab-02）：bash 把它從 argv 拿掉，所以
-      // `{ >/dev/null bash; } <<EOF` 的命令字是 bash。原本把它讀成分隔符，重導向「目標」就成了
-      // 命令字、把 bash 前面的位置清掉。process substitution 不跳過：它的 '(' 照舊開一個命令位置。
-      const redirection = redirectionSpan(w);
-      if (redirection !== null && !redirection.substitutionWord) {
-        const skipTo = redirection.targetStart ?? redirection.end;
-        if (skipTo > w) { w = skipTo - 1; continue; }
-      }
-      const word = words[w];
-      if (operatorAt(w, separators)) { atCommandPosition = true; afterEnv = false; continue; }
-      // A RESERVED WORD IS A COMMAND POSITION, exactly as an operator is. This
-      // walk was the only one of the five places that consult `controlWords` that
-      // did not consult them, so a carrier standing after `{`, `do`, `then`, `in`
-      // or `fi` had already had atCommandPosition cleared by the word before it
-      // and was skipped by the `if (!atCommandPosition) continue` below. Measured
-      // 2026-09-22, all ALLOW before this line and DENY after: `{ bash; } <<EOF`,
-      // `for i in 1; do bash; done <<EOF`, `if true; then bash; fi <<EOF`,
-      // `while read x; do bash; done <<EOF` and both here-string spellings, while
-      // the control `( bash ) <<EOF` passed all along because a paren IS an
-      // operator and the walk recovered on it.
-      // This can only find MORE command positions, so it can only find MORE
-      // carriers: the cost is an over-refusal on a benign heredoc whose body is
-      // data and whose line happens to hold a reserved word before a shell name
-      // (`for x in bash; do ... done <<EOF`), never a missed carrier.
-      // 保留字就是命令位置，與運算子完全一樣。會查 controlWords 的幾個地方裡，只有這個走訪
-      // 沒查，於是站在 `{`／`do`／`then`／`in` 後面的 carrier 早就被前一個字把
-      // atCommandPosition 清掉、然後被下面那行跳過。這一行只會找到「更多」命令位置，因此只
-      // 會找到更多 carrier：代價是過度拒絕，不會漏掉 carrier。
-      if (controlWords.has(word)) { atCommandPosition = true; afterEnv = false; continue; }
-      if (!atCommandPosition) continue;
-      const name = path.basename(word);
-      if (carriers.has(name)) { carrierPresent = true; break; }
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
-      // A COMMAND WORD THIS WALK CANNOT READ IS A CARRIER IT CANNOT RULE OUT.
-      // The walk compared path.basename(word) against the carrier names, so a
-      // command word that is an EXPANSION never matched one: basename('$CMD') is
-      // '$CMD'. Measured 2026-09-22, ALLOW before this and DENY after -- and the
-      // here-string twin `CMD=bash; $CMD <<< "rm -rf /etc"` was already DENY,
-      // through the unresolved-executable rescue arm further down, which is the
-      // asymmetry that says this is a defect: `$CMD <<EOF ... EOF` really runs the
-      // body (verified with touch markers, 4 shapes x 4 shells, 16/16) and was
-      // allowed, while the identical script arriving as a here-string was refused.
-      // The rescue arm cannot be the fix on its own: it is reached only when the
-      // operand scan of an unresolvable command word runs to the redirection, and
-      // `{ $CMD ; } <<EOF`, `( $CMD ) <<EOF`, `if true; then $CMD; fi <<EOF` and
-      // every other compound spelling end that scan on the `;` or `}` long before
-      // the heredoc -- 42 of the 96 grid cells in test-hooks.js, measured. Asking
-      // it HERE, where the whole command line is in view, answers all of them.
-      // Resolved expansions keep the old path: `$HOME/build` is not a carrier
-      // merely because it carries a dollar sign. Only the UNREADABLE ones fail
-      // closed, and failing closed here can only ADD scanned bodies, never remove
-      // one, so the cost is an over-refusal on `$EDITOR <<EOF` whose body is data.
-      // 走訪拿 path.basename(word) 去比對 carrier 名字，所以「命令字是展開」時永遠比不中
-      // （basename('$CMD') 就是 '$CMD'）。它的 here-string 雙胞胎早就被拒了，這個不對稱正是
-      // 「這是缺陷」的證據。下游那個 rescue arm 補不完：複合命令的操作元掃描會在 `;`／`}`
-      // 上就結束，根本走不到 heredoc（實測 96 格裡有 42 格）。在這裡問——整條命令列都在
-      // 視野內——才答得完。解得開的展開走原本的路，只有「讀不出來」的才 fail-closed，而在
-      // 這裡 fail-closed 只會「多」掃內文、不會少掃。
-      if (/[$`]/.test(word) && resolveKnownExpansions(word, expansionEnv) === null) {
-        carrierPresent = true;
-        break;
-      }
-      if (transparent.has(name)) { if (name === 'env') afterEnv = true; continue; }
-      if (afterEnv && !word.startsWith('-') && word.includes('=')) continue;
-      atCommandPosition = false;
-    }
-  }
-
   // `env -S "<string>"` is env parsing its own arguments a second time, not a
   // shell parsing a command line, and the difference is the same one as above:
   // inside that string too, ANY word containing `=` is an assignment and the
@@ -3481,6 +3432,144 @@ function commandTargetsScanOneReading(
     for (let k = from; k < words.length && !operatorAt(k, separators); k += 1) rest.push(words[k]);
     return rest;
   };
+  let carrierPresent = bodiesAreCodeFromCaller;
+  if (!carrierPresent) {
+    let atCommandPosition = true;
+    // `afterEnv` is the same env(1)-versus-shell distinction the executable walk
+    // makes below: BEFORE any wrapper, an assignment prefix must be a shell
+    // IDENTIFIER (`FOO%%=1 bash -c '...'` runs nothing -- bash reports
+    // `FOO%%=1: command not found`, measured), but AFTER `env` any word with an
+    // `=` is an assignment and the shell behind it really runs. Without this,
+    // `env "F-O=1" bash <<'EOF' ... EOF` stopped the walk at the odd name, no
+    // carrier was seen, and the heredoc body was read as data -- measured
+    // 2026-09-05, the body's touch marker was created (both for `bash` and for
+    // `bash -s`) while the hook allowed the line.
+    // `afterEnv` 就是底下那個「env(1) 不是 shell」的區分：在任何包裝命令之前，指派前綴必須
+    // 是 shell 識別字（`FOO%%=1 bash -c '…'` 什麼都不會跑，bash 會說
+    // `FOO%%=1: command not found`，實測），但在 `env` 之後，任何含 `=` 的字都是指派，它後
+    // 面的 shell 是真的會跑的。少了這一條，`env "F-O=1" bash <<'EOF' … EOF` 會在那個怪名字
+    // 上停住、看不到 carrier、heredoc 內文被當成資料——2026-09-05 實測，內文的 touch marker
+    // 真的被建立（`bash` 與 `bash -s` 都是），而 hook 放行了那一行。
+    let afterEnv = false;
+    // Whether the wrapper model has already been asked about the command starting
+    // at this command position. It unwraps every layer in one call, so a chain
+    // (`sudo nice timeout 5 bash`) needs it once; asking again at each layer made
+    // `sudo &>/dev/null ` x 6,000 take 8 s (measured while writing this).
+    // 包裝命令模型是否已經對「這個命令位置開始的命令」問過了。它一次拆完所有層，所以一串包裝命令只
+    // 需要問一次；每一層都問，寫這段時實測 6,000 個 `sudo &>/dev/null ` 要 8 秒。
+    let askedWrapperModel = false;
+    for (let w = 0; w < words.length; w += 1) {
+      // A REDIRECTION LEAVES COMMAND POSITION WHERE IT WAS (BRM-ab-02): bash drops
+      // it from the argv, so the shell in `{ >/dev/null bash; } <<EOF` is the
+      // command word. It used to be read as a separator, which made the redirect
+      // TARGET the command word and cleared the position before `bash`. A
+      // process substitution is not skipped: its '(' still opens a command
+      // position here, as it always did, so a shell inside one is still seen.
+      // 重導向不改變命令位置（BRM-ab-02）：bash 把它從 argv 拿掉，所以
+      // `{ >/dev/null bash; } <<EOF` 的命令字是 bash。原本把它讀成分隔符，重導向「目標」就成了
+      // 命令字、把 bash 前面的位置清掉。process substitution 不跳過：它的 '(' 照舊開一個命令位置。
+      const redirection = redirectionSpan(w);
+      if (redirection !== null && !redirection.substitutionWord) {
+        const skipTo = redirection.targetStart ?? redirection.end;
+        if (skipTo > w) { w = skipTo - 1; continue; }
+      }
+      const word = words[w];
+      if (operatorAt(w, separators)) {
+        atCommandPosition = true; afterEnv = false; askedWrapperModel = false; continue;
+      }
+      // A RESERVED WORD IS A COMMAND POSITION, exactly as an operator is. This
+      // walk was the only one of the five places that consult `controlWords` that
+      // did not consult them, so a carrier standing after `{`, `do`, `then`, `in`
+      // or `fi` had already had atCommandPosition cleared by the word before it
+      // and was skipped by the `if (!atCommandPosition) continue` below. Measured
+      // 2026-09-22, all ALLOW before this line and DENY after: `{ bash; } <<EOF`,
+      // `for i in 1; do bash; done <<EOF`, `if true; then bash; fi <<EOF`,
+      // `while read x; do bash; done <<EOF` and both here-string spellings, while
+      // the control `( bash ) <<EOF` passed all along because a paren IS an
+      // operator and the walk recovered on it.
+      // This can only find MORE command positions, so it can only find MORE
+      // carriers: the cost is an over-refusal on a benign heredoc whose body is
+      // data and whose line happens to hold a reserved word before a shell name
+      // (`for x in bash; do ... done <<EOF`), never a missed carrier.
+      // 保留字就是命令位置，與運算子完全一樣。會查 controlWords 的幾個地方裡，只有這個走訪
+      // 沒查，於是站在 `{`／`do`／`then`／`in` 後面的 carrier 早就被前一個字把
+      // atCommandPosition 清掉、然後被下面那行跳過。這一行只會找到「更多」命令位置，因此只
+      // 會找到更多 carrier：代價是過度拒絕，不會漏掉 carrier。
+      if (controlWords.has(word)) {
+        atCommandPosition = true; afterEnv = false; askedWrapperModel = false; continue;
+      }
+      if (!atCommandPosition) continue;
+      const name = path.basename(word);
+      if (carriers.has(name)) { carrierPresent = true; break; }
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
+      // A COMMAND WORD THIS WALK CANNOT READ IS A CARRIER IT CANNOT RULE OUT.
+      // The walk compared path.basename(word) against the carrier names, so a
+      // command word that is an EXPANSION never matched one: basename('$CMD') is
+      // '$CMD'. Measured 2026-09-22, ALLOW before this and DENY after -- and the
+      // here-string twin `CMD=bash; $CMD <<< "rm -rf /etc"` was already DENY,
+      // through the unresolved-executable rescue arm further down, which is the
+      // asymmetry that says this is a defect: `$CMD <<EOF ... EOF` really runs the
+      // body (verified with touch markers, 4 shapes x 4 shells, 16/16) and was
+      // allowed, while the identical script arriving as a here-string was refused.
+      // The rescue arm cannot be the fix on its own: it is reached only when the
+      // operand scan of an unresolvable command word runs to the redirection, and
+      // `{ $CMD ; } <<EOF`, `( $CMD ) <<EOF`, `if true; then $CMD; fi <<EOF` and
+      // every other compound spelling end that scan on the `;` or `}` long before
+      // the heredoc -- 42 of the 96 grid cells in test-hooks.js, measured. Asking
+      // it HERE, where the whole command line is in view, answers all of them.
+      // Resolved expansions keep the old path: `$HOME/build` is not a carrier
+      // merely because it carries a dollar sign. Only the UNREADABLE ones fail
+      // closed, and failing closed here can only ADD scanned bodies, never remove
+      // one, so the cost is an over-refusal on `$EDITOR <<EOF` whose body is data.
+      // 走訪拿 path.basename(word) 去比對 carrier 名字，所以「命令字是展開」時永遠比不中
+      // （basename('$CMD') 就是 '$CMD'）。它的 here-string 雙胞胎早就被拒了，這個不對稱正是
+      // 「這是缺陷」的證據。下游那個 rescue arm 補不完：複合命令的操作元掃描會在 `;`／`}`
+      // 上就結束，根本走不到 heredoc（實測 96 格裡有 42 格）。在這裡問——整條命令列都在
+      // 視野內——才答得完。解得開的展開走原本的路，只有「讀不出來」的才 fail-closed，而在
+      // 這裡 fail-closed 只會「多」掃內文、不會少掃。
+      if (/[$`]/.test(word) && resolveKnownExpansions(word, expansionEnv) === null) {
+        carrierPresent = true;
+        break;
+      }
+      if (transparent.has(name)) {
+        // BRM-ab-04: ASK THE WRAPPER MODEL WHERE THE COMMAND WORD IS. This walk
+        // stepped over the wrapper's NAME and then cleared command position on the
+        // next word, so an option or an operand of the wrapper's own hid the shell
+        // behind it: `{ timeout 5 bash; } <<EOF`, `( lockf /tmp/lk bash ) <<< "..."`
+        // and `if true; then nice -n 5 bash; fi <<EOF` were ALLOW at 41878e9 while
+        // bash ran the body (touch markers, 5.3.20 and 3.2.57, 2026-09-25). The
+        // simple-command spelling was rescued by the executable walk, which knows
+        // each wrapper's options and operands; this walk now asks that same walk,
+        // so the two cannot disagree about where a command word is. A command word
+        // the model reaches that is a carrier, or that it cannot read, or that
+        // stands behind a redirection it could not parse, is a carrier -- the same
+        // fail-closed answer this walk gives at command position. The old step is
+        // kept after it, so nothing this walk found before is lost.
+        // BRM-ab-04：問包裝命令模型「命令字在哪裡」。這個走訪原本只跨過包裝命令的名字，下一個字就清
+        // 掉命令位置，於是包裝命令自己的選項或操作元把後面的 shell 藏起來（41878e9 放行，bash 真的
+        // 執行內文）。簡單命令的寫法有執行檔走訪救回來（它認得每個包裝命令的選項與操作元）；現在這個
+        // 走訪直接問同一個走訪，兩邊對「命令字在哪」不可能不一致。模型走到的命令字是 carrier、讀不
+        // 出來、或站在讀不懂的重導向後面，一律當 carrier。原本的步進保留在後面，先前找得到的不會少。
+        const behind = askedWrapperModel ? { executable: '' } : resolveExecutable(w);
+        askedWrapperModel = true;
+        if (behind.executable && behind.executableIndex >= 0) {
+          const commandWord = words[behind.executableIndex];
+          if (
+            carriers.has(path.basename(commandWord)) || behind.unparseableRedirection
+            || (/[$`]/.test(commandWord) && resolveKnownExpansions(commandWord, expansionEnv) === null)
+          ) {
+            carrierPresent = true;
+            break;
+          }
+        }
+        if (name === 'env') afterEnv = true;
+        continue;
+      }
+      if (afterEnv && !word.startsWith('-') && word.includes('=')) continue;
+      atCommandPosition = false;
+    }
+  }
+
   // A here-string is the same shape as a heredoc body for this purpose, and it
   // needs the same second route: `source /dev/stdin <<< "rm -rf /etc"` never
   // reaches the shellCarriers branch (`source` is not one of them), so the arm
@@ -3523,51 +3612,6 @@ function commandTargetsScanOneReading(
       }
     }
   }
-  // THE WORD STREAM AS bash BUILDS ARGV, once per scan (BRM-ab-02): every real
-  // redirection removed wherever it stands, operator for operator exactly as the
-  // stream has them otherwise -- terminators and process substitutions stay.
-  // resolveExecutable() walks THIS instead of the raw stream, so every wrapper's
-  // option and operand walk (`sudo 2>/dev/null -u root rm`, `lockf -t 2>/dev/null
-  // 0 /tmp/lk rm`) sees the argv the program really receives, with no per-wrapper
-  // redirection handling to forget. Built once rather than per call: a per-call
-  // copy of the rest of the command made find's per-clause walk and the R4
-  // per-segment walk quadratic (measured 2,782 ms for 6,000 `-exec rm {} \;`
-  // clauses against 12 ms before, while writing this).
-  // `source` maps each entry back to the stream, `positionOf` maps a stream index
-  // to the first entry at or after it, and `afterUnparseable` marks an entry that
-  // a redirection this file could not parse stands in front of.
-  // 照 bash 組 argv 的方式看字流，每次掃描只建一次（BRM-ab-02）：每個「真的」重導向不管站在哪裡
-  // 都拿掉，其餘運算子原樣保留（終止符與 process substitution 都在）。resolveExecutable() 走的是
-  // 這個而不是原始字流，所以每個包裝命令的選項與操作元走訪看到的都是程式真正收到的 argv。只建一
-  // 次而不是每次呼叫各建一份：每次都複製「命令剩下的部分」會讓 find 逐子句的走訪與 R4 逐段的
-  // 走訪變成平方級（寫這段時實測：6,000 個 `-exec rm {} \;` 子句 2,782 ms，原本 12 ms）。
-  const argv = {
-    words: [], operatorTokens: [], source: [], afterUnparseable: [],
-    positionOf: new Array(words.length + 1),
-  };
-  {
-    let pendingUnparseable = false;
-    let k = 0;
-    while (k < words.length) {
-      const span = redirectionSpan(k);
-      if (span !== null && !span.substitutionWord) {
-        if (span.unparseable) pendingUnparseable = true;
-        const next = Math.max(span.end, k + 1);
-        for (let s = k; s < next; s += 1) argv.positionOf[s] = argv.words.length;
-        k = next;
-        continue;
-      }
-      argv.positionOf[k] = argv.words.length;
-      argv.words.push(words[k]);
-      argv.operatorTokens.push(operatorTokens[k]);
-      argv.source.push(k);
-      argv.afterUnparseable.push(pendingUnparseable);
-      pendingUnparseable = false;
-      k += 1;
-    }
-    argv.positionOf[words.length] = argv.words.length;
-  }
-  const streamLength = words.length;
   // Wrapper commands can be chained arbitrarily (for example
   // `sudo env SAFE=1 command bash -c ...`). Unwrap each layer until the
   // actual executable is reached; every branch advances i, so malformed

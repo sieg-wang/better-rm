@@ -2426,6 +2426,56 @@ assert.equal(carrierGridCells,
   CARRIER_PREFIXES.length * CARRIER_SPELLINGS.length * CARRIER_BODIES.length,
   'the carrier grid did not run every cell');
 
+// BRM-ab-04: A WRAPPER WITH AN OPTION OR AN OPERAND OF ITS OWN, inside a compound
+// command. The carrier walk stepped over a transparent wrapper's NAME only, so
+// the next word (`-i`, `-n`, `5`, `root`, a lock file, a new root, `/dev/null`)
+// cleared command position and the shell after it was never seen; the body was
+// then data. The prefixes above are all option-free, which is why they could not
+// see it. Measured at 41878e9: every cell below was ALLOW. Touch markers
+// (2026-09-25) show the body runs behind `timeout 5`, `nice -n 5`, `env -i`,
+// `caffeinate -i` and `lockf <file>` in all three forms under bash 5.3.20 and
+// 3.2.57; `script -q /dev/null` did not run it without a terminal, and `sudo -u`
+// and `chroot` need root, so those cells are refused by the same rule without
+// a marker behind them. The openers deliberately include LEADING-OPERAND wrappers (timeout's duration,
+// lockf's file, chroot's root, script's file) in each compound form, because a fix
+// that only steps over option words leaves exactly those open.
+// BRM-ab-04：複合命令裡「帶選項或自有操作元」的包裝命令。carrier 走訪只跨過透明包裝命令的
+// 「名字」，下一個字就清掉了命令位置，後面的 shell 沒人看到，內文成了資料。上面的前綴全都沒有
+// 選項，所以看不到它。41878e9 實測下面每一格都放行，而 bash 真的會執行內文。刻意在每一種複合
+// 形式裡放「帶自有操作元」的包裝命令，因為只跨過選項字的修法正好留下它們。
+const WRAPPED_CARRIER_OPENERS = [
+  'timeout 5', 'nice -n 5', 'sudo -u root', 'env -i', 'caffeinate -i',
+  'lockf /tmp/lk', 'chroot /', 'script -q /dev/null',
+];
+const COMPOUND_FORMS = [
+  (inner) => `{ ${inner}; }`,
+  (inner) => `( ${inner} )`,
+  (inner) => `if true; then ${inner}; fi`,
+];
+let wrappedCarrierCells = 0;
+for (const opener of WRAPPED_CARRIER_OPENERS) {
+  for (const form of COMPOUND_FORMS) {
+    for (const body of CARRIER_BODIES) {
+      const command = `${form(`${opener} bash`)} ${body.text}`;
+      const verdict = evaluate(claude(command), env)?.hookSpecificOutput?.permissionDecision;
+      assert.equal(verdict, carrierBaseline,
+        `a wrapper with an option or operand of its own hid the carrier: ${JSON.stringify(command)}`);
+      wrappedCarrierCells += 1;
+    }
+  }
+  // The benign twin: behind the same wrapper, a command that is not a shell
+  // leaves the body data, so the fix is not "every body after a wrapper is code".
+  // 良性雙胞胎：同一個包裝命令後面接的不是 shell，內文就維持資料。
+  const benign = `${COMPOUND_FORMS[0](`${opener} grep x`)} <<EOF\nrm -rf /etc\nEOF`;
+  assert.equal(evaluate(claude(benign), env), null,
+    `a body read by a non-shell behind ${opener} is data: ${JSON.stringify(benign)}`);
+  wrappedCarrierCells += 1;
+}
+assert.equal(wrappedCarrierCells,
+  WRAPPED_CARRIER_OPENERS.length * (COMPOUND_FORMS.length * CARRIER_BODIES.length + 1),
+  'the wrapped-carrier grid did not run every cell');
+carrierGridCells += wrappedCarrierCells;
+
 // ---------------------------------------------------------------------------
 // ONE ROW PER EXTGLOB OPERATOR, from bash's own list, plus the property that
 // catches the next pattern syntax.
