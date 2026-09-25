@@ -1288,7 +1288,33 @@ const blocked = [
   'ssh-agent -t 60 rm -rf /etc',
   'apply rm -rf /etc',
   'apply -a % rm -rf /etc',
-  // ROUND 3. The DTraceToolkit family -- the THIRD round of the same defect, and
+  // BRM-ab-05: apply's command operand is a SHELL STRING, not an argv word.
+  // apply(1) builds `exec <command> <args>` and hands it to $SHELL -c -- `-d`
+  // prints `exec rmx -rf /etc` for `apply -d 'rmx -rf /%1' etc` -- and the table
+  // row above hands `rm -rf` back as one executable word that is not rm, so every
+  // row below was ALLOW at 41878e9 and e1e4277. Touch markers (2026-09-25):
+  // `%1` substitutes inside a word, `-ax` attaches the magic character, a
+  // shell carrier inside the string runs, and each argument gets its OWN exec
+  // line -- so `apply 'touch' '#' M` still creates M, which is why the string is
+  // not simply joined with every argument (a `#` would hide the rest).
+  // BRM-ab-05：apply 的命令操作元是「shell 字串」，不是 argv 字。apply(1) 組出
+  // `exec <命令> <引數>` 交給 $SHELL -c；上面那張表把 `rm -rf` 當成一個不是 rm 的執行檔字交回去，
+  // 所以下面每一列在 41878e9 與 e1e4277 都放行。touch marker 實測：`%1` 在字中間替換、`-ax` 相連、
+  // 字串裡的 shell carrier 會執行、每個引數各自一行 exec（所以不能把所有引數接成一條）。
+  "apply 'rm -rf' /etc",
+  "apply 'rm -rf' ~/.ssh",
+  'apply "rm -rf" /etc',
+  "apply -0 'rm -rf /etc' 1",
+  "apply -0 'rm -rf ~/.claude' 1",
+  "apply -a x 'rm -rf x1' /etc",
+  "apply -ax 'rm -rf x1' /etc",
+  "apply 'rm -rf %1' /etc",
+  "apply 'rm -rf /%1' etc",
+  "apply -2 'rm -rf' x /etc",
+  "apply 'rm -rf' '#' /etc",
+  'apply \'bash -c "rm -rf ~/.ssh"\' 1',
+  "sudo apply 'rm -rf' /etc",
+  "apply 'rm -rf' \"$BUILD_DIR\"",
   // the first one where the sweep could not even see the names: its file discovery
   // built `${name}.${ext}` from the man SECTION DIRECTORY name, and these pages
   // are man1/*.1m, so they were not "no man page" residuals, they were invisible.
@@ -1380,6 +1406,12 @@ const allowed = [
   'rm -rf build 2>&1',
   'ls >/dev/null 2>&1 && echo ok',
   'echo x >/dev/null rm -rf /etc',
+  // BRM-ab-05's benign twins: apply's string is scanned like any shell text, not
+  // refused for being one.
+  // BRM-ab-05 的良性雙胞胎：apply 的字串照一般 shell 文字掃描，不是因為它是字串就拒絕。
+  "apply 'ls -l' /tmp",
+  "apply 'echo %1' hello",
+  "apply -2 'cmp' a1 b1 a2 b2",
   // BRM-ab-03's benign twins. A `~` alternative still expands to an ordinary path
   // under the home directory, and a `~` that is not at the START of an expanded
   // word is literal in bash (printf: `a~/.ssh`, `x/~`, `a~`), so the fix cannot be

@@ -3650,6 +3650,86 @@ function commandTargetsScanOneReading(
     // instead of substituting them.
     // xargs 的替換字串（沒有就是 null，那時 xargs 是把 stdin 的字「接在後面」）。
     let xargsReplaceString = null;
+    // BRM-ab-05: apply(1) RUNS ITS COMMAND OPERAND AS A SHELL STRING. It builds
+    // `exec <command> <args>` and hands that to $SHELL -c -- `apply -d 'rmx -rf
+    // /%1' etc` prints `exec rmx -rf /etc` -- so the table row below, which hands
+    // the operand back as one executable WORD, read `rm -rf` as a program that is
+    // not rm and allowed `apply 'rm -rf' ~/.ssh`. This builds the text of every
+    // exec line apply would run, the way apply(1) says it does and `-d` shows it
+    // (2026-09-25): `%1`..`%9` (or the `-a` character) are replaced by the
+    // following arguments, the largest digit deciding how many each line uses;
+    // with no reference the arguments are appended `-#` at a time (one by default,
+    // `-0` none); and EVERY line is scanned on its own, because a line is its own
+    // shell parse -- `apply 'rm -rf' '#' /etc` runs `rm -rf /etc` on its second
+    // line while one joined string would read `# /etc` as a comment. A word whose
+    // text is only known after expansion makes the lines unknown and is refused.
+    // An option apply does not have makes it print usage and run nothing, so it
+    // yields no lines. The table row still steps on as before, so `apply rm -rf
+    // /etc` keeps its existing answer too.
+    // BRM-ab-05：apply(1) 把命令操作元當「shell 字串」執行：組出 `exec <命令> <引數>` 交給 $SHELL -c。
+    // 下面那張表把它當成一個執行檔「字」交回去，於是 `rm -rf` 被讀成不是 rm 的程式。這裡照 apply(1)
+    // 的說法（`-d` 實測印出來的樣子）組出它會執行的每一行：`%1`..`%9`（或 `-a` 指定的字元）換成後面的
+    // 引數；沒有引用就每次接 `-#` 個引數（預設一個、`-0` 不接）；每一行各自掃描，因為每一行各自被
+    // shell 解析——`apply 'rm -rf' '#' /etc` 第二行就是 `rm -rf /etc`，接成一條字串反而會把 `# /etc`
+    // 讀成註解。展開後才知道內容的字讓每一行都不可知，一律拒絕。apply 沒有的選項只會印用法、什麼都不跑。
+    const MAX_APPLY_LINES = 4096;
+    const applyScriptTargets = (from) => {
+      let k = from;
+      let magic = '%';
+      let perLine = 1;
+      for (; k < words.length && !operatorAt(k, separators) && /^-./.test(words[k]); k += 1) {
+        if (words[k] === '--') { k += 1; break; }
+        const option = words[k];
+        let valueInNextWord = false;
+        for (let c = 1; c < option.length; c += 1) {
+          const letter = option[c];
+          if (letter === 'd') continue;
+          if (/[0-9]/.test(letter)) { perLine = Number(letter); continue; }
+          if (letter !== 'a') return;
+          if (c + 1 < option.length) magic = option[c + 1];
+          else valueInNextWord = true;
+          break;
+        }
+        if (valueInNextWord) {
+          k += 1;
+          if (k >= words.length || operatorAt(k, separators) || words[k] === '') return;
+          magic = words[k][0];
+        }
+      }
+      if (k >= words.length || operatorAt(k, separators)) return;
+      const readable = [];
+      for (; k < words.length && !operatorAt(k, separators); k += 1) {
+        let text = words[k];
+        if (hasUnresolvedTargetExpansion(dynamicExpansions[argv.source[k]])) {
+          text = resolveKnownExpansions(text, expansionEnv);
+          if (text === null) { targets.push(UNRESOLVED_TARGET + words[k]); return; }
+        }
+        readable.push(text);
+      }
+      const [command, ...args] = readable;
+      const reference = new RegExp(`${magic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([1-9])`, 'g');
+      const digits = [...command.matchAll(reference)].map((match) => Number(match[1]));
+      const lines = [];
+      if (digits.length > 0) {
+        const used = Math.max(...digits);
+        for (let at = 0; at === 0 || at < args.length; at += used) {
+          lines.push(command.replace(reference, (_, digit) => args[at + Number(digit) - 1] ?? ''));
+          if (lines.length > MAX_APPLY_LINES) break;
+        }
+      } else if (perLine === 0) {
+        lines.push(command);
+      } else {
+        for (let at = 0; at === 0 || at < args.length; at += perLine) {
+          lines.push([command, ...args.slice(at, at + perLine)].join(' '));
+          if (lines.length > MAX_APPLY_LINES) break;
+        }
+      }
+      if (lines.length > MAX_APPLY_LINES) { targets.push(UNRESOLVED_TARGET + command); return; }
+      for (const line of lines) {
+        if (depth >= 8) targets.push('/');
+        else targets.push(...nestedScan(line, depth + 1, false, expansionEnv));
+      }
+    };
     while (i < words.length && !operatorAt(i, separators)) {
       while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i += 1;
       if (i >= words.length || operatorAt(i, separators)) break;
@@ -3766,6 +3846,7 @@ function commandTargetsScanOneReading(
       // 因為在它們身上結束走訪會把 `nohup -- -x rm -rf /etc` 交回成 `-x`，DENY 變 ALLOW。
       const wrapperSpec = execWrappers.get(executable);
       if (wrapperSpec !== undefined) {
+        if (executable === 'apply') applyScriptTargets(i + 1);
         i += 1;
         while (i < words.length && words[i].startsWith('-')) {
           const option = words[i];
