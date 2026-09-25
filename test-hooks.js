@@ -5993,9 +5993,33 @@ let findClauseTimingChecks = 0;
   // resolveExecutable() 都建一份，讓兩個走訪變成平方級（寫它時實測：6,000 個 `-exec rm {} \;`
   // 子句 2,782 ms，原本 12 ms；20,000 個 `sudo &>/dev/null ` 要 104 秒）。
   const projectionBudgetMs = 1500 * hostFactor();
+  // The same budget for later scans that were quadratic in their first version,
+  // found by the independent validation of this round (2026-09-25) -- a fail-open,
+  // because a hook that outruns the live 5,000 ms timeout makes no decision:
+  //   - BRM-ab-05's apply(1) line builder scanned one line per argument, each as
+  //     long as the command operand: `apply '<30 KB>' 1..2000; rm -rf /etc` took
+  //     7,652 ms through the stdin entry point (41878e9: about 100 ms).
+  // 同一個預算，套在本輪「第一版是平方級」的其他掃描上（本輪獨立驗證找到，都是 fail-open：
+  // 跑贏 live 5,000 ms 逾時的 hook 不做任何裁決）：ab-05 的 apply 行產生器。
+  const kilobytesOf = (unit, kb) => unit.repeat(Math.ceil((kb * 1024) / unit.length));
+  const argumentsUpTo = (n) => Array.from({ length: n }, (_, k) => String(k + 1)).join(' ');
   for (const [label, command, verdict] of [
     ['6000 closed -exec rm clauses', `find . ${'-exec rm {} \\; '.repeat(6000)}`, undefined],
     ['6000 `sudo &>/dev/null` prefixes', `${'sudo &>/dev/null '.repeat(6000)}rm -rf /etc`, 'deny'],
+    ['a 30 KB apply operand x 2000 arguments, then rm',
+      `apply '${kilobytesOf('echo x; ', 30)}' ${argumentsUpTo(2000)}; rm -rf /etc`, 'deny'],
+    ['rm, then a 30 KB apply operand x 2000 arguments',
+      `rm -rf /etc; apply '${kilobytesOf('echo x; ', 30)}' ${argumentsUpTo(2000)}`, 'deny'],
+    // An apply inside apply's command: each outer line carries the inner clause,
+    // and the outer `%1` makes each inner clause different, so the two sizes
+    // MULTIPLY. Each layer alone stays under a per-call budget; only a budget
+    // shared by the whole invocation stops the product (measured while writing
+    // this: 6,707 ms with a per-call budget, 117 ms with the shared one).
+    // apply 的命令裡再放一個 apply：外層的 `%1` 讓每一行裡的內層子句都不同，兩層大小相乘，每一層
+    // 單獨都在「逐次呼叫」的預算內（寫這段時實測：逐次預算 6,707 ms，共用預算 117 ms）。
+    ['an apply of 400 lines inside each of 190 apply lines',
+      `apply "apply 'echo %1; ${kilobytesOf('echo x; ', 1)}' ${argumentsUpTo(400)}" ${argumentsUpTo(190)}; rm -rf /etc`,
+      'deny'],
   ]) {
     const run = time(command);
     assert.equal(run.verdict, verdict, `${label}: the verdict moved`);
@@ -7150,7 +7174,7 @@ async function runOpenCodePluginChecks() {
 // 現在都會「指名」失敗，而不是留下一次更短、更安靜、看起來仍然是綠的執行。
 const PINNED_TIMING_COUNTERS = [
   ['globTimingChecks', globTimingChecks, 4],
-  ['findClauseTimingChecks', findClauseTimingChecks, 18],
+  ['findClauseTimingChecks', findClauseTimingChecks, 24],
   ['targetLimitChecks', targetLimitChecks, 9],
 ];
 for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {

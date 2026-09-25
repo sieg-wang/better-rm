@@ -2971,7 +2971,7 @@ const wrapperCommands = new Set([
 
 function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, expansionEnv = null) {
   const owned = nestedScanMemo === null;
-  if (owned) nestedScanMemo = { expansionEnv, scanned: new Set() };
+  if (owned) nestedScanMemo = { expansionEnv, scanned: new Set(), applyBuilt: new Set(), applyBytes: 0 };
   try {
     return commandTargetsScan(command, depth, bodiesAreCodeFromCaller, expansionEnv);
   } finally {
@@ -3780,6 +3780,29 @@ function commandTargetsScanOneReading(
       }
     };
     const MAX_APPLY_LINES = 4096;
+    // THE BYTES apply's lines may add, per top-level invocation (round 2 of
+    // BRM-ab-05). One line per argument, each as long as the command operand, is
+    // quadratic in the command's size: `apply '<30 KB>' 1..2000; rm -rf /etc`
+    // took 7,652 ms through the stdin entry point, and a hook that outruns its
+    // live 5,000 ms timeout makes no decision (independent validation,
+    // 2026-09-25). So the lines are built only while their total stays under this
+    // budget, and past it the apply clause is refused as unreadable rather than
+    // read -- the fail-closed side of MAX_APPLY_LINES. The budget is shared by
+    // every scan of one invocation, nested ones included, because an apply
+    // inside an apply's line multiplies the two sizes; a per-call budget would
+    // let the product through. 512 KB is 4,096 lines of 128 bytes.
+    // Each apply clause is also built ONCE per invocation (`applyBuilt`, keyed by
+    // depth and words): the carrier walk, the main loop, the R4 segment walk and
+    // the second reading of `&>` all reach the same clause, and the targets the
+    // first build pushed are already in the result.
+    // apply 產生的行在「一次頂層呼叫」裡最多能加多少位元組（BRM-ab-05 第二輪）。每個引數一行、每行
+    // 和命令操作元一樣長，對命令大小是平方級：`apply '<30 KB>' 1..2000; rm -rf /etc` 經 stdin
+    // 進入點要 7,652 ms，而跑贏 live 5,000 ms 逾時的 hook 不做任何裁決（2026-09-25 獨立驗證）。
+    // 所以只在總量不超過這個預算時才組行，超過就把這個 apply 子句當成讀不到而拒絕——與
+    // MAX_APPLY_LINES 同一側。預算由同一次呼叫的所有掃描共用（含巢狀），因為 apply 行裡的 apply
+    // 會把兩個大小相乘，逐次呼叫各一份預算會放過那個乘積。每個 apply 子句在一次呼叫裡也只組一次。
+    const MAX_APPLY_LINE_BYTES = 512 * 1024;
+    const applyBudget = nestedScanMemo || { applyBuilt: new Set(), applyBytes: 0 };
     const applyScriptTargets = (from) => {
       let k = from;
       let magic = '%';
@@ -3813,25 +3836,43 @@ function commandTargetsScanOneReading(
         }
         readable.push(text);
       }
+      const clauseKey = `${depth}\u0000${readable.join('\u0000')}`;
+      if (applyBudget.applyBuilt.has(clauseKey)) return;
+      applyBudget.applyBuilt.add(clauseKey);
       const [command, ...args] = readable;
+      const unreadableApply = () => {
+        targets.push(`${UNRESOLVED_TARGET}apply '${command.length > 60 ? `${command.slice(0, 60)}...` : command}'`);
+      };
+      const spend = (line) => {
+        applyBudget.applyBytes += line.length;
+        return applyBudget.applyBytes <= MAX_APPLY_LINE_BYTES;
+      };
       const reference = new RegExp(`${magic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([1-9])`, 'g');
       const digits = [...command.matchAll(reference)].map((match) => Number(match[1]));
       const lines = [];
+      // The budget is asked BEFORE a line is built, from its size, so an over-budget
+      // clause costs no more than the budget to discover.
+      // 預算在「組一行之前」就用它的大小來問，超預算的子句花不到超過預算的成本。
+      const lineSize = (at, count) => command.length
+        + args.slice(at, at + count).reduce((sum, arg) => sum + arg.length + 1, 0);
       if (digits.length > 0) {
         const used = Math.max(...digits);
         for (let at = 0; at === 0 || at < args.length; at += used) {
+          if (!spend({ length: lineSize(at, used) * digits.length })) { unreadableApply(); return; }
           lines.push(command.replace(reference, (_, digit) => args[at + Number(digit) - 1] ?? ''));
           if (lines.length > MAX_APPLY_LINES) break;
         }
       } else if (perLine === 0) {
+        if (!spend(command)) { unreadableApply(); return; }
         lines.push(command);
       } else {
         for (let at = 0; at === 0 || at < args.length; at += perLine) {
+          if (!spend({ length: lineSize(at, perLine) })) { unreadableApply(); return; }
           lines.push([command, ...args.slice(at, at + perLine)].join(' '));
           if (lines.length > MAX_APPLY_LINES) break;
         }
       }
-      if (lines.length > MAX_APPLY_LINES) { targets.push(UNRESOLVED_TARGET + command); return; }
+      if (lines.length > MAX_APPLY_LINES) { unreadableApply(); return; }
       for (const line of lines) {
         if (depth >= 8) targets.push('/');
         else targets.push(...nestedScan(line, depth + 1, false, expansionEnv));
