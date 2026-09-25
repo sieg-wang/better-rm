@@ -1965,11 +1965,104 @@ function targetFromWord(word, isDynamic, expansionEnv) {
 // 值是閘門已知的絕對路徑，拼不出名字。粗，但粗在安全的那一側。
 const REWRITES_ANY_NAME = /(?:^|[^A-Za-z0-9_-])(?:unset|export|declare|typeset)(?:[^A-Za-z0-9_-]|$)/;
 const CHANGES_DIRECTORY = /(?:^|[^A-Za-z0-9_-])(?:cd|chdir|pushd|popd)(?:[^A-Za-z0-9_-]|$)/;
-// `.` counts as the dot command when it stands as a word with an operand after
-// it that is not an option or an operator -- so `find . -name x` and
-// `grep -r foo . | head` keep resolving, while `. ./env.sh` and `. -- env.sh` do not.
-// `.` 在「單獨成字、後面接的不是選項也不是運算子」時才算點命令。
-const RUNS_UNSEEN_TEXT = /(?:^|[^A-Za-z0-9_-])source(?:[^A-Za-z0-9_-]|$)|(?:^|[\s;&|({])\.\s+(?=\S)(?!-[A-Za-z]|[|&;<>)!(])/;
+// `source` as a word anywhere: crude, and the safe direction. The dot command is
+// decided by sourcesAFile() below, from command position, because a `.` is far
+// more often an argument (`find .`, `cp -r src .`, `git add .`).
+// `source` 在任何位置出現都算：粗，但在安全的那一側。點命令改由下面的 sourcesAFile() 依「命令位置」
+// 判斷，因為 `.` 多半是引數。
+const RUNS_UNSEEN_TEXT = /(?:^|[^A-Za-z0-9_-])source(?:[^A-Za-z0-9_-]|$)/;
+// Words after which the shell is still looking for a command word, so a `.`
+// there is the dot builtin: reserved words that open or continue a command, and
+// the prefixes that run a builtin (`builtin . f`, `command -p . f`, `eval . f`,
+// `time -p . f`, `exec . f`). `coproc` is left out on purpose: its command runs in
+// a subshell, and measured, a file it sources does not change the caller's HOME.
+// 在它們後面 shell 仍然在找命令字，所以那裡的 `.` 就是點命令。刻意不含 coproc：它的命令在 subshell
+// 裡跑，實測它 source 的檔案改不到呼叫端的 HOME。
+const STILL_AT_COMMAND_WORD = new Set([
+  'if', 'then', 'elif', 'else', 'while', 'until', 'do', '{', '!',
+  'builtin', 'command', 'eval', 'exec', 'time',
+]);
+// Round 2, blocker B3 and O1 of the independent validation: WHETHER A FILE IS
+// SOURCED, decided from COMMAND POSITION in the tokenizer's word stream, not
+// from what follows the `.`. The first version was a regex that let a `.`
+// followed by an option through -- to keep `find . -name` resolving -- and so
+// missed bash 5.3's `. -p PATH FILE` (`help source`), which printf shows setting
+// HOME=/ from a sourced file; and it read an argument `.` as the dot command
+// whenever an operator, a long option or a newline followed it (`cp -r src .
+// 2>/dev/null`, `rsync -a src/ . --delete`, `git add .` + newline). Command
+// position is where the shell looks for a command word: the start, after a
+// separator, after an assignment or a redirection in front of the command word,
+// and after the words in STILL_AT_COMMAND_WORD (with their options). What follows
+// a `.` there does not matter -- `-p`, `--`, anything is still the dot builtin.
+// Nested text is read the same way, fail-closed: every word that holds more than
+// one word once its own quotes are removed is read again as a command line (that
+// is where `bash -c '. f'`, `eval '. f'` and `trap '. f' EXIT` put it), every
+// command substitution in an atomic word is, and every heredoc body is. Past
+// eight levels of nesting the answer is "sourced". A word that is only a
+// command word AFTER expansion (`x='. f'; $x`) is not seen; KNOWN-RESIDUALS.md
+// R6-e records it, because refusing on every expansion in command position would
+// break the documented `$(which cat) $HOME/.zshrc`.
+// 第二輪（獨立驗證的 B3 與 O1）：「有沒有 source 檔案」依 tokenizer 字流裡的「命令位置」判斷，而不是
+// 看 `.` 後面接什麼。第一版的 regex 為了讓 `find . -name` 繼續解析而放過「後面接選項的 `.`」，於是漏掉
+// bash 5.3 的 `. -p PATH FILE`（printf 實測會從被 source 的檔案把 HOME 設成 /）；又把後面接運算子、長
+// 選項或換行的「引數 `.`」讀成點命令。命令位置之後接什麼都不重要。巢狀文字同樣讀、fail-closed：去掉
+// 自己一層引號後不只一個字的字、原子字裡的命令替換、heredoc 內文都當命令列再讀一次；超過八層就當成
+// 「有 source」。展開後才是命令字的（`x='. f'; $x`）看不到，記在 KNOWN-RESIDUALS.md R6-e。
+function sourcesAFile(text, depth = 0, preTokenized = null) {
+  if (depth > 8) return true;
+  const words = preTokenized || shellWords(text);
+  const operators = words.operatorTokens || [];
+  const heredocs = new Map((words.heredocs || []).map((entry) => [entry.operatorIndex, entry.body]));
+  const isOp = (k, spelling) => operators[k] === true && words[k] === spelling;
+  let atCommand = true;
+  let skippingOptions = false;
+  for (let k = 0; k < words.length; k += 1) {
+    const word = words[k];
+    if (heredocs.has(k)) {
+      if (sourcesAFile(heredocs.get(k), depth + 1)) return true;
+      k += 1;
+      continue;
+    }
+    if (operators[k]) {
+      if (word === '<' || word === '>' || word === '<<<') {
+        // A redirection: its pieces and its target, and command position stays.
+        // 重導向：它的碎片與目標，命令位置不變。
+        let j = k + 1;
+        while (word !== '<<<' && (isOp(j, '>') || isOp(j, '&') || isOp(j, '|'))) j += 1;
+        if (j < words.length && !operators[j]) {
+          if (/[\s;&|()<>`]|\$\(/.test(words[j]) && sourcesAFile(words[j], depth + 1)) return true;
+          j += 1;
+        }
+        k = j - 1;
+        continue;
+      }
+      atCommand = true;
+      skippingOptions = false;
+      continue;
+    }
+    // An fd number or `{name}` directly in front of a redirection operator.
+    // 緊接在重導向運算子前面的 fd 數字或 `{name}`。
+    if (/^(?:[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})$/.test(word) && (isOp(k + 1, '<') || isOp(k + 1, '>'))) continue;
+    // Text nested in this word, read as commands of its own.
+    // 這個字裡的巢狀文字，當成它自己的命令讀。
+    if (/[\s;&|()<>`]|\$\(/.test(word)) {
+      const inner = shellWords(word);
+      if (inner.length === 1 && inner[0] === word) {
+        for (const substitution of commandSubstitutions(word)) {
+          if (sourcesAFile(substitution, depth + 1)) return true;
+        }
+      } else if (sourcesAFile(word, depth + 1, inner)) return true;
+    }
+    if (!atCommand) continue;
+    if (word === '.' || word === 'source') return true;
+    if (skippingOptions && word.startsWith('-')) continue;
+    if (STILL_AT_COMMAND_WORD.has(word)) { skippingOptions = true; continue; }
+    if (/^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/.test(word)) continue;
+    atCommand = false;
+    skippingOptions = false;
+  }
+  return false;
+}
 const NAME_TAKING_BUILTIN = /(?:^|[^A-Za-z0-9_-])(eval|read|mapfile|readarray|getopts|local|let|readonly|compgen|coproc|printf|wait)(?![A-Za-z0-9_-])/g;
 const KNOWN_REFERENCE = /\$(?:HOME|PWD|TMPDIR)(?![A-Za-z0-9_])|\$\{(?:HOME|PWD|TMPDIR)\}/g;
 function withoutShellQuoting(text) {
@@ -2063,7 +2156,7 @@ function resolvableEnvironment(command, home, cwd, env) {
   // `unset`/`export`/`declare`/`typeset` can rewrite any of them without an
   // `=` in front of the name, and a directory change moves PWD.
   // unset/export/declare/typeset 不必在名字前面帶 `=` 就能改掉它們，而換目錄會移動 PWD。
-  const rewritesAnything = inAnyReading((text) => (
+  const rewritesAnything = sourcesAFile(String(command || '')) || inAnyReading((text) => (
     REWRITES_ANY_NAME.test(text) || RUNS_UNSEEN_TEXT.test(text) || buildsANameAtRunTime(text)
   ));
   const changesDirectory = inAnyReading((text) => CHANGES_DIRECTORY.test(text));

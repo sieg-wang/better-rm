@@ -1069,3 +1069,25 @@ and since BRM-ab-03 also `rm -rf '{~,x}'`. `rm -rf '~'` was already refused at e
 home directory. Accepted rather than loosened: it fails closed, the ways through are measured
 open (`./~name` and a literal absolute path), and fixing it would mean carrying a "first character
 was quoted" flag from the tokenizer to `targetFromWord()`. Pinned both ways in test-hooks.js.
+
+## R6-e — `$HOME`／`$PWD`／`$TMPDIR` 解析的已知邊界（BRM-cd-01）
+
+2026-09-25。cd-01 的修法讓這三個名字只在「命令保證沒有改掉它們」時才解析成這次呼叫的值；看不到的
+改法一律關掉解析（操作元回到「解不開、拒絕」）。下面是實測過、**刻意沒有處理**的邊界。
+
+**一、展開之後才成為命令字的點命令（fail-open，OPEN，僅記錄）。** `x='. ./env.sh'; $x; rm -rf
+"$HOME/etc"`：`$x` 展開成 `.` 與 `./env.sh`，第一個字就是點命令，printf 實測（bash 5.3.20）
+HOME 真的變成 `/`，而 hook 放行。點命令的判斷看的是 tokenizer 字流裡的命令位置，`$x` 在那裡只是
+一個讀不到內容的字。**為什麼不修**：把「命令位置上任何讀不到的展開」都當成可能 source 檔案，會讓
+README 記載為放行的 `$(which cat) $HOME/.zshrc` 變成拒絕，而那個取捨需要另外裁決。同一類的還有
+`eval` 以外的間接執行（例如 shell 快照裡的使用者函式在函式本體裡 `cd` 或改 HOME）——閘門只讀得到
+這一條命令的文字。
+
+**R6-e, known limits of the `$HOME`/`$PWD`/`$TMPDIR` resolution (BRM-cd-01).** OPEN, recorded:
+a dot command that only becomes a command word after expansion -- `x='. ./env.sh'; $x; rm -rf
+"$HOME/etc"` -- sources the file (printf under bash 5.3.20 shows HOME=/) and is ALLOW, because
+the dot command is decided from command position in the word stream and `$x` is an unreadable word
+there. Treating every unreadable expansion in command position as a possible `.` would refuse the
+documented allowance `$(which cat) $HOME/.zshrc`, which needs its own decision. Indirect execution
+the gate cannot see (a user function from the shell snapshot that changes directory or HOME) is the
+same class: the gate reads only this command's text.

@@ -5770,6 +5770,25 @@ let variableResolutionChecks = 0;
     '. -- /tmp/env.sh; rm -rf "$HOME/etc"',
     'x=1 . /tmp/env.sh; rm -rf "$HOME/etc"',
     'source /tmp/env.sh; rm -rf "$HOME/etc"',
+    // Round 2 (blocker B3 of the independent validation): bash 5.3's dot builtin
+    // takes `-p PATH` (`help source`), and the first version let a `.` followed
+    // by an option through, to keep `find . -name` resolving. printf under
+    // /opt/homebrew/bin/bash 5.3.20 (2026-09-25) shows HOME=/ after each of these
+    // spellings, every one of them sourcing a file that sets it.
+    // 第二輪（獨立驗證的 B3）：bash 5.3 的點命令吃 `-p PATH`，第一版為了讓 `find . -name` 繼續解析而
+    // 放過「後面接選項的 `.`」。下面每一種寫法 printf 實測都讓 HOME 變成 /。
+    '. -p ./d envx.sh; rm -rf "$HOME/etc"',
+    '. -p ./d envx.sh; /bin/rm -rf "$HOME/etc"',
+    'builtin . -p ./d envx.sh; rm -rf "$HOME/etc"',
+    'command . -p ./d envx.sh && /bin/rm -rf "$HOME/etc"',
+    '. -p ./d envx.sh; find "$HOME/etc" -delete',
+    'if true; then . -p ./d envx.sh; fi; rm -rf "$HOME/etc"',
+    'bash -c \'. -p ./d envx.sh; rm -rf "$HOME/etc"\'',
+    'x="a b" . ./env.sh; rm -rf "$HOME/etc"',
+    '2>/dev/null . ./env.sh; rm -rf "$HOME/etc"',
+    "$'\\x2e' ./env.sh; rm -rf \"$HOME/etc\"",
+    "'.' ./env.sh; rm -rf \"$HOME/etc\"",
+    'time -p . ./env.sh; rm -rf "$HOME/etc"',
     // The unprivileged forms, where the real target is the home directory or its
     // .ssh rather than a root-owned path.
     // 不需要 root 的寫法：真正的目標是家目錄或它的 .ssh。
@@ -5805,6 +5824,18 @@ let variableResolutionChecks = 0;
     // value is a path this gate already knows, and a path cannot spell a name.
     // 三個名字之一的引用不是「讀不到的展開」：值是閘門已知的路徑，路徑拼不出名字。
     'read -r x <<< "$HOME"; rm -rf "$HOME/build"',
+    // A `.` that is an ARGUMENT is not the dot builtin (round 2, O1 of the
+    // independent validation): the first version read a whitespace-delimited `.`
+    // as the dot command wherever it stood, so these ordinary lines stopped
+    // resolving -- a `.` target before a redirection, before a long option, and
+    // at the end of a line followed by another line.
+    // 當「引數」的 `.` 不是點命令（第二輪，獨立驗證的 O1）：第一版不管 `.` 站在哪裡都當成點命令。
+    'cp -r src . 2>/dev/null; rm -rf "$TMPDIR/stage"',
+    'rsync -a src/ . --delete; rm -rf "$TMPDIR/sync"',
+    'git add .\nrm -rf "$TMPDIR/build"',
+    'ls . ; rm -rf "$PWD/build"',
+    'echo . > x; rm -rf "$HOME/build"',
+    'tar czf out.tgz -C src . && rm -rf "$TMPDIR/pkg"',
   ]) {
     assert.equal(decisionFor(command), undefined, `a name the command never reassigns stays resolvable: ${command}`);
     variableResolutionChecks += 1;
