@@ -693,7 +693,11 @@ else
     # half is below; R6-a has none -- it records what is NOT modelled, and the pinned list in
     # test-wrapper-model.js guards the table side. Until 2026-09-25 '## R6-a' was not in this
     # loop although this comment already said it was, and the section it cited did not exist.
-    for residuals_anchor in 'O_NOFOLLOW' '無法在無 root 的情況下測試' '兩邊都紅' '## R4-b' '## R4-c' '## R6-a' '## R6-b'; do
+    # '## R6-d' 釘的是「加了引號的字面波浪號被拒」這個已接受的誤擋（BRM-ab-10）；行為那一半由
+    # test-hooks.js 的波浪號區塊雙向釘住。
+    # '## R6-d' pins the accepted over-refusal of a quoted, literal tilde (BRM-ab-10); its
+    # behaviour half is pinned both ways by the tilde block in test-hooks.js.
+    for residuals_anchor in 'O_NOFOLLOW' '無法在無 root 的情況下測試' '兩邊都紅' '## R4-b' '## R4-c' '## R6-a' '## R6-b' '## R6-d'; do
         residuals_hits=$(grep -o -- "$residuals_anchor" "$residuals_doc" 2>/dev/null | wc -l | tr -d '[:space:]')
         if [ "$residuals_hits" != "1" ]; then
             residuals_problems="$residuals_problems anchor[$residuals_anchor]在文件裡出現${residuals_hits}次(必須恰好1次);"

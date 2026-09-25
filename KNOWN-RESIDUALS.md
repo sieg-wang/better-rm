@@ -1036,3 +1036,36 @@ HEAD 於是把那個群組讀成真的 subshell 並掃了它的內容。
 釘子在 `test-hooks.js`：命令位置的邊界**雙向**釘住——否定形式必須 DENY，那四個裡至少一個必須
 ALLOW。少了後面那半，「把閘門整個拿掉」也能滿足前面那半；少了前面那半，繞法回來沒人會知道。
 **任何一個方向被翻轉都會紅。**
+
+## R6-d — 加了引號（或跳脫）的字面波浪號被當成 `~user` 拒絕：已裁決接受的誤擋
+
+2026-09-25（BRM-ab-10）。56121b0 加的波浪號閘門：以 `~` 開頭、又不是 `~` 或 `~/…` 的字，一律
+當成「解不開」拒絕——`~sieg/.ssh`、`~+`、`~-` 這些 bash 真的會展開的寫法本來被當成字面相對路徑
+放行，那是真的洞。代價是：字到 `targetFromWord()` 時引號已經被 tokenizer 拿掉，分不出「加了引號的
+字面 `~`」。於是在 bash 裡只是刪掉工作目錄裡一個普通檔案的命令也被拒絕，實測（stdin 進入點）：
+
+- `rm -f '~$report.docx'`（Office 開檔時留下的 owner file）、`rm -f "~lock.tmp"`、`rm -f \~lock.tmp`、
+  `rm -f '~$Report Q3.xlsx'` —— 以「無法確定會展開成哪條路徑」拒絕；e1e4277 全部放行。
+- `rm -rf '{~,x}'` —— 加了引號的大括號在 bash 裡是字面檔名；BRM-ab-03 讓每個大括號分支都走同一條
+  波浪號規則之後，它也被拒絕（e1e4277 與 41878e9 放行）。
+- `rm -rf '~'`、`rm -f "~"` —— 這兩個**更早就被拒**（e1e4277 就是），而且是以「受保護目錄：家目錄」
+  為由，因為 `expandHome()` 同樣看不到引號。不是這一輪帶來的，一併記在這裡。
+
+**裁決：接受，不放寬。** 理由：方向是 fail-closed（多拒、不漏）；出路一直都在而且實測放行——
+`rm -f ./~lock.tmp` 與字面絕對路徑 `rm -f '/path/to/~$report.docx'`；頻率低（09-25 的審查在
+~/Documents、~/Desktop、~/Downloads、~/projects 裡找到 0 個以 `~` 開頭的檔名，Office 的 `~$`
+檔只在文件開著或當掉之後存在）。要真的修，得把「第一個字元是否被引號包住」從 tokenizer 一路帶到
+`targetFromWord()`，而那是一條新的管線；在沒有需求之前不值得冒那個險。
+
+釘子：`test-hooks.js` 的波浪號區塊**雙向**釘住——上面三種寫法必須以「解不開」的措辭拒絕（放寬它
+就必須連這一節一起改），`./~lock.tmp` 與字面絕對路徑必須放行（出路不能被一起關掉）。這一節的標題
+由 `test-better-rm.sh` 的 anchor 迴圈釘住。
+
+**R6-d, accepted over-refusal (BRM-ab-10).** The tilde gate refuses any word that starts with
+`~` and is not `~` or `~/...`, which closed real holes (`~sieg/.ssh`, `~+`, `~-`), but the word
+reaches `targetFromWord()` after quote removal, so a QUOTED or escaped literal tilde is refused
+too: `rm -f '~$report.docx'`, `rm -f "~lock.tmp"`, `rm -f \~lock.tmp` (all ALLOW at e1e4277),
+and since BRM-ab-03 also `rm -rf '{~,x}'`. `rm -rf '~'` was already refused at e1e4277, as the
+home directory. Accepted rather than loosened: it fails closed, the ways through are measured
+open (`./~name` and a literal absolute path), and fixing it would mean carrying a "first character
+was quoted" flag from the tokenizer to `targetFromWord()`. Pinned both ways in test-hooks.js.

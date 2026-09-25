@@ -2446,6 +2446,30 @@ for (const { form, expands } of TILDE_FORMS) {
 assert.ok(tildeChecks >= TILDE_FORMS.length * 3,
   `the tilde table produced only ${tildeChecks} checks`);
 
+// BRM-ab-10, ACCEPTED rather than fixed: a QUOTED or escaped tilde is literal in
+// bash, and this gate refuses it anyway, because the word reaches targetFromWord()
+// after quote removal and the tilde rule cannot tell. `rm -f '~$report.docx'` (an
+// Office owner file) removes a file in the working directory and is refused as
+// unresolvable; it was ALLOW at e1e4277. Recorded in KNOWN-RESIDUALS.md R6-d. Both
+// halves are pinned: the refusal, so that loosening it is a decision that moves
+// the record too, and the two ways through that the refusal leaves open, so that
+// the cost stays one a user can get past.
+// BRM-ab-10，裁決是「接受」而不是修：加了引號或跳脫的波浪號在 bash 裡是字面，這道閘門照樣拒絕——字到
+// targetFromWord() 時引號已經拿掉，波浪號規則分不出來。記在 KNOWN-RESIDUALS.md R6-d。兩半都釘：拒絕本身
+// （放寬它必須連同紀錄一起改），以及拒絕留下的兩條出路（讓代價維持在使用者繞得過去的程度）。
+for (const command of ["rm -f '~$report.docx'", 'rm -f "~lock.tmp"', 'rm -f \\~lock.tmp']) {
+  const result = evaluate(claude(command, CWD), env)?.hookSpecificOutput;
+  assert.equal(result?.permissionDecision, 'deny', `the accepted quoted-tilde refusal moved: ${command}`);
+  assert.match(result.permissionDecisionReason, UNRESOLVABLE_WORDING,
+    `the quoted-tilde refusal must say the path is unknown, not that it is protected: ${command}`);
+  tildeChecks += 2;
+}
+for (const command of ['rm -f ./~lock.tmp', `rm -f '${CWD}/~$report.docx'`]) {
+  assert.equal(evaluate(claude(command, CWD), env), null,
+    `the way through the quoted-tilde refusal must stay open: ${command}`);
+  tildeChecks += 1;
+}
+
 // `~+` IS the working directory, so it must draw the same verdict as the spelling
 // this gate already answers for. Asked from a cwd that IS protected, so the row
 // measures agreement on a DENY and not agreement on two allows.
