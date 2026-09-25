@@ -362,8 +362,8 @@ const blocked = [
   // only, expanded the braces later, and resolved each alternative against the
   // working directory -- `<cwd>/~/.ssh`, which matches nothing -- so every row
   // below was ALLOW at 41878e9 and at e1e4277. The rows put the `~` first, after
-  // an empty alternative, inside a nested group and after a leading group, in
-  // every tilde form bash has, and through /bin/rm, sudo, bash -c and find.
+  // an empty alternative, inside a nested group and after a leading group, in the
+  // `~`, `~/`, `~user` and `~+` forms, and through /bin/rm, sudo, bash -c and find.
   // BRM-ab-03：大括號群組裡的波浪號。bash 先展開大括號、再展開波浪號，所以每個以 `~` 開頭的
   // 分支都是真的波浪號前綴（三種 shell 用 printf 實測）。閘門只看整個字的第一個字元、之後才展開
   // 大括號，每個分支再對著工作目錄解析——`<cwd>/~/.ssh` 什麼都不符合，所以下面每一列在
@@ -448,10 +448,12 @@ const blocked = [
   // the group -- `[[ x == @(a|x) ]]` is a pattern on bash 5.3.20 even with extglob
   // OFF. So in `[[ x == x@(a')'b) ]]` the count closed at the QUOTED ')', the `'`
   // left over opened a quote that ran to the end of the input, and every command
-  // after it was one word nobody scanned. Measured 2026-09-25 with touch markers
-  // under /opt/homebrew/bin/bash 5.3.20: every line below really ran its trailing
-  // command, and every one was ALLOW at 41878e9 while its twin at e1e4277 (no
-  // extglob gate) was DENY. The rows cover the four ways a span can carry a quote
+  // after it was one word nobody scanned. Touch markers (2026-09-25) under
+  // /opt/homebrew/bin/bash 5.3.20 show the trailing command runs for the single-
+  // quote, double-quote, backquote, `$'...'`, escaped-quote, comment-closed and
+  // extglob-ON argument spellings, and the verifier's run showed the same for
+  // `=~`, `!=` and `if [[ ]]`. Every row below was ALLOW at 41878e9 and DENY at
+  // e1e4277 (no extglob gate), both measured. The rows cover the four ways a span can carry a quote
   // bash reads and a paren counter does not -- single, double, backquote, `$'...'`
   // -- plus the comment-closed long form and the two extglob-ON ARGUMENT spellings,
   // because a fix scoped to `[[ ]]` leaves those open.
@@ -509,10 +511,11 @@ const blocked = [
   // `/dev/null`. The multi-character operators were worse, because the tokenizer
   // emits them as pieces -- the `&` of `2>&1` and `&>` read as a background
   // separator, the `|` of `>|` as a pipe. Every row below was ALLOW at 41878e9
-  // and at e1e4277, and the shell really runs it: touch markers under
-  // /opt/homebrew/bin/bash 5.3.20 for all of them, and for the rows spelled with
-  // POSIX operators under /bin/bash 3.2.57, /bin/zsh and /bin/dash too
-  // (2026-09-25). They cover every operator shape rather than the reported one:
+  // and at e1e4277 (measured). Touch markers (2026-09-25, this run and the
+  // verifier's) show /opt/homebrew/bin/bash 5.3.20 runs the command for each
+  // shape and position measured, and /bin/bash 3.2.57, /bin/zsh and /bin/dash do
+  // for the POSIX spellings; the sudo rows need a password and were not run. They
+  // cover the operator shapes, not only the reported one:
   // the fd prefix, `{name}`, `>>`, `>|`, `<>`, `>&`, `<&`, `&>`, `&>>`, `<<`,
   // `<<<`, a process substitution as the target, and the same shapes after a
   // wrapper, inside a wrapper's own options, after a separator, before a carrier,
@@ -1382,7 +1385,8 @@ const blocked = [
   "sudo dtruss 'rm -rf' \"$BUILD_DIR\"",
   // BRM-ab-09: /pkg, the root-level firmlink macOS 27 added (/usr/share/firmlinks
   // lists `/pkg pkg` on this Mac since the 2026-09-20 upgrade; root-owned, hidden).
-  // Every other firmlinked root present here was already on both lists. The
+  // Each other root-level firmlink present here (/Applications, /Library, /Users,
+  // /Volumes, /cores, /opt, /private) was already on both lists. The
   // data-volume spelling is the same object, as for every firmlink.
   // BRM-ab-09：/pkg，macOS 27 新增的根層 firmlink。這裡存在的其他 firmlink 根目錄都早已在兩份清單上。
   'sudo rm -rf /pkg',
@@ -1391,8 +1395,8 @@ const blocked = [
   // wrapper recorded in KNOWN-RESIDUALS.md R6-a -- a section that did not exist --
   // and it execs any tool on PATH: touch markers (2026-09-25) for the bare form
   // and behind `-v`, `-n`, `-k`, `-l`, `-r`, `--run`, `--sdk X`, `-sdk X`,
-  // `--toolchain X`, `-toolchain X` and `--`. It rejects every option it does not
-  // have (rc 64, no marker for `--weird`, `-z`, `--sdk=X` and the clusters `-nk`,
+  // `--toolchain X`, `-toolchain X` and `--`. It rejected each unknown option
+  // tried (rc 64, no marker for `--weird`, `-z`, `--sdk=X` and the clusters `-nk`,
   // `-rv`), so an option the row does not list makes the command word unknowable
   // rather than skippable -- the last row is that fail-closed answer.
   // 第四輪（BRM-ab-08）：xcrun。56121b0 說它記在 KNOWN-RESIDUALS.md R6-a——那一節根本不存在——而它

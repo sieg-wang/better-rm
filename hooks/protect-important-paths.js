@@ -20,8 +20,9 @@ const path = require('path');
 // 受保護的拼寫如果內容存在一條沒受保護的路徑上，那份保護就是空的。/private/tmp 刻意不
 // 加：那是暫存工作的地方。
 // /pkg (BRM-ab-09) is the root-level firmlink macOS 27 added: /usr/share/firmlinks
-// lists `/pkg pkg` on this Mac since the 2026-09-20 upgrade, and every other
-// firmlinked root present here was already on both lists. Harmless where it does
+// lists `/pkg pkg` on this Mac since the 2026-09-20 upgrade, and each other
+// root-level firmlink present here (/Applications, /Library, /Users, /Volumes,
+// /cores, /opt, /private) was already on both lists. Harmless where it does
 // not exist, like /boot or /lib64 on a Mac.
 // /pkg（BRM-ab-09）是 macOS 27 新增的根層 firmlink；這裡存在的其他 firmlink 根目錄都早已在兩份清單上。
 // 在不存在它的系統上無害，與 Mac 上的 /boot、/lib64 一樣。
@@ -1420,7 +1421,8 @@ const UNRESOLVED_TARGET = '\u0000unresolved:';
 
 // The dynamic-expansion mark shellWords() puts on the word in front of an
 // extglob group it declined to read (BRM-ab-01, see plainExtglobEnd). Truthy on
-// purpose: every reader of dynamicExpansions treats it as a dynamic word, the
+// purpose: each reader of dynamicExpansions here (they all go through
+// hasUnresolvedTargetExpansion() or targetFromWord()) treats it as a dynamic word, the
 // unknowable case; targetFromWord() additionally refuses it outright, because a
 // dynamic word with no `$` in it would otherwise "resolve" to its own prefix.
 // shellWords() 對「拒絕當成樣式讀」的群組前面那個字打的動態標記（BRM-ab-01）。刻意是 truthy：
@@ -1926,15 +1928,15 @@ function targetFromWord(word, isDynamic, expansionEnv) {
 // 「這條命令執行時 `$HOME` 會展開成什麼」，那裡 os.homedir() 只是猜測——HOME 是空的 shell 會
 // 把 `$HOME/build` 展開成 `/build`，代進真正的家目錄反而會把它當成普通路徑。
 // BRM-cd-01: THE SAME QUESTION, ASKED OF THE TEXT THE SHELL WILL READ. Asked of
-// the raw text it missed every spelling that reassigns a name without writing
-// `NAME=` there, all measured (printf, bash 5.3.20 and 3.2.57, 2026-09-25):
+// the raw text it missed spellings that reassign a name without writing `NAME=`
+// there -- each of these measured (printf, bash 5.3.20 and 3.2.57, 2026-09-25):
 //   for HOME in /; ...   read HOME <<< /   printf -v HOME /   HOME[0]=/   HOME+=..
 //   read "HO"ME <<< /    printf -v HO\ME /   printf -v $'\x48OME' /
 //   n=HO; printf -v "${n}ME" /             eval "HO""ME=/"     . ./env.sh
 // and in each one "$HOME/etc" is //etc while the gate resolved it to the hook's own
 // home and allowed the deletion. Listing those spellings is what failed, so the
-// rule is about what the NAME may look like instead, on every reading the shell
-// may give the text -- quotes and backslashes removed, `$'...'` decoded, and the
+// rule is about what the NAME may look like instead, on each reading of the text
+// this file models -- quotes and backslashes removed, `$'...'` decoded, and the
 // same again after each level of backslash escapes is decoded, because a
 // `bash -c "..."` string is read once more by the shell inside it:
 //   - the name may appear ONLY as a reference, `$NAME` or `${NAME...}` (not
@@ -1953,10 +1955,10 @@ function targetFromWord(word, isDynamic, expansionEnv) {
 // Crude in the safe direction, like everything else here: a mention that assigns
 // nothing (`echo HOME`, a `read -p "$prompt"`) turns resolution off, and the
 // operand is then unknown and refused -- the behaviour before any of this existed.
-// BRM-cd-01：同一個問題，改問「shell 會讀到的文字」。只問原始文字，會漏掉每一種「沒寫出 `NAME=`
+// BRM-cd-01：同一個問題，改問「shell 會讀到的文字」。只問原始文字，會漏掉「沒寫出 `NAME=`
 // 卻改掉名字」的寫法（上面每一種都用 printf 實測過，"$HOME/etc" 都是 //etc，而閘門解析成 hook
 // 自己的家目錄、放行）。列舉那些寫法正是失敗的做法，所以規則改成限制「名字能長什麼樣」，並且套在
-// shell 可能給這段文字的每一種讀法上：拿掉引號與反斜線、解開 `$'...'`，再在每解一層反斜線跳脫
+// 本檔建模的每一種讀法上：拿掉引號與反斜線、解開 `$'...'`，再在每解一層反斜線跳脫
 // 之後重來一次（`bash -c "..."` 的字串會被裡面那個 shell 再讀一次）。名字只能以 `$NAME` 或
 // `${NAME...}` 的「讀取」形式出現；名字是「組」出來的根本看不到，所以出現 source、點命令，或 eval
 // 與吃名字的內建在同一條命令裡後面跟著展開，三個名字全部不解析。這三個名字的引用不算那種展開：
@@ -2935,7 +2937,7 @@ const execWrappers = new Map([
   // `--run`, `--sdk X`, `-sdk X`, `--toolchain X`, `-toolchain X` and `--`.
   // 56121b0 named it as an unmodelled wrapper recorded in KNOWN-RESIDUALS.md R6-a,
   // a section that did not exist. `knownOptions` is the one field no other row
-  // has: xcrun rejects every option it does not know (rc 64, no marker, for
+  // has: xcrun rejected each unknown option tried (rc 64, no marker, for
   // `--weird`, `-z`, `--sdk=X` and the clusters `-nk`, `-rv`), so an option
   // outside the list cannot be skipped as a boolean -- the walk marks the command
   // word unknowable instead (`unmodelledOption`), which is the fail-closed answer
@@ -2984,14 +2986,14 @@ function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, exp
 // the other's harmless twin: each reading has a spelling that deletes. The gate
 // cannot know which shell will read the line, so a word stream holding an operator
 // `&` directly followed by an operator `>` is scanned once under each reading and
-// the targets are the union. Every other operator shape has one reading in every
-// shell this file models, so only this one pays for a second pass, and only on a
-// line that has it; the nested texts the second pass reaches again are answered by
+// the targets are the union. No other operator shape measured here reads
+// differently between bash, zsh and dash, so only this one pays for a second
+// pass, and only on a line that has it; the nested texts the second pass reaches again are answered by
 // the memo, which is correct because the first pass already pushed their targets.
 // BRM-ab-02：`&>` 兩種讀法都讀。bash／zsh 把 `&>`（與 `&>>`）讀成一個重導向；dash（Debian／
 // Ubuntu 的 /bin/sh）讀成背景 `&` 接 `>`。2026-09-25 兩個方向都實測到會刪東西的寫法。閘門不知道
 // 哪個 shell 會讀這一行，所以字流裡有「運算子 `&` 緊接運算子 `>`」時，兩種讀法各掃一次、目標取
-// 聯集。其他運算子形狀在本檔建模的每個 shell 裡都只有一種讀法，所以只有這一種要付第二次的成本。
+// 聯集。這裡量過的其他運算子形狀在 bash、zsh、dash 之間讀法都一樣，所以只有這一種要付第二次的成本。
 function commandTargetsScan(command, depth = 0, bodiesAreCodeFromCaller = false, expansionEnv = null) {
   const asRedirection = commandTargetsScanOneReading(
     command, depth, bodiesAreCodeFromCaller, expansionEnv, true,
@@ -3102,9 +3104,10 @@ function commandTargetsScanOneReading(
   // rm 的 stdin,而 rm 從不讀 stdin,把它當目標收走會讓 `rm -rf ./build <<< /etc` 以「/etc」
   // 為由被拒——那條命令根本不碰 /etc。在這裡跳過是安全的,正因為上面兩條 carrier 路徑已經
   // 把同一個操作元當成腳本接手了:它不是到處都被跳過,只在原本把它讀成檔名的那個掃描裡。
-  // (All of that is now answered by redirectionSpan() below, which every walk
-  // shares; the rm operand scan is one of its callers.)
-  // （以上現在都由下面的 redirectionSpan() 回答，每一個走訪共用它；rm 操作元掃描是其中之一。）
+  // (All of that is now answered by redirectionSpan() below, which the command-
+  // word, operand, carrier, find, trap and eval walks share; the rm operand scan
+  // is one of its callers.)
+  // （以上現在都由下面的 redirectionSpan() 回答，命令字、操作元、carrier、find、trap、eval 的走訪共用它；rm 操作元掃描是其中之一。）
   // operator word index -> the heredoc body it introduced.
   const heredocBodies = new Map((words.heredocs || []).map((entry) => [entry.operatorIndex, entry.body]));
   const terminators = new Set([';', '&', '|', '(', ')', '\n']);
@@ -3126,7 +3129,8 @@ function commandTargetsScanOneReading(
       else if (words[k] === ')' && openParens.length > 0) closingParen.set(openParens.pop(), k);
     }
   }
-  // BRM-ab-02: WHERE A REDIRECTION ENDS, asked by every walk in this scan. bash
+  // BRM-ab-02: WHERE A REDIRECTION ENDS, asked by the walks in this scan that look
+  // for a command word or collect operands. bash
   // removes each redirection from a simple command's argv wherever it stands --
   // `2>/dev/null /bin/rm -rf /etc` runs /bin/rm -- and this file used to read `<`
   // and `>` as command SEPARATORS in the walks that look for a command word, so
@@ -3142,12 +3146,12 @@ function commandTargetsScanOneReading(
   // `<<<`, or `&>`/`&>>` in the reading where `&` starts a redirection (see
   // commandTargetsScan), and target is one word or a process substitution.
   // A shape that does not fit -- an operator with no target before a separator or
-  // the end, which every shell here rejects as a syntax error -- is returned as
+  // the end, a syntax error in bash -- is returned as
   // `unparseable`, and the span stops AT the offending token, so nothing after it
   // is ever consumed. A process-substitution WORD (`<(…)` as an argument) is not
   // a redirection; it is returned as `{ substitutionWord: true }` so a walk can
   // keep it as the one argv word it is.
-  // BRM-ab-02：重導向在哪裡結束，這個掃描裡每一個走訪都問它。bash 會把重導向從簡單命令的 argv
+  // BRM-ab-02：重導向在哪裡結束，這個掃描裡找命令字或收操作元的走訪都問它。bash 會把重導向從簡單命令的 argv
   // 裡拿掉，不管它站在哪裡；本檔原本在找命令字的走訪裡把 `<`、`>` 讀成命令分隔符，於是重導向
   // 目標變成命令字、後面的 rm 成了操作元。tokenizer 會把多字元運算子拆成碎片，所以在這裡、只在
   // 這裡依「文法」而不是依「拼寫」把碎片組回來。形狀不合的（運算子後面在分隔符或結尾之前沒有
@@ -5340,7 +5344,7 @@ function commandTargetsScanOneReading(
     if (['rm', 'rmdir'].includes(executable) || unresolvedExecutable) {
       for (; i < words.length; i += 1) {
         const candidate = words[i];
-        // Every redirection shape, not the three spellings this arm used to know
+        // The redirection shapes redirectionSpan() reads, not the three spellings this arm used to know
         // (BRM-ab-02): the operand scan stopped on the `&` of `2>&1` and `&>`, on
         // the `|` of `>|` and on the '(' of a process substitution, and every
         // operand after one of them was unread -- `rm -rf x 2>&1 /etc` was ALLOW.
@@ -5543,7 +5547,7 @@ function commandTargetsScanOneReading(
         // `find /etc -exec cat {} '|' -delete` 就是釘它的，把這裡接上會把三列都變成誤擋。
         // A REAL redirection is stepped over first (BRM-ab-02): its `&` or `|` is
         // an operator piece, not the quoted or escaped word the paragraph above is
-        // about, and stopping on it hid every find operator after `2>&1`.
+        // about, and stopping on it hid the find operators after `2>&1`.
         // 「真的」重導向先跨過（BRM-ab-02）：它的 `&`、`|` 是運算子碎片，不是上面那段講的加引號
         // 或跳脫的字；停在它上面會把 `2>&1` 之後的每個 find 運算子藏起來。
         const findRedirection = redirectionSpan(i);
