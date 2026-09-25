@@ -2895,18 +2895,34 @@ const execWrappers = new Map([
   // 選項表取自腳本自己的 getopts 字串，不取自 SYNOPSIS：四份 SYNOPSIS 都漏了 `-b bufsize`，
   // dtruss 還漏了 `-W name`。合併選項是實測的，不是假設的，而且有會失敗的對照組（`-zzz`）。
   //
+  //
+  // `rejoinsOperands` (BRM-ab-06): all four then JOIN their operands --
+  // `command="$*"` -- before `dtrace -c "$command"`, so `sudo dtruss 'rm -rf
+  // /etc'` hands dtrace the same string as the unquoted spelling, and the plain
+  // row read `rm -rf /etc` as one command word that is not rm. The walk scans the
+  // joined text as well; see rejoinedCommandTargets().
+  // `rejoinsOperands`（BRM-ab-06）：四支都會把操作元接起來（`command="$*"`）再交給
+  // `dtrace -c`，所以加了引號的寫法給 dtrace 的字串與不加引號的相同。
+  //
   // dtruss(1m), getopts `ab:cdefhln:op:st:LW:`
   ['dtruss', {
     valueOptions: ['-b', '-n', '-p', '-t', '-W'],
     clusteredValue: /^-[acdefhlosL]*[bnptW]$/,
     leadingOperands: 0,
+    rejoinsOperands: true,
   }],
   // dappprof(1m), getopts `ab:cehop:Tu:U`
-  ['dappprof', { valueOptions: ['-b', '-p', '-u'], clusteredValue: /^-[acehoTU]*[bpu]$/, leadingOperands: 0 }],
+  ['dappprof', {
+    valueOptions: ['-b', '-p', '-u'], clusteredValue: /^-[acehoTU]*[bpu]$/, leadingOperands: 0, rejoinsOperands: true,
+  }],
   // dapptrace(1m), getopts `ab:cdeFhlop:u:U`
-  ['dapptrace', { valueOptions: ['-b', '-p', '-u'], clusteredValue: /^-[acdeFhloU]*[bpu]$/, leadingOperands: 0 }],
+  ['dapptrace', {
+    valueOptions: ['-b', '-p', '-u'], clusteredValue: /^-[acdeFhloU]*[bpu]$/, leadingOperands: 0, rejoinsOperands: true,
+  }],
   // procsystime(1m), getopts `acehn:op:T`
-  ['procsystime', { valueOptions: ['-n', '-p'], clusteredValue: /^-[acehoT]*[np]$/, leadingOperands: 0 }],
+  ['procsystime', {
+    valueOptions: ['-n', '-p'], clusteredValue: /^-[acehoT]*[np]$/, leadingOperands: 0, rejoinsOperands: true,
+  }],
   // ROUND 4 (BRM-ab-08): xcrun(1), `xcrun [options] <tool name> ... arguments`.
   // It runs ANY tool on PATH, not only developer tools: touch markers
   // (2026-09-25) for the bare form and behind `-v`, `-n`, `-k`, `-l`, `-r`,
@@ -3724,6 +3740,35 @@ function commandTargetsScanOneReading(
     // 引數；沒有引用就每次接 `-#` 個引數（預設一個、`-0` 不接）；每一行各自掃描，因為每一行各自被
     // shell 解析——`apply 'rm -rf' '#' /etc` 第二行就是 `rm -rf /etc`，接成一條字串反而會把 `# /etc`
     // 讀成註解。展開後才知道內容的字讓每一行都不可知，一律拒絕。apply 沒有的選項只會印用法、什麼都不跑。
+    // BRM-ab-06: the command a DTraceToolkit script builds from `"$*"`. The
+    // operands are joined with spaces and handed to `dtrace -c`, whose splitting
+    // of that string dtrace(1) does not describe and which needs root to observe,
+    // so the text is scanned both ways and the targets unioned: split on
+    // whitespace into literal words (a `#` or `;` is then an ordinary word), and
+    // read as shell text (a `;` then starts a second command). The plain walk
+    // still steps on to the next word as before. A word only known after
+    // expansion is refused, since its text goes into the joined string.
+    // BRM-ab-06：DTraceToolkit 腳本從 `"$*"` 組出來的命令。操作元以空白接起來交給 `dtrace -c`，
+    // 而它怎麼切這個字串 dtrace(1) 沒寫、要 root 才看得到，所以兩種讀法都掃、目標取聯集：依空白切成
+    // 字面字，以及當 shell 文字讀。展開後才知道內容的字一律拒絕。
+    const rejoinedCommandTargets = (from) => {
+      const pieces = [];
+      for (let k = from; k < words.length && !operatorAt(k, separators); k += 1) {
+        let text = words[k];
+        if (hasUnresolvedTargetExpansion(dynamicExpansions[argv.source[k]])) {
+          text = resolveKnownExpansions(text, expansionEnv);
+          if (text === null) { targets.push(UNRESOLVED_TARGET + words[k]); return; }
+        }
+        pieces.push(text);
+      }
+      if (pieces.length === 0) return;
+      const joined = pieces.join(' ');
+      const asArgv = joined.split(/[\f\n\r\t\v ]+/).filter(Boolean).map(envArgvWordLiteral).join(' ');
+      for (const text of [asArgv, joined]) {
+        if (depth >= 8) targets.push('/');
+        else targets.push(...nestedScan(text, depth + 1, false, expansionEnv));
+      }
+    };
     const MAX_APPLY_LINES = 4096;
     const applyScriptTargets = (from) => {
       let k = from;
@@ -3954,6 +3999,7 @@ function commandTargetsScanOneReading(
           if (i >= words.length || operatorAt(i, separators)) break;
           i += 1;
         }
+        if (wrapperSpec.rejoinsOperands) rejoinedCommandTargets(i);
         executable = '';
         continue;
       }

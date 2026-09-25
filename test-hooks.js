@@ -1359,6 +1359,27 @@ const blocked = [
   'procsystime -n sshd rm -rf /etc',
   'procsystime -an sshd rm -rf /etc',
   'procsystime -p 1 rm -rf /workspace/secrets',
+  // BRM-ab-06: the four scripts JOIN their operands. Each does `command="$*"` and
+  // then `/usr/sbin/dtrace ... -c "$command"` (read in the shipped scripts), so
+  // `sudo dtruss 'rm -rf /etc'` hands dtrace the same string as the unquoted
+  // spelling above, and every row below was ALLOW at 41878e9. How `dtrace -c`
+  // splits that string is not stated in dtrace(1) and needs root to measure, so
+  // the rows pin both readings: split on whitespace into literal argv (a `#` is
+  // then just a word) and read as shell text (a `;` then starts a command).
+  // Execution is UNVERIFIED here -- unprivileged, all four stop at "DTrace
+  // requires additional privileges" -- which is why the finding is LOW.
+  // BRM-ab-06：這四支腳本會把操作元「接起來」（`command="$*"` 再 `dtrace -c "$command"`，讀自出貨的
+  // 腳本），所以加了引號的 `sudo dtruss 'rm -rf /etc'` 給 dtrace 的字串與上面沒加引號的寫法相同，
+  // 41878e9 下面每一列都放行。`dtrace -c` 怎麼切那個字串，dtrace(1) 沒寫、要 root 才量得到，所以兩種
+  // 讀法都釘：依空白切成字面 argv（`#` 只是一個字），以及當 shell 文字讀（`;` 會開始新命令）。
+  "sudo dtruss 'rm -rf /etc'",
+  "sudo dtruss -f 'rm -rf /etc'",
+  "sudo dappprof 'rm -rf /etc'",
+  'sudo procsystime "rm -rf /etc"',
+  "dapptrace -F 'rm -rf /home/tester'",
+  "sudo dtruss 'rm -rf x #y /etc'",
+  "sudo dtruss 'true ; rm -rf /etc'",
+  "sudo dtruss 'rm -rf' \"$BUILD_DIR\"",
   // ROUND 4, BRM-ab-08: xcrun. The 56121b0 commit named it as an unmodelled
   // wrapper recorded in KNOWN-RESIDUALS.md R6-a -- a section that did not exist --
   // and it execs any tool on PATH: touch markers (2026-09-25) for the bare form
@@ -1438,6 +1459,8 @@ const allowed = [
   // refused for being one.
   // BRM-ab-05 的良性雙胞胎：apply 的字串照一般 shell 文字掃描，不是因為它是字串就拒絕。
   "apply 'ls -l' /tmp",
+  // BRM-ab-06's benign twin.
+  "sudo dtruss 'ls -l /tmp'",
   "apply 'echo %1' hello",
   "apply -2 'cmp' a1 b1 a2 b2",
   // BRM-ab-03's benign twins. A `~` alternative still expands to an ordinary path
