@@ -2055,6 +2055,24 @@ function sourcesAFile(text, depth = 0, preTokenized = null) {
     }
     if (!atCommand) continue;
     if (word === '.' || word === 'source') return true;
+    // A brace word expands before the command runs, and an empty alternative
+    // disappears, so `{.,} f` and `{,.} -p d f` run the dot command (printf shows
+    // HOME=/, bash 5.3.20; pre-existing at 41878e9). Any `.`/`source` alternative
+    // counts; a quoted brace word is literal in bash and counts too (over-refusal).
+    // 大括號字在命令執行前就展開，空的分支會消失，所以 `{.,} f` 會執行點命令。任何 `.`／`source` 分支都算。
+    if (word.includes('{') && expandBraces(word).patterns.some((alternative) => (
+      alternative === '.' || alternative === 'source'
+    ))) return true;
+    // `function NAME` opens a function whose body -- `{`, `while`, `until`, `if`,
+    // `(` ... -- is a command position again (round 3, N3 of the round-2
+    // re-validation: `function f { . ./env.sh; }; f` was missed). The NAME is
+    // stepped over; a `()` after it is operators and resets position anyway.
+    // `function NAME` 開啟的函式本體又是命令位置（第三輪，N3）。NAME 跨過去；後面的 `()` 是運算子，本來就會重設位置。
+    if (word === 'function') {
+      if (k + 1 < words.length && !operators[k + 1]) k += 1;
+      skippingOptions = false;
+      continue;
+    }
     if (skippingOptions && word.startsWith('-')) continue;
     if (STILL_AT_COMMAND_WORD.has(word)) { skippingOptions = true; continue; }
     if (/^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/.test(word)) continue;
@@ -2150,13 +2168,37 @@ function buildsANameAtRunTime(text) {
   }
   return false;
 }
+// The command text and each level of its backslash escapes decoded, quotes
+// kept (round 3, N4 of the round-2 re-validation). A script can reach a shell
+// with its dot written as an escape -- `printf '\x2e ./env.sh; ...' | bash` -- and
+// the pipe-to-shell scan already reads that decoded text for rm targets, with
+// $HOME resolved. sourcesAFile() walks every one of these, so the decoded dot is
+// seen at its command position while an argument `.` stays an argument. Bounded
+// like shellReadingsOf(): at most nine texts, stopping when a decode changes
+// nothing.
+// 命令文字本身，以及每解一層反斜線跳脫後的文字（引號保留；第三輪，N4）。腳本進到 shell 時，點可以寫成
+// 跳脫序列，而管線到 shell 的掃描本來就會讀那段解碼後的文字找 rm 目標、並解析 $HOME。sourcesAFile()
+// 走訪其中每一段，所以解碼出來的點在它的命令位置上會被看到，而引數 `.` 仍是引數。上限與
+// shellReadingsOf() 相同：最多九段，解碼不再改變就停。
+function escapeDecodingsOf(command) {
+  const texts = [command];
+  let text = command;
+  for (let level = 0; level < 8; level += 1) {
+    const decoded = decodeShellEscapes(text);
+    if (decoded === text) break;
+    texts.push(decoded);
+    text = decoded;
+  }
+  return texts;
+}
 function resolvableEnvironment(command, home, cwd, env) {
   const readings = shellReadingsOf(String(command || ''));
   const inAnyReading = (test) => readings.some(test);
   // `unset`/`export`/`declare`/`typeset` can rewrite any of them without an
   // `=` in front of the name, and a directory change moves PWD.
   // unset/export/declare/typeset 不必在名字前面帶 `=` 就能改掉它們，而換目錄會移動 PWD。
-  const rewritesAnything = sourcesAFile(String(command || '')) || inAnyReading((text) => (
+  const rewritesAnything = escapeDecodingsOf(String(command || '')).some((text) => sourcesAFile(text))
+    || inAnyReading((text) => (
     REWRITES_ANY_NAME.test(text) || RUNS_UNSEEN_TEXT.test(text) || buildsANameAtRunTime(text)
   ));
   const changesDirectory = inAnyReading((text) => CHANGES_DIRECTORY.test(text));

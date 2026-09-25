@@ -5805,6 +5805,33 @@ let variableResolutionChecks = 0;
     "$'\\x2e' ./env.sh; rm -rf \"$HOME/etc\"",
     "'.' ./env.sh; rm -rf \"$HOME/etc\"",
     'time -p . ./env.sh; rm -rf "$HOME/etc"',
+    // Round 3, N3 of the round-2 re-validation: `function NAME` without
+    // parentheses. The walk read the word after `function` as a command and the
+    // `{`, `while`, `until` or `if` that opens the body as an argument, so a `.`
+    // in the body was missed. printf under bash 5.3.20 shows HOME=/ after each.
+    // 第三輪（第二輪重驗的 N3）：不帶括號的 `function NAME`。走訪把 `function` 後面那個字當成命令、把開啟
+    // 函式本體的 `{`／`while`／`until`／`if` 當成引數，於是本體裡的 `.` 被漏掉。printf 實測每一種都讓 HOME=/。
+    'function f { . ./d/envx.sh; }; f; rm -rf "$HOME/etc"',
+    'function f { . ./d/envx.sh; }; f; rm -rf "$TMPDIR/x"',
+    'function f { . -p ./d envx.sh; }; f; rm -rf "$HOME/etc"',
+    'function f while . ./d/envx.sh; do break; done; f; rm -rf "$HOME/etc"',
+    'function f until . ./d/envx.sh; do :; done; f; rm -rf "$HOME/etc"',
+    'function f if . ./d/envx.sh; then :; fi; f; rm -rf "$HOME/etc"',
+    'bash -c \'function f { . ./d/envx.sh; }; f; rm -rf "$HOME/etc"\'',
+    // Round 3, N4: an escape-encoded dot in a script that reaches a shell. The
+    // hook already reads such a script's decoded text for rm targets and resolved
+    // $HOME there; the dot-command walk read only the raw text. printf shows each
+    // of these sourcing the file (bash 5.3.20).
+    // 第三輪（N4）：進到 shell 的腳本裡、用跳脫序列寫的點。hook 本來就會讀這種腳本解碼後的文字找 rm 目標、
+    // 並在那裡解析 $HOME；點命令走訪卻只讀原始文字。printf 實測每一種都真的 source 了檔案。
+    "printf '\\x2e ./d/envx.sh; rm -rf \"$HOME/etc\"\\n' | bash",
+    "echo -e '\\x2e ./d/envx.sh; rm -rf \"$HOME/etc\"' | bash",
+    "printf '\\056 ./d/envx.sh; rm -rf \"$HOME/etc\"\\n' | bash",
+    "printf '\\x2e -p ./d envx.sh; rm -rf \"$HOME/etc\"\\n' | bash",
+    // A dot that brace expansion produces (pre-existing at 41878e9).
+    // 大括號展開產生的點（41878e9 就有）。
+    '{.,} ./d/envx.sh; rm -rf "$HOME/etc"',
+    '{,.} -p ./d envx.sh; rm -rf "$HOME/etc"',
     // The unprivileged forms, where the real target is the home directory or its
     // .ssh rather than a root-owned path.
     // 不需要 root 的寫法：真正的目標是家目錄或它的 .ssh。
@@ -5852,6 +5879,22 @@ let variableResolutionChecks = 0;
     'ls . ; rm -rf "$PWD/build"',
     'echo . > x; rm -rf "$HOME/build"',
     'tar czf out.tgz -C src . && rm -rf "$TMPDIR/pkg"',
+    // Round 3: the rest of the round-2 re-validation's argument-`.` set, kept
+    // resolving now that escape-decoded text is walked as well.
+    // 第三輪：第二輪重驗那一組「引數 `.`」的其餘各列；解碼後的文字也要走訪之後，它們仍須解析。
+    'git add . && git commit -m wip && rm -rf "$TMPDIR/build"',
+    'find ./ -name "*.o" -print; rm -rf "$TMPDIR/build"',
+    'find . -name "*.o" -print; rm -rf "$TMPDIR/build"',
+    'ls . | head; rm -rf "$TMPDIR/x"',
+    'cd . && rm -rf "$TMPDIR/x"',
+    'cd . && rm -rf "$HOME/projects/x/build"',
+    'grep -r foo . | head; rm -rf "$TMPDIR/x"',
+    'tar -C src -cf out.tar .; rm -rf "$TMPDIR/x"',
+    'du -sh .\nrm -rf "$TMPDIR/x"',
+    'docker build -t img .; rm -rf "$TMPDIR/ctx"',
+    'npx prettier --write . ; rm -rf "$TMPDIR/cache"',
+    'uv pip install -e . && rm -rf "$TMPDIR/x"',
+    'code .\nrm -rf "$HOME/projects/x/build"',
   ]) {
     assert.equal(decisionFor(command), undefined, `a name the command never reassigns stays resolvable: ${command}`);
     variableResolutionChecks += 1;
