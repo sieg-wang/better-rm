@@ -1108,17 +1108,66 @@ the gate cannot see (a user function from the shell snapshot that changes direct
 same class: the gate reads only this command's text.
 
 **三、`~` 仍以這次呼叫的 HOME 展開，即使命令可能已改掉 HOME（fail-open，OPEN，僅記錄）。**
-`. -p ./d envx.sh; rm -rf ~/etc`：被 source 的檔案若把 HOME 改成 `/`，bash 展開 `~` 時用的是新值；
-hook 的「關掉解析」只涵蓋 `$HOME`／`${HOME…}` 形式的操作元，`~` 另外解析。2026-09-25 以 stdin
-實測：41878e9 與 902b706 都放行（既有，不是本輪帶進來的）。
+會 fail-open 的是在 /bin/bash 3.2.57、/bin/zsh 或 /bin/sh 底下執行的 `. ./env.sh; rm -rf ~/etc`
+（例如包在 `zsh -c '…'` 裡，或 agent 的 shell 就是其中之一）：這三個 shell 展開 `~` 時用的是被 source
+的檔案設定的新 HOME（env.sh 內容為 `HOME=/`，printf 印出 `//etc`），而 hook 的「關掉解析」只涵蓋
+`$HOME`／`${HOME…}` 形式的操作元，`~` 另外解析。hook 在 41878e9、5d2aba2、6a80b00 與第四輪修正後都
+放行，`/bin/bash -c '…'`、`zsh -c '…'`、`sh -c '…'` 也一樣（2026-09-25 以 stdin 實測，既有）。第三輪
+記在這裡的例子 `. -p ./d envx.sh; rm -rf ~/etc` 本身在實測過的 shell 裡都不是 fail-open：
+/opt/homebrew/bin/bash 5.3.20（本機的 $SHELL）展開 `~` 時保留啟動時的 HOME——`HOME=/tmp` 或 source
+之後，printf 印出的 `~/etc` 仍是原本的家目錄（`-c` 同一行、換行分隔、腳本檔、`eval` 都一樣），只有
+`$HOME` 是新值；3.2、zsh、sh 則不接受 `. -p`。shell 的行為只用 printf 實測，沒有執行任何刪除。
 
 **四、引號裡的 `<<` 被當成 heredoc 開頭（fail-closed，已知誤擋）。** `python3 -c 'print(1 << 3)';
 rm -rf "$TMPDIR/x"` 在本輪分支拒絕、41878e9 放行：引號裡的 `<<` 讓檢查一路遞迴到深度上限，結果是
 「解不開、拒絕」，不是放行。補正的測試已寫好但沒有落地（修法未完成），留待下一輪。
 
+**五、引號或 heredoc 資料裡位在命令位置的 `. `（fail-closed，已知誤擋）。** 點命令走訪把引號裡不只一個
+字的文字與 heredoc 內文當成命令再讀一次（刻意 fail-closed），所以資料裡接在運算子或行首之後的 `. `
+會被讀成點命令，同一條命令裡 `$HOME`／`$PWD`／`$TMPDIR` 的 rm 就以「解不開」拒絕：第三輪重驗列出的
+五種——`git commit -m "Fix parser; . is the cwd"`、`$(cat <<'EOF'` 的提交訊息裡以 `. ` 開頭的一行、
+`cat <<'EOF' > notes.md` 裡同樣的一行、`grep -E '(a|b) . c' f`、`echo "done; . next"`，後面各接一個
+`$TMPDIR` 的 rm——在 41878e9 放行，在 5d2aba2、6a80b00 與第四輪修正後都拒絕，改寫成字面絕對路徑則四棵
+樹都放行（2026-09-25 以 stdin 實測）。
+
+**六、extglob 群組在路徑「中間」那一段選到 `.git`（既有，OPEN，僅記錄）。** 字面的 `.git` 在任何一段都會
+拒絕，但樣式只在最後一段被問「能不能選到 .git」，所以 `rm -rf dist/@(x|.git)/objects` 在 41878e9、5d2aba2、6a80b00 與第四輪修正後
+都放行（2026-09-25 以 stdin 實測）。printf 實測：extglob 已經開著時（前一行 `shopt -s extglob`，或
+`bash -O extglob`），bash 5.3.20 交出去的是 `dist/.git/objects` 與 `dist/x/objects`，bash 3.2.57 只有
+`dist/x/objects`；驗證者寫的同一行 `shopt -s extglob; rm -rf dist/@(x|.git)/objects` 在兩版 bash 都是
+語法錯誤（整行先解析、shopt 才執行），hook 同樣放行。記在 R6-e 是因為它和這一輪的項目一起被列出；
+它屬於 glob 的問題，不是 `$HOME` 解析。
+
 Also OPEN, recorded: `~` is expanded with this call's HOME even where the command may have
-changed HOME -- `. -p ./d envx.sh; rm -rf ~/etc` is ALLOW at both 41878e9 and 902b706 (measured
-2026-09-25 through stdin); the resolution-off rule covers `$HOME`/`${HOME...}` operands, not `~`.
+changed HOME. The fail-open case is `. ./env.sh; rm -rf ~/etc` run by /bin/bash 3.2.57, /bin/zsh or
+/bin/sh (inside `zsh -c '...'`, say, or where the agent's shell is one of them): those shells expand
+`~` with the HOME the sourced file set (env.sh holding `HOME=/`, printf shows `//etc`), and the
+resolution-off rule covers `$HOME`/`${HOME...}` operands, not `~`. The hook ALLOWs it at 41878e9,
+5d2aba2, 6a80b00 and after the round-4 fix, as `/bin/bash -c '...'`, `zsh -c '...'` and
+`sh -c '...'` too (measured 2026-09-25 through stdin; pre-existing). The example round 3 recorded
+here, `. -p ./d envx.sh; rm -rf ~/etc`, is not itself a fail-open in any shell measured:
+/opt/homebrew/bin/bash 5.3.20 (this machine's $SHELL) keeps the startup HOME for `~` -- after
+`HOME=/tmp` or a sourced assignment, printf still shows the old home for `~/etc` (on the same `-c`
+line, on the next line, in a script file and through `eval`), and only `$HOME` changes -- while
+3.2, zsh and sh reject `. -p`. The shell behaviour was measured with printf only.
 Accepted over-refusal (fails closed): a `<<` inside quotes is read as a heredoc opener, so
 `python3 -c 'print(1 << 3)'; rm -rf "$TMPDIR/x"` is refused on this branch (ALLOW at 41878e9).
+Accepted over-refusal (fails closed): a `. ` at command position inside quoted data or a heredoc
+body -- the dot walk reads a quoted word that holds more than one word, and each heredoc body, again
+as commands -- turns resolution off, so the round-3 re-validation's five (`git commit -m "Fix
+parser; . is the cwd"`, a `$(cat <<'EOF'` commit message with a line starting `. `,
+`cat <<'EOF' > notes.md` with such a line, `grep -E '(a|b) . c' f` and `echo "done; . next"`, each
+followed by an rm of `$TMPDIR/...`) are ALLOW at 41878e9 and DENY at 5d2aba2, 6a80b00 and after the
+round-4 fix, while the same lines with a literal absolute path are ALLOW on all four (measured
+2026-09-25 through stdin).
+Also OPEN, recorded (pre-existing, a glob limit rather than a resolution one; listed here because
+the same validation named it): an extglob group in a MIDDLE path component that can select `.git`
+is not checked -- a literal `.git` component is refused anywhere, but a pattern is asked whether it
+can select `.git` in its last component only -- so
+`rm -rf dist/@(x|.git)/objects` is ALLOW at 41878e9, 5d2aba2, 6a80b00 and after the round-4 fix
+(measured 2026-09-25 through stdin). With extglob already on (a `shopt -s extglob` line before it,
+or `bash -O extglob`), printf shows bash 5.3.20 handing over `dist/.git/objects` and
+`dist/x/objects`, and bash 3.2.57 only `dist/x/objects`; the one-line spelling
+`shopt -s extglob; rm -rf dist/@(x|.git)/objects` is a syntax error in both (the line is parsed
+before shopt runs), and the hook ALLOWs it as well.
 
