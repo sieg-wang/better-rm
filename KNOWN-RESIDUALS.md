@@ -1106,3 +1106,19 @@ there. Treating every unreadable expansion in command position as a possible `.`
 documented allowance `$(which cat) $HOME/.zshrc`, which needs its own decision. Indirect execution
 the gate cannot see (a user function from the shell snapshot that changes directory or HOME) is the
 same class: the gate reads only this command's text.
+
+**三、`~` 仍以這次呼叫的 HOME 展開，即使命令可能已改掉 HOME（fail-open，OPEN，僅記錄）。**
+`. -p ./d envx.sh; rm -rf ~/etc`：被 source 的檔案若把 HOME 改成 `/`，bash 展開 `~` 時用的是新值；
+hook 的「關掉解析」只涵蓋 `$HOME`／`${HOME…}` 形式的操作元，`~` 另外解析。2026-09-25 以 stdin
+實測：41878e9 與 902b706 都放行（既有，不是本輪帶進來的）。
+
+**四、引號裡的 `<<` 被當成 heredoc 開頭（fail-closed，已知誤擋）。** `python3 -c 'print(1 << 3)';
+rm -rf "$TMPDIR/x"` 在本輪分支拒絕、41878e9 放行：引號裡的 `<<` 讓檢查一路遞迴到深度上限，結果是
+「解不開、拒絕」，不是放行。補正的測試已寫好但沒有落地（修法未完成），留待下一輪。
+
+Also OPEN, recorded: `~` is expanded with this call's HOME even where the command may have
+changed HOME -- `. -p ./d envx.sh; rm -rf ~/etc` is ALLOW at both 41878e9 and 902b706 (measured
+2026-09-25 through stdin); the resolution-off rule covers `$HOME`/`${HOME...}` operands, not `~`.
+Accepted over-refusal (fails closed): a `<<` inside quotes is read as a heredoc opener, so
+`python3 -c 'print(1 << 3)'; rm -rf "$TMPDIR/x"` is refused on this branch (ALLOW at 41878e9).
+

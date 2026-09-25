@@ -6136,9 +6136,9 @@ let findClauseTimingChecks = 0;
     // and the outer `%1` makes each inner clause different, so the two sizes
     // MULTIPLY. Each layer alone stays under a per-call budget; only a budget
     // shared by the whole invocation stops the product (measured while writing
-    // this: 6,707 ms with a per-call budget, 117 ms with the shared one).
+    // this: seconds with a per-call budget, well under one with the shared one).
     // apply 的命令裡再放一個 apply：外層的 `%1` 讓每一行裡的內層子句都不同，兩層大小相乘，每一層
-    // 單獨都在「逐次呼叫」的預算內（寫這段時實測：逐次預算 6,707 ms，共用預算 117 ms）。
+    // 單獨都在「逐次呼叫」的預算內（寫這段時實測：逐次預算要數秒，共用預算不到一秒）。
     ['an apply of 400 lines inside each of 190 apply lines',
       `apply "apply 'echo %1; ${kilobytesOf('echo x; ', 1)}' ${argumentsUpTo(400)}" ${argumentsUpTo(190)}; rm -rf /etc`,
       'deny'],
