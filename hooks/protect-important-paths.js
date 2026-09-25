@@ -2305,16 +2305,44 @@ function bracketMatches(spec, character) {
 // -1 when the parentheses never balance. Nested groups are counted, because
 // `@(a|b(c))` is one group and stopping at the first ')' would split it.
 // 回傳與 `start` 的 '(' 配對的 ')' 位置，括號不成對時回傳 -1。巢狀群組要計數。
-function extglobEnd(text, start) {
-  let depth = 0;
-  for (let i = start; i < text.length; i += 1) {
-    if (text[i] === '(') depth += 1;
-    else if (text[i] === ')') {
-      depth -= 1;
-      if (depth === 0) return i;
-    }
+// LINEAR, round 3 (the root cause under blockers N1 and N2 of the round-2
+// re-validation). This used to count parentheses from `start` to the end of the
+// text for every call, so N unbalanced leads (`x@(x@(x@(...`) cost N x length:
+// 150 KB at the top level took about 5.1 s at 41878e9 -- past the live 5,000 ms
+// hook timeout, where no decision is made -- and apply's lines and the dot-command
+// walk each paid it again. The answer depends only on the text, so each text is
+// paired ONCE with a stack (the ')' that returns the count from `start` to zero is
+// exactly the ')' a stack pops `start` on; an unmatched '(' stays -1) and the
+// result is reused by every call for that text. A handful of recent texts are
+// kept, so the tokenizer's input and the patterns widenExtglob() walks do not evict
+// each other. The prefix count of quote-like characters is built in the same pass
+// for plainExtglobEnd().
+// 線性（第三輪；第二輪重驗兩個阻斷項底下的根因）。原本每次呼叫都從 `start` 數括號數到文字結尾，N 個
+// 不收尾的開頭就是 N x 長度：頂層 150 KB 在 41878e9 約 5.1 秒，超過 live 5,000 ms 逾時（不做裁決），
+// apply 的行與點命令走訪又各自再付一次。答案只取決於文字，所以每段文字只用堆疊配對「一次」（從
+// `start` 數回零的那個 ')' 正好就是堆疊彈出 `start` 的那個；沒配到的 '(' 維持 -1），之後同一段文字的
+// 每次呼叫都重用。同一趟也建好 plainExtglobEnd() 要的引號類字元前綴計數。
+const PAREN_PAIRING_CACHE = new Map();
+function parenPairing(text) {
+  let pairing = PAREN_PAIRING_CACHE.get(text);
+  if (pairing !== undefined) return pairing;
+  const close = new Int32Array(text.length).fill(-1);
+  const quoteLike = new Int32Array(text.length + 1);
+  const open = [];
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    quoteLike[i + 1] = quoteLike[i] + (/['"\\`$\n]/.test(char) ? 1 : 0);
+    if (char === '(') open.push(i);
+    else if (char === ')' && open.length > 0) close[open.pop()] = i;
   }
-  return -1;
+  pairing = { close, quoteLike };
+  if (PAREN_PAIRING_CACHE.size >= 8) PAREN_PAIRING_CACHE.clear();
+  PAREN_PAIRING_CACHE.set(text, pairing);
+  return pairing;
+}
+function extglobEnd(text, start) {
+  if (text[start] !== '(') return -1;
+  return parenPairing(text).close[start];
 }
 
 // The ')' that closes the extglob group at `start` in RAW COMMAND TEXT, but only
@@ -2339,7 +2367,8 @@ function extglobEnd(text, start) {
 function plainExtglobEnd(text, start) {
   const close = extglobEnd(text, start);
   if (close === -1) return -1;
-  return /['"\\`$\n]/.test(text.slice(start, close + 1)) ? -1 : close;
+  const { quoteLike } = parenPairing(text);
+  return quoteLike[close + 1] - quoteLike[start] > 0 ? -1 : close;
 }
 
 // Every extglob group rewritten as '*', which is deliberately WIDER than the

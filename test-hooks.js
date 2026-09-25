@@ -6109,6 +6109,53 @@ let findClauseTimingChecks = 0;
     );
     findClauseTimingChecks += 2;
   }
+  // UNBALANCED EXTGLOB LEADS, the root cause the round-2 re-validation found
+  // under two of its blockers. The tokenizer looked for each lead's closing ')'
+  // by scanning to the end of the input, so N unbalanced `x@(` cost N x length.
+  // That was pre-existing at the top level (41878e9: 100 KB about 2.3 s, 150 KB
+  // about 5.1 s, past the live 5,000 ms timeout), and two round-2 paths
+  // multiplied it: apply's lines (`apply 'echo <45 KB of x@(>' 1..11; rm -rf
+  // /etc` 5.3 s) and the dot-command walk re-reading quoted data
+  // (`echo '<150 KB of x@(>'; rm -rf /etc` 5.9-6.7 s). All three must now answer
+  // well inside one second at this size.
+  // 不收尾的 extglob 開頭，第二輪重驗在兩個阻斷項底下找到的根因：tokenizer 為每個開頭找收尾的 ')'
+  // 時都掃到輸入結尾，N 個不收尾的 `x@(` 就是 N x 長度。頂層那一種在 41878e9 就有（150 KB 約 5.1 秒，
+  // 超過 live 5,000 ms 逾時），第二輪的兩條路徑又把它放大：apply 的行、以及點命令走訪重讀引號裡的資料。
+  const unbalancedLeadBudgetMs = 1000 * hostFactor();
+  for (const [label, command] of [
+    ['150 KB of unbalanced `x@(` at the top level',
+      `echo ${kilobytesOf('x@(', 150)}; rm -rf /etc`],
+    ['an apply operand of 45 KB of unbalanced `x@(`, 11 lines',
+      `apply 'echo ${kilobytesOf('x@(', 45)}' ${argumentsUpTo(11)}; rm -rf /etc`],
+    ['150 KB of unbalanced `x@(` in a single-quoted argument',
+      `echo '${kilobytesOf('x@(', 150)}'; rm -rf /etc`],
+    ['150 KB of unbalanced `x@(` in a quoted heredoc body',
+      `cat <<'EOF' > notes.txt\n${kilobytesOf('x@(', 150)}\nEOF\nrm -rf /etc`],
+    // The same leads in an rm TARGET reach the glob matcher, not the tokenizer:
+    // at 41878e9 this line gave no answer within 60 s (measured).
+    // 同樣的開頭出現在 rm 的「目標」裡，走的是 glob 比對而不是 tokenizer：41878e9 在 60 秒內沒有答案（實測）。
+    ['a single-quoted rm target of 150 KB of `x@(`',
+      `rm -rf '${kilobytesOf('x@(', 150)}' /etc`],
+    // 160,000 NESTED, balanced groups with a quote in the innermost one: each is
+    // declined (BRM-ab-01) and the next one is asked, so a match or a quote test
+    // that reads the group's text again is quadratic. Measured while writing
+    // this: the round-1 tree took over a second at an eighth of this size, and
+    // linear matching with a quote test that still reads the group took several
+    // seconds at this size.
+    // 160,000 層巢狀、成對的群組，最內層有引號：每一層都被拒讀、再問下一層，所以重讀群組文字的配對或
+    // 引號判斷都是平方級。
+    ['160,000 nested balanced groups with a quote inside',
+      `echo ${'x@('.repeat(160000)}a''${')'.repeat(160000)}; rm -rf /etc`],
+  ]) {
+    const run = time(command);
+    assert.equal(run.verdict, 'deny', `${label}: the verdict moved`);
+    assert.ok(
+      run.ms < unbalancedLeadBudgetMs,
+      `${label} took ${run.ms.toFixed(1)}ms against a ${unbalancedLeadBudgetMs.toFixed(0)}ms budget: `
+      + 'an extglob lead is being matched by rescanning the rest of the input',
+    );
+    findClauseTimingChecks += 2;
+  }
   // Advancing past a consumed clause must land ON the separator that ended it,
   // never past it: skipping one would swallow the command after it, and the rm
   // that follows would stop being read as an rm at all.
@@ -7253,7 +7300,7 @@ async function runOpenCodePluginChecks() {
 // 現在都會「指名」失敗，而不是留下一次更短、更安靜、看起來仍然是綠的執行。
 const PINNED_TIMING_COUNTERS = [
   ['globTimingChecks', globTimingChecks, 4],
-  ['findClauseTimingChecks', findClauseTimingChecks, 28],
+  ['findClauseTimingChecks', findClauseTimingChecks, 40],
   ['targetLimitChecks', targetLimitChecks, 9],
 ];
 for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {
@@ -7283,8 +7330,8 @@ for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {
 // 用 __filename 而不是用 __dirname 組出來的路徑：清查必須讀「它自己」這個檔案。
 const ownSource = require('fs').readFileSync(__filename, 'utf8');
 const wallClockRows = ownSource.match(/\.ms\s*[<>]=?\s*[A-Za-z0-9_.]+/g) || [];
-assert.equal(wallClockRows.length, 6,
-  `this file holds ${wallClockRows.length} wall-clock comparisons, not the 6 pinned here: `
+assert.equal(wallClockRows.length, 7,
+  `this file holds ${wallClockRows.length} wall-clock comparisons, not the 7 pinned here: `
   + `${wallClockRows.join(', ')}. A new one needs a scaled budget and a pinned counter, `
   + 'which is what this number is for');
 const constantBudgetRows = wallClockRows.filter((row) => /[<>]=?\s*[0-9]/.test(row));
