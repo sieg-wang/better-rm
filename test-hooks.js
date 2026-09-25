@@ -5436,6 +5436,95 @@ let variableResolutionChecks = 0;
     variableResolutionChecks += 1;
   }
 
+  // BRM-cd-01: A COMMAND THAT REASSIGNS ONE OF THE THREE NAMES. The gate resolves
+  // $HOME, $PWD and $TMPDIR to this call's values unless it sees the command
+  // change them, and it only looked for `NAME=`, `unset|export|declare|typeset`
+  // and `cd|pushd|popd`, in the raw text. Every row below really reassigns the
+  // name first -- printf under /opt/homebrew/bin/bash 5.3.20 shows "$HOME/etc"
+  // expanding to //etc (or /etc) after each spelling, and under /bin/bash 3.2.57
+  // for all but mapfile, readarray, `wait -p` and `local -n` (2026-09-25) -- so
+  // the target is a protected path while the gate judged
+  // /home/tester/etc and ALLOWED all of them at 41878e9. Three families, each of
+  // which defeats one tempting fix: the name-taking builtins and forms
+  // (`for`, `select`, `read`, `printf -v`, `mapfile`, `readarray`, `wait -p`,
+  // `NAME[0]=`, `NAME+=`, `local -n`); the name spelled so that the raw text
+  // never holds it (`"HO"ME`, `HO''ME`, `HO\ME`, `$'\x48OME'`, and the same one
+  // quoting level down inside `bash -c`); and the name BUILT at run time
+  // (`${n}ME`, eval, a sourced file).
+  // BRM-cd-01：命令自己改掉那三個名字之一。閘門把 $HOME／$PWD／$TMPDIR 解析成這次呼叫的值，除非
+  // 它看到命令改掉它們——而它只在原始文字裡找 `NAME=`、`unset|export|declare|typeset`、
+  // `cd|pushd|popd`。下面每一列都真的先改了那個名字（printf 實測 "$HOME/etc" 展開成 //etc），
+  // 41878e9 全部放行。三類，各自打掉一種誘人的修法：吃名字的內建與寫法、原始文字裡根本拼不出
+  // 名字的寫法、執行時才「組」出名字的寫法。
+  for (const command of [
+    'HOME[0]=/; rm -rf "$HOME/etc"',
+    'HOME+=/../../; rm -rf "$HOME/etc"',
+    'read HOME <<< /; rm -rf "$HOME/etc"',
+    'printf -v HOME /; rm -rf "$HOME/etc"',
+    'mapfile -t HOME <<< /; rm -rf "$HOME/etc"',
+    'readarray -t HOME <<< /; rm -rf "$HOME/etc"',
+    'for HOME in /; do rm -rf "$HOME/etc"; done',
+    'select HOME in /; do rm -rf "$HOME/etc"; break; done <<< 1',
+    'wait -p HOME; rm -rf "$HOME/etc"',
+    'f() { local -n r=HOME; r=/; rm -rf "$HOME/etc"; }; f',
+    'read PWD <<< /; rm -rf "$PWD/etc"',
+    'printf -v TMPDIR /; rm -rf "$TMPDIR/etc"',
+    'bash -c \'read HOME <<< /; rm -rf "$HOME/etc"\'',
+    'read "HO"ME <<< /; rm -rf "$HOME/etc"',
+    'printf -v HO\'\'ME /; rm -rf "$HOME/etc"',
+    'printf -v HO\\ME /; rm -rf "$HOME/etc"',
+    'printf -v $\'\\x48OME\' /; rm -rf "$HOME/etc"',
+    'bash -c "printf -v \\$\'\\\\x48OME\' /; rm -rf \\"\\$HOME/etc\\""',
+    'n=HO; printf -v "${n}ME" /; rm -rf "$HOME/etc"',
+    'n=HO; read "${n}ME" <<< /; rm -rf "$HOME/etc"',
+    'eval "HO""ME=/"; rm -rf "$HOME/etc"',
+    // eval of text the gate cannot read is a name it cannot see.
+    // eval 的文字讀不到，就是看不到的名字。
+    'eval "$x"; rm -rf "$HOME/etc"',
+    '. /tmp/env.sh; rm -rf "$HOME/etc"',
+    '. -- /tmp/env.sh; rm -rf "$HOME/etc"',
+    'x=1 . /tmp/env.sh; rm -rf "$HOME/etc"',
+    'source /tmp/env.sh; rm -rf "$HOME/etc"',
+    // The unprivileged forms, where the real target is the home directory or its
+    // .ssh rather than a root-owned path.
+    // 不需要 root 的寫法：真正的目標是家目錄或它的 .ssh。
+    'read HOME <<< /home; /bin/rm -rf "$HOME/tester"',
+    'for PWD in /home/tester; do /bin/rm -rf "$PWD/.ssh"; done',
+    'printf -v TMPDIR %s /home/tester; find "$TMPDIR/.ssh" -delete',
+    // `c\d` IS cd -- bash removes the backslash -- and the directory-change test
+    // read the raw text.
+    // `c\d` 就是 cd（bash 會拿掉反斜線），而換目錄的判斷讀的是原始文字。
+    'c\\d /etc && rm -rf "$PWD"',
+  ]) {
+    assert.equal(decisionFor(command), 'deny', `a reassigned name was resolved to the hook's own value: ${command}`);
+    variableResolutionChecks += 1;
+  }
+  // ...and the ones that must STAY resolved, so the fix cannot be "stop resolving
+  // whenever a builtin or a loop appears": a loop with another name, a static
+  // `read`/`printf -v` target, the name only ever READ, a longer name that
+  // contains it, a `.` that is an argument and not the dot command, and a `cd`
+  // (which moves PWD, not HOME).
+  // ……以及必須「繼續」解析的那些，讓修法不能是「一出現內建或迴圈就不解析」。
+  for (const command of [
+    'rm -rf "$HOME/build"',
+    'echo "$HOME"; rm -rf "$HOME/build"',
+    'for f in *.log; do rm -f "$PWD/old.log"; done',
+    'read -r line < list.txt; rm -rf "$HOME/build"',
+    'printf -v stamp \'%s\' now; rm -rf "$TMPDIR/build"',
+    'echo $OLDPWD; rm -rf "$PWD/build"',
+    'HOMEBREW_PREFIX=/opt/homebrew; rm -rf "$HOME/build"',
+    'find . -name \'*.o\' -delete; rm -rf "$HOME/build"',
+    'grep -rn foo . | head; rm -rf "$HOME/build"',
+    'cd build && rm -rf "$HOME/build"',
+    // A reference to one of the three names is not an unreadable expansion: its
+    // value is a path this gate already knows, and a path cannot spell a name.
+    // 三個名字之一的引用不是「讀不到的展開」：值是閘門已知的路徑，路徑拼不出名字。
+    'read -r x <<< "$HOME"; rm -rf "$HOME/build"',
+  ]) {
+    assert.equal(decisionFor(command), undefined, `a name the command never reassigns stays resolvable: ${command}`);
+    variableResolutionChecks += 1;
+  }
+
   // commandTargets() is exported, and a caller that does not pass an environment
   // must get the fail-closed answer rather than an exception. An exception here
   // is not a refusal: on the live gate it exits non-zero and the tool call runs

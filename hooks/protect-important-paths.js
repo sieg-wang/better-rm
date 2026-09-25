@@ -1919,18 +1919,131 @@ function targetFromWord(word, isDynamic, expansionEnv) {
 // 兩者回答的是不同問題：前者問「這台機器的家目錄是哪個」，os.homedir() 是好答案；解析問的是
 // 「這條命令執行時 `$HOME` 會展開成什麼」，那裡 os.homedir() 只是猜測——HOME 是空的 shell 會
 // 把 `$HOME/build` 展開成 `/build`，代進真正的家目錄反而會把它當成普通路徑。
+// BRM-cd-01: THE SAME QUESTION, ASKED OF THE TEXT THE SHELL WILL READ. Asked of
+// the raw text it missed every spelling that reassigns a name without writing
+// `NAME=` there, all measured (printf, bash 5.3.20 and 3.2.57, 2026-09-25):
+//   for HOME in /; ...   read HOME <<< /   printf -v HOME /   HOME[0]=/   HOME+=..
+//   read "HO"ME <<< /    printf -v HO\ME /   printf -v $'\x48OME' /
+//   n=HO; printf -v "${n}ME" /             eval "HO""ME=/"     . ./env.sh
+// and in each one "$HOME/etc" is //etc while the gate resolved it to the hook's own
+// home and allowed the deletion. Listing those spellings is what failed, so the
+// rule is about what the NAME may look like instead, on every reading the shell
+// may give the text -- quotes and backslashes removed, `$'...'` decoded, and the
+// same again after each level of backslash escapes is decoded, because a
+// `bash -c "..."` string is read once more by the shell inside it:
+//   - the name may appear ONLY as a reference, `$NAME` or `${NAME...}` (not
+//     `${NAME=...}` / `${NAME:=...}`, which assign). Any other occurrence --
+//     `for NAME`, `read NAME`, `NAME[0]=`, `NAME+=`, `local -n r=NAME` -- stops
+//     that name resolving, whatever the builtin or form;
+//   - a name that is BUILT rather than written cannot be seen at all, so
+//     `source`, the dot command, and `eval` or a name-taking builtin (read,
+//     mapfile, readarray, getopts, local, let, readonly, compgen, coproc,
+//     `printf -v`, `wait -p`) with an expansion after it in the same command,
+//     stop all three resolving. A reference to one of the three names is not
+//     such an expansion: its value is an absolute path this gate already knows,
+//     and it cannot spell a name. `eval` with text the readings can see is
+//     judged by the rule above, which is how `eval rm -rf "$HOME/build"` keeps
+//     resolving while `eval "HO""ME=/"` does not.
+// Crude in the safe direction, like everything else here: a mention that assigns
+// nothing (`echo HOME`, a `read -p "$prompt"`) turns resolution off, and the
+// operand is then unknown and refused -- the behaviour before any of this existed.
+// BRM-cd-01：同一個問題，改問「shell 會讀到的文字」。只問原始文字，會漏掉每一種「沒寫出 `NAME=`
+// 卻改掉名字」的寫法（上面每一種都用 printf 實測過，"$HOME/etc" 都是 //etc，而閘門解析成 hook
+// 自己的家目錄、放行）。列舉那些寫法正是失敗的做法，所以規則改成限制「名字能長什麼樣」，並且套在
+// shell 可能給這段文字的每一種讀法上：拿掉引號與反斜線、解開 `$'...'`，再在每解一層反斜線跳脫
+// 之後重來一次（`bash -c "..."` 的字串會被裡面那個 shell 再讀一次）。名字只能以 `$NAME` 或
+// `${NAME...}` 的「讀取」形式出現；名字是「組」出來的根本看不到，所以出現 source、點命令，或 eval
+// 與吃名字的內建在同一條命令裡後面跟著展開，三個名字全部不解析。這三個名字的引用不算那種展開：
+// 值是閘門已知的絕對路徑，拼不出名字。粗，但粗在安全的那一側。
+const REWRITES_ANY_NAME = /(?:^|[^A-Za-z0-9_-])(?:unset|export|declare|typeset)(?:[^A-Za-z0-9_-]|$)/;
+const CHANGES_DIRECTORY = /(?:^|[^A-Za-z0-9_-])(?:cd|chdir|pushd|popd)(?:[^A-Za-z0-9_-]|$)/;
+// `.` counts as the dot command when it stands as a word with an operand after
+// it that is not an option or an operator -- so `find . -name x` and
+// `grep -r foo . | head` keep resolving, while `. ./env.sh` and `. -- env.sh` do not.
+// `.` 在「單獨成字、後面接的不是選項也不是運算子」時才算點命令。
+const RUNS_UNSEEN_TEXT = /(?:^|[^A-Za-z0-9_-])source(?:[^A-Za-z0-9_-]|$)|(?:^|[\s;&|({])\.\s+(?=\S)(?!-[A-Za-z]|[|&;<>)!(])/;
+const NAME_TAKING_BUILTIN = /(?:^|[^A-Za-z0-9_-])(eval|read|mapfile|readarray|getopts|local|let|readonly|compgen|coproc|printf|wait)(?![A-Za-z0-9_-])/g;
+const KNOWN_REFERENCE = /\$(?:HOME|PWD|TMPDIR)(?![A-Za-z0-9_])|\$\{(?:HOME|PWD|TMPDIR)\}/g;
+function withoutShellQuoting(text) {
+  let out = '';
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === '\\' && text[i + 1] === '\n') { i += 1; continue; }
+    if (char === '$' && text[i + 1] === "'") {
+      let j = i + 2;
+      while (j < text.length && text[j] !== "'") {
+        if (text[j] === '\\') {
+          const decoded = decodeAnsiCEscape(text, j);
+          out += decoded.value;
+          j = decoded.end + 1;
+        } else {
+          out += text[j];
+          j += 1;
+        }
+      }
+      i = j;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '\\') continue;
+    out += char;
+  }
+  return out;
+}
+// Every reading, bounded: one per level of backslash escapes, and no more levels
+// than the nested-scan depth cap reads.
+// 每一種讀法，有上限：每一層反斜線跳脫一種，層數不超過巢狀掃描的深度上限。
+function shellReadingsOf(command) {
+  const readings = [];
+  let text = command;
+  for (let level = 0; level <= 8; level += 1) {
+    readings.push(withoutShellQuoting(text));
+    const decoded = decodeShellEscapes(text);
+    if (decoded === text) break;
+    text = decoded;
+  }
+  return readings;
+}
+function onlyReadIn(text, name) {
+  const occurrence = new RegExp(`(^|[^A-Za-z0-9_])${name}(?![A-Za-z0-9_])`, 'g');
+  for (const match of text.matchAll(occurrence)) {
+    const at = match.index + match[1].length;
+    if (text[at - 1] === '$') continue;
+    if (text[at - 1] === '{' && text[at - 2] === '$' && !/^:?=/.test(text.slice(at + name.length))) continue;
+    return false;
+  }
+  return true;
+}
+function buildsANameAtRunTime(text) {
+  for (const command of text.split(/[;&|\n()]/)) {
+    for (const match of command.matchAll(NAME_TAKING_BUILTIN)) {
+      let rest = command.slice(match.index + match[0].length);
+      // printf and wait take a NAME only through one option.
+      // printf 與 wait 只透過一個選項吃名字。
+      if (match[1] === 'printf' || match[1] === 'wait') {
+        const option = rest.search(match[1] === 'printf' ? /(?:^|\s)-v/ : /(?:^|\s)-p/);
+        if (option === -1) continue;
+        rest = rest.slice(option);
+      }
+      if (/[$`]/.test(rest.replace(KNOWN_REFERENCE, ''))) return true;
+    }
+  }
+  return false;
+}
 function resolvableEnvironment(command, home, cwd, env) {
-  const text = String(command || '');
-  const mentionsAssignment = (name) => new RegExp(`(?:^|[^A-Za-z0-9_])${name}=`).test(text);
+  const readings = shellReadingsOf(String(command || ''));
+  const inAnyReading = (test) => readings.some(test);
   // `unset`/`export`/`declare`/`typeset` can rewrite any of them without an
   // `=` in front of the name, and a directory change moves PWD.
   // unset/export/declare/typeset 不必在名字前面帶 `=` 就能改掉它們，而換目錄會移動 PWD。
-  const rewritesAnything = /(?:^|[^A-Za-z0-9_-])(?:unset|export|declare|typeset)(?:[^A-Za-z0-9_-]|$)/.test(text);
-  const changesDirectory = /(?:^|[^A-Za-z0-9_-])(?:cd|chdir|pushd|popd)(?:[^A-Za-z0-9_-]|$)/.test(text);
+  const rewritesAnything = inAnyReading((text) => (
+    REWRITES_ANY_NAME.test(text) || RUNS_UNSEEN_TEXT.test(text) || buildsANameAtRunTime(text)
+  ));
+  const changesDirectory = inAnyReading((text) => CHANGES_DIRECTORY.test(text));
+  const reassigns = (name) => inAnyReading((text) => !onlyReadIn(text, name));
   const resolved = {};
-  if (!rewritesAnything && !mentionsAssignment('HOME')) resolved.HOME = home;
-  if (!rewritesAnything && !mentionsAssignment('TMPDIR')) resolved.TMPDIR = env.TMPDIR;
-  if (!rewritesAnything && !mentionsAssignment('PWD') && !changesDirectory) resolved.PWD = cwd;
+  if (!rewritesAnything && !reassigns('HOME')) resolved.HOME = home;
+  if (!rewritesAnything && !reassigns('TMPDIR')) resolved.TMPDIR = env.TMPDIR;
+  if (!rewritesAnything && !reassigns('PWD') && !changesDirectory) resolved.PWD = cwd;
   return resolved;
 }
 
