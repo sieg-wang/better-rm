@@ -415,6 +415,60 @@ const blocked = [
   'rm -rf /et[c]',
   'rm -rf /et?(c)',
   'rm -rf /et*(c)',
+  // BRM-ab-01: A QUOTE INSIDE AN EXTGLOB GROUP. The tokenizer found the ')' that
+  // closes a group by counting raw parentheses, while bash honours quotes inside
+  // the group -- `[[ x == @(a|x) ]]` is a pattern on bash 5.3.20 even with extglob
+  // OFF. So in `[[ x == x@(a')'b) ]]` the count closed at the QUOTED ')', the `'`
+  // left over opened a quote that ran to the end of the input, and every command
+  // after it was one word nobody scanned. Measured 2026-09-25 with touch markers
+  // under /opt/homebrew/bin/bash 5.3.20: every line below really ran its trailing
+  // command, and every one was ALLOW at 41878e9 while its twin at e1e4277 (no
+  // extglob gate) was DENY. The rows cover the four ways a span can carry a quote
+  // bash reads and a paren counter does not -- single, double, backquote, `$'...'`
+  // -- plus the comment-closed long form and the two extglob-ON ARGUMENT spellings,
+  // because a fix scoped to `[[ ]]` leaves those open.
+  // BRM-ab-01：extglob 群組裡的引號。tokenizer 靠「數括號」找群組的收尾，bash 卻會在群組裡
+  // 認引號（bash 5.3.20 在 `[[ ]]` 裡即使 extglob 關閉也認群組）。於是 `x@(a')'b)` 在「被引號
+  // 包住的 ')'」收尾，剩下的 `'` 開啟一個吃到輸入結尾的引號，後面每一條命令都成了沒人掃的一個字。
+  // 2026-09-25 用 touch marker 實測：下面每一列的尾端命令都真的執行，而 41878e9 全部放行。
+  "[[ x == x@(a')'b) ]] ; rm -rf /etc",
+  '[[ x == x@(a")"b) ]] ; rm -rf /etc',
+  "[[ x =~ x@(a')'b) ]] ; rm -rf /etc",
+  "[[ x != x@(a')'b) ]] && rm -rf /etc",
+  "if [[ x == x@(a')'b) ]]; then :; fi; rm -rf /etc",
+  '[[ $f == *@(")") ]] || rm -rf ~/.ssh',
+  "[[ x == x@(a'(') ]] ; rm -rf /etc # )",
+  '[[ x == x@(`echo ")"`) ]] ; rm -rf /etc',
+  "[[ x == x@($')'a) ]] ; rm -rf /etc",
+  // The row that makes a QUOTE-AWARE counter the wrong fix too: inside `$'...'` a
+  // `\'` does not end the string, so a counter that knows both quote kinds but not
+  // ANSI-C escapes still closes at the quoted ')'. Measured: bash ran the trailing
+  // command, and such a counter left the line ALLOW.
+  // 讓「認得兩種引號的計數器」也是錯誤修法的那一列：`$'...'` 裡的 `\'` 不會結束字串。實測 bash
+  // 執行了尾端命令，而那種計數器仍然放行。
+  "[[ x == x@($'\\')'a) ]] ; rm -rf /etc",
+  "[[ x == x@(a')'b) ]] ; /bin/rm -rf ~/.ssh",
+  "[[ x == x@(a')'b) ]] ; find /etc -delete",
+  'bash -O extglob -c "echo x@(a\')\'b) >/dev/null; rm -rf /etc"',
+  "shopt -s extglob\necho x@(a')'b) >/dev/null; rm -rf /etc",
+  // The OPERAND half of the same fix. A group this tokenizer declines to read as
+  // one pattern is split at its '(' the way e1e4277 split every group -- and that
+  // is the truncation A4 exists to stop: with extglob on, bash expands
+  // `/et@(c'')` to /etc (measured, printf under `bash -O extglob`). So the word in
+  // front of a declined group is a pattern whose extent this gate does not know,
+  // and an operand it does not know is refused.
+  // 同一個修法的「操作元」那一半：tokenizer 拒絕當成樣式讀的群組會在 '(' 被切開——那正是 A4
+  // 要擋的截斷（extglob 開時 `/et@(c'')` 展開就是 /etc，實測）。所以被拒讀的群組前面那個字是
+  // 「範圍不明的樣式」，不明的操作元一律拒絕。
+  "shopt -s extglob\nrm -rf /et@(c'')",
+  'bash -O extglob -c "rm -rf /et@(c\'\')"',
+  'rm -rf /et@("c")',
+  // A raw paren count that never balances proves nothing: here the unbalanced
+  // paren is the QUOTED one, and `bash -O extglob` expands the word to /etc
+  // (measured). Both rows were ALLOW at 41878e9 as well.
+  // 原始括號數不平衡證明不了什麼：這裡不平衡的正是被引號包住的那個（實測展開成 /etc）。
+  'rm -rf /et@(c|"(")',
+  'bash -O extglob -c \'rm -rf /et@(c|"(")\'',
   // A redirection placed before the target must not truncate rm's target scan.
   'rm >/dev/null /etc',
   'rm 2>/dev/null -rf /etc',
@@ -1194,6 +1248,10 @@ const allowed = [
   // 有括號就拒絕」。少了這一列，「凡有括號就拒」也會讓上面那些列變綠。
   'rm -rf /workspace/project/build@(1|2)',
   'rm -rf /workspace/project/dist!(keep)',
+  // BRM-ab-01's benign twin: the quoted group is still ordinary text when nothing
+  // after it deletes, so the fix cannot be "refuse any line with a quote in a group".
+  // BRM-ab-01 的良性雙胞胎：群組裡有引號、但後面沒有刪除，就照舊放行。
+  "[[ x == x@(a')'b) ]] ; ls -l /tmp",
   'rm -rf build',
   'rm file.txt',
   'rm -rf /mnt/c/project',

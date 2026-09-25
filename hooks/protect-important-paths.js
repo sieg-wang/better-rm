@@ -766,7 +766,36 @@ function shellWords(command) {
       index = Math.min(position, input.length) - 1;
       atWordStart = true;
     } else if (char === '(' && word !== '' && word !== '!' && /[!?*+@]$/.test(word)
-      && extglobEnd(input, index) !== -1) {
+      && plainExtglobEnd(input, index) === -1) {
+      // BRM-ab-01: A GROUP THIS TOKENIZER DECLINES TO READ AS ONE PATTERN. The
+      // paren counter cannot see quoting, and bash reads quotes inside a group,
+      // so a group whose raw text carries a quote, a backslash, a backquote, a
+      // `$` or a newline goes down the operator path instead -- the path every
+      // group took at e1e4277, which splits at the '(' and never desynchronises
+      // (see plainExtglobEnd). So does a group whose raw count never balances,
+      // as it always did.
+      // That path truncates an OPERAND: with extglob on, `rm -rf /et@(c'')` hands
+      // rm /etc (measured), and the word in front of the '(' is only the prefix
+      // `/et@`. A raw count that does not balance proves nothing either -- a
+      // quoted paren can be the unbalanced one, as in `/et@(c|"(")`. So the word
+      // in front of a declined group is marked as a pattern whose extent this gate
+      // does not know, whichever reason declined it; targetFromWord() refuses it as
+      // unresolvable. Everything else that reads the mark sees a dynamic word,
+      // which every reader already treats as the unknowable, fail-closed case.
+      // BRM-ab-01：tokenizer 拒絕當成「一個樣式」讀的群組。括號計數看不到引號，而 bash 在群組
+      // 裡認引號，所以原文帶引號、反斜線、反引號、`$` 或換行的群組改走運算子路徑——也就是
+      // e1e4277 讓每個群組都走的那一條：在 '(' 切開，不會失去同步。原始括號數不平衡的群組照舊也走
+      // 這條。那條路會截斷「操作元」：extglob 開時 `rm -rf /et@(c'')` 交給 rm 的是 /etc（實測），
+      // 而 '(' 前面那個字只是前綴 `/et@`；括號數不平衡也證明不了什麼（`/et@(c|"(")` 裡不平衡
+      // 的正是被引號包住的那個）。所以不論因為哪個理由被拒讀，前面那個字都被標成「範圍不明的
+      // 樣式」，targetFromWord() 以解不開拒絕；其他讀到標記的地方把它當成動態字，那本來就是
+      // 每個讀者都 fail-closed 的情形。
+      wordHasDynamicExpansion = UNMODELLED_EXTGLOB;
+      pushWord(word, false);
+      word = '';
+      pushWord(char, true);
+      atWordStart = true;
+    } else if (char === '(' && word !== '' && word !== '!' && /[!?*+@]$/.test(word)) {
       // `word !== '!'` IS THE RESERVED-WORD EXCLUSION, and it is the whole of it.
       // Bash has exactly one reserved word among the five extglob lead
       // characters: `!`. A `!` that IS a complete word is the NEGATION operator,
@@ -881,7 +910,7 @@ function shellWords(command) {
       // 是真的：哪天 bash 讓命令位置的 `@(...)` 能跑，HEAD 那個「碰巧的 subshell 掃描」會擋
       // 到，而這裡不會。這是**接受**的防禦縱深折損，不是漏看——寫在 KNOWN-RESIDUALS.md 的
       // R6-c 那一節，並由 test-hooks.js 裡那幾列「命令位置邊界」雙向釘住。
-      const close = extglobEnd(input, index);
+      const close = plainExtglobEnd(input, index);
       word += input.slice(index, close + 1);
       index = close;
     } else if (';&|()<>\n'.includes(char)) {
@@ -1383,6 +1412,16 @@ function hasUnresolvedTargetExpansion(isDynamic) {
 // 會讓 OpenCode runtime hook 驗不過，安裝程式於是發布 fail-closed 替代品，拒掉每一次工具呼叫。
 const UNRESOLVED_TARGET = '\u0000unresolved:';
 
+// The dynamic-expansion mark shellWords() puts on the word in front of an
+// extglob group it declined to read (BRM-ab-01, see plainExtglobEnd). Truthy on
+// purpose: every reader of dynamicExpansions treats it as a dynamic word, the
+// unknowable case; targetFromWord() additionally refuses it outright, because a
+// dynamic word with no `$` in it would otherwise "resolve" to its own prefix.
+// shellWords() 對「拒絕當成樣式讀」的群組前面那個字打的動態標記（BRM-ab-01）。刻意是 truthy：
+// 每個讀 dynamicExpansions 的地方都把它當動態字；targetFromWord() 另外直接拒絕，因為一個不含
+// `$` 的動態字否則會被「解析」成它自己的前綴。
+const UNMODELLED_EXTGLOB = 'unmodelled-extglob';
+
 // What a LITERAL emitter writes down a pipe is not the text on the command line:
 // `echo -e 'rm\x20-rf\x20/etc'` is ONE shell word here and three words there, so
 // a gate that scans only the word it was handed reads `rm` as part of a single
@@ -1818,6 +1857,7 @@ function targetFromWord(word, isDynamic, expansionEnv) {
   if (spelling.startsWith('~') && spelling !== '~' && !spelling.startsWith('~/')) {
     return UNRESOLVED_TARGET + spelling;
   }
+  if (isDynamic === UNMODELLED_EXTGLOB) return UNRESOLVED_TARGET + spelling;
   if (!hasUnresolvedTargetExpansion(isDynamic)) return word;
   const resolved = resolveKnownExpansions(word, expansionEnv);
   return resolved === null ? UNRESOLVED_TARGET + word : resolved;
@@ -2019,6 +2059,31 @@ function extglobEnd(text, start) {
     }
   }
   return -1;
+}
+
+// The ')' that closes the extglob group at `start` in RAW COMMAND TEXT, but only
+// when the group's text holds nothing that bash would read differently from a
+// plain paren count: no quote, no backslash, no backquote, no `$`, no newline.
+// Otherwise -1, and the tokenizer does not claim the group (BRM-ab-01).
+// extglobEnd() counts raw parentheses, and bash does not: it honours quoting
+// inside a group, so `x@(a')'b)` closes at the LAST ')' for bash and at the quoted
+// one for a counter. Claiming the group there left the tokenizer inside a quote
+// that ran to the end of the input, and `[[ x == x@(a')'b) ]] ; rm -rf /etc` was
+// ALLOW (measured at 41878e9; bash 5.3.20 ran the rm). This is deliberately NOT a
+// quote-aware reader: every character excluded here is one whose meaning inside a
+// group would have to be modelled, and declining is the direction that cannot
+// desynchronise -- the caller splits at the '(' as e1e4277 did everywhere.
+// 在「原始命令文字」裡收掉 `start` 那個 extglob 群組的 ')'——但只在群組文字裡沒有任何 bash
+// 會讀得跟「單純數括號」不一樣的字元時才算：沒有引號、反斜線、反引號、`$`、換行。否則回 -1，
+// tokenizer 就不認這個群組（BRM-ab-01）。extglobEnd 數的是原始括號，bash 則在群組裡認引號，
+// 所以 `x@(a')'b)` 對 bash 在最後一個 ')' 收尾、對計數器在被引號包住的那個收尾；在那裡收掉
+// 群組，tokenizer 就停在一個吃到輸入結尾的引號裡（41878e9 實測放行，bash 5.3.20 真的執行了
+// rm）。這裡刻意「不」做會認引號的讀取器：被排除的每個字元，都是要建模才知道它在群組裡意義
+// 的字元，而「不認」是唯一不會失去同步的方向——呼叫端就像 e1e4277 那樣在 '(' 切開。
+function plainExtglobEnd(text, start) {
+  const close = extglobEnd(text, start);
+  if (close === -1) return -1;
+  return /['"\\`$\n]/.test(text.slice(start, close + 1)) ? -1 : close;
 }
 
 // Every extglob group rewritten as '*', which is deliberately WIDER than the
