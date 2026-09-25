@@ -1982,6 +1982,80 @@ const STILL_AT_COMMAND_WORD = new Set([
   'if', 'then', 'elif', 'else', 'while', 'until', 'do', '{', '!',
   'builtin', 'command', 'eval', 'exec', 'time',
 ]);
+// Round 4, N5 of the round-3 re-validation: CAN THIS BRACE WORD EXPAND TO `.` OR
+// `source`? Answered without expanding it. 902b706 asked through expandBraces(),
+// which recurses once per comma group along the first alternative and copies the
+// word at each level, and it asked of each command-position word in each text the
+// dot walk reads, on every Bash command. A one-line JSON heredoc of 8,000 objects
+// (about 210 KB) overflowed the stack there, and the hook exited 2 ("Invalid hook
+// input") on a command with no rm in it, ALLOW at 41878e9; below the overflow the
+// cost was groups x word length per word.
+// A brace word is a small regular expression -- literal characters, and groups of
+// comma-separated alternatives that are words of the same kind -- so it is read
+// the way such an expression is matched: one pass, carrying the set of positions
+// in the two names that some choice of alternatives can have reached so far. A
+// group keeps the set it was entered with, starts each alternative from it, and
+// leaves with the union of its alternatives. The groups are the ones
+// expandBraces() expands, a `{` with its matching `}` and a comma between them at
+// its own depth; any other `{`, `}` or `,` is a literal character, which neither
+// name contains. No recursion, and constant work per character. As with the
+// expansion it replaces, any alternative counts, not only the word bash would run
+// first (`{x,.}` runs x and is refused); unlike it, no 64-word cap leaves
+// alternatives unread.
+// 第四輪（第三輪重驗的 N5）：這個大括號字能不能展開成 `.` 或 `source`？不展開就回答。902b706 用
+// expandBraces() 問：沿著第一個分支每個逗號群組遞迴一層、每層複製整個字，而且對點命令走訪讀的每段文字裡
+// 命令位置上的每個字都問、每一條 Bash 命令都問。8,000 個物件的單行 JSON heredoc（約 210 KB）就讓堆疊溢位，
+// hook 對一條沒有 rm 的命令 exit 2（41878e9 放行）；沒溢位時成本是「群組數 x 字長」。
+// 大括號字是一個小小的正規表示式（字面字元，加上以逗號分隔、分支本身也是同類字的群組），所以照比對這種式子的
+// 方式讀：一次讀完，帶著「某種分支選法到目前為止能走到兩個名字裡的哪些位置」這個集合。群組記住進入時的集合，
+// 每個分支都從它開始，離開時取各分支的聯集。群組的認定與 expandBraces() 相同：一個 `{`、與它配對的 `}`、
+// 中間在它自己那一層有逗號；其他的 `{`、`}`、`,` 都是字面字元，而兩個名字裡都沒有這些字元。沒有遞迴，
+// 每個字元固定工作量。和它取代的展開一樣，任何一個分支都算（`{x,.}` 執行的是 x，也會被拒）；不同的是
+// 沒有 64 個字的上限讓分支沒被讀到。
+// Positions, one bit each: `.` holds bits 0-1 and `source` bits 2-8. A character
+// moves a position one bit up when it is the next letter there, and bit 1 or bit 8
+// means a whole name was spelled.
+// 位置，一個位元一個：`.` 佔 0-1、`source` 佔 2-8。字元是那個位置的下一個字母時，位置往上移一個位元；
+// 第 1 或第 8 個位元代表拼完了一整個名字。
+const DOT_NAME_START = 0b000000101;
+const DOT_NAME_DONE = 0b100000010;
+const DOT_NAME_NEXT = { '.': 1 << 0, s: 1 << 2, o: 1 << 3, u: 1 << 4, r: 1 << 5, c: 1 << 6, e: 1 << 7 };
+const BRACE_COMMA_SEEN = 1 << 9;
+function braceWordCanBeADotCommand(word) {
+  // Two numbers per open group: the positions it was entered with, and the union
+  // its finished alternatives reached, with BRACE_COMMA_SEEN once it has a comma.
+  // 每個還沒收尾的群組兩個數字：進入時的位置集合，與已結束分支到達的聯集（有逗號之後帶 BRACE_COMMA_SEEN）。
+  const open = [];
+  let reached = DOT_NAME_START;
+  for (let i = 0; i < word.length; i += 1) {
+    const char = word[i];
+    const depth = open.length;
+    if (char === '{') {
+      open.push(reached, 0);
+      continue;
+    }
+    if (depth > 0 && char === ',') {
+      open[depth - 1] |= reached | BRACE_COMMA_SEEN;
+      reached = open[depth - 2];
+      continue;
+    }
+    if (depth > 0 && char === '}') {
+      const alternatives = open.pop();
+      open.pop();
+      // Without a comma the braces stay literal, and neither name holds a brace.
+      // 沒有逗號的大括號是字面字元，兩個名字裡都沒有大括號。
+      reached = alternatives & BRACE_COMMA_SEEN ? (alternatives | reached) & ~BRACE_COMMA_SEEN : 0;
+    } else {
+      reached = (reached & (DOT_NAME_NEXT[char] || 0)) << 1;
+    }
+    // Outside every group nothing can bring a position back: the answer is no.
+    // 在所有群組之外，沒有東西能讓位置回來：答案是否。
+    if (open.length === 0 && reached === 0) return false;
+  }
+  // A `{` still open is a literal one, in every word this can expand to.
+  // 還開著的 `{` 是字面字元，出現在每一個展開結果裡。
+  return open.length === 0 && (reached & DOT_NAME_DONE) !== 0;
+}
 // Round 2, blocker B3 and O1 of the independent validation: WHETHER A FILE IS
 // SOURCED, decided from COMMAND POSITION in the tokenizer's word stream, not
 // from what follows the `.`. The first version was a regex that let a `.`
@@ -2059,10 +2133,10 @@ function sourcesAFile(text, depth = 0, preTokenized = null) {
     // disappears, so `{.,} f` and `{,.} -p d f` run the dot command (printf shows
     // HOME=/, bash 5.3.20; pre-existing at 41878e9). Any `.`/`source` alternative
     // counts; a quoted brace word is literal in bash and counts too (over-refusal).
+    // It is read in one pass, never expanded: see braceWordCanBeADotCommand().
     // 大括號字在命令執行前就展開，空的分支會消失，所以 `{.,} f` 會執行點命令。任何 `.`／`source` 分支都算。
-    if (word.includes('{') && expandBraces(word).patterns.some((alternative) => (
-      alternative === '.' || alternative === 'source'
-    ))) return true;
+    // 一次讀完、不展開：見 braceWordCanBeADotCommand()。
+    if (word.includes('{') && braceWordCanBeADotCommand(word)) return true;
     // `function NAME` opens a function whose body -- `{`, `while`, `until`, `if`,
     // `(` ... -- is a command position again (round 3, N3 of the round-2
     // re-validation: `function f { . ./env.sh; }; f` was missed). The NAME is
@@ -6575,4 +6649,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, commandSubstitutions, commandTargets, evaluate, execWrappers, globCanMatchGit, hasGlob, normalizedTarget, protectedReason, shellCarriers, shellWords, wrapperCommands };
+module.exports = { HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, braceWordCanBeADotCommand, commandSubstitutions, commandTargets, evaluate, execWrappers, expandBraces, globCanMatchGit, hasGlob, normalizedTarget, protectedReason, shellCarriers, shellWords, wrapperCommands };

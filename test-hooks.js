@@ -11,9 +11,9 @@ const assert = require('assert');
 // 放在最上面：底下的 hostFactor() 會讀 os.loadavg() 與 os.cpus()。
 const os = require('os');
 const {
-  HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, commandSubstitutions,
-  commandTargets, evaluate, execWrappers, normalizedTarget, shellCarriers, shellWords,
-  wrapperCommands,
+  HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, braceWordCanBeADotCommand,
+  commandSubstitutions, commandTargets, evaluate, execWrappers, expandBraces, normalizedTarget,
+  shellCarriers, shellWords, wrapperCommands,
 } = require('./hooks/protect-important-paths');
 
 // TMPDIR is here because the hook resolves it: it is one of the three variables
@@ -5463,6 +5463,13 @@ let globTimingChecks = 0;
 // Resolving a variable is only safe while the VALUE is safe to build a path out
 // of, and the refusal for one this gate cannot resolve has to say so honestly.
 // 只有在「值本身可以拿來組路徑」時，解析變數才是安全的；而對解不開的變數，拒絕訊息必須誠實。
+// A one-line JSON array of 8,000 small objects, about 210 KB: the benign shape of
+// blocker N5 of the round-3 re-validation, which a brace check that expanded each
+// word turned into an exit 2. Declared here because three blocks below use it.
+// 8,000 個小物件的單行 JSON 陣列（約 210 KB）：第三輪重驗阻斷項 N5 的良性形狀。宣告在這裡，因為下面三個區塊都用到它。
+const EIGHT_THOUSAND_OBJECTS_JSON = JSON.stringify(
+  Array.from({ length: 8000 }, (_, id) => ({ id, name: `n${id}` })),
+);
 let variableResolutionChecks = 0;
 {
   // The hook's own SOURCE must contain no NUL byte. install-hooks.sh verifies a
@@ -5832,6 +5839,15 @@ let variableResolutionChecks = 0;
     // 大括號展開產生的點（41878e9 就有）。
     '{.,} ./d/envx.sh; rm -rf "$HOME/etc"',
     '{,.} -p ./d envx.sh; rm -rf "$HOME/etc"',
+    // Round 4: the round-3 re-validation's brace spellings (printf shows each one
+    // sourcing the file), kept refused now that the brace word is read in one pass
+    // instead of expanded: a `source` alternative, a nested group, empty
+    // alternatives first, and a quoted `.` (the quotes are gone by now).
+    // 第四輪：第三輪重驗的大括號寫法（printf 實測每一種都 source 了檔案）；大括號字改成一次讀完、不再展開之後仍須拒絕。
+    '{source,} ./d/envx.sh; rm -rf "$HOME/etc"',
+    '{{.,},} ./d/envx.sh; rm -rf "$HOME/etc"',
+    '{,,.} ./d/envx.sh; rm -rf "$HOME/etc"',
+    '{".",} ./d/envx.sh; rm -rf "$HOME/etc"',
     // The unprivileged forms, where the real target is the home directory or its
     // .ssh rather than a root-owned path.
     // 不需要 root 的寫法：真正的目標是家目錄或它的 .ssh。
@@ -5898,6 +5914,76 @@ let variableResolutionChecks = 0;
   ]) {
     assert.equal(decisionFor(command), undefined, `a name the command never reassigns stays resolvable: ${command}`);
     variableResolutionChecks += 1;
+  }
+
+  // Round 4, N5 of the round-3 re-validation. The brace check expanded each
+  // command-position word with the recursive expandBraces(), one level per comma
+  // group, in every text the dot walk reads. This fixture's line is one word of
+  // 8,000 comma groups, which overflowed the stack: the hook exited 2 ("Invalid
+  // hook input") on a command it allows at 41878e9. Catching the overflow and
+  // answering "may source" for the word still refuses this line (measured while
+  // writing this), yet none of these objects can expand to `.` or `source`, so
+  // $TMPDIR has to stay resolvable.
+  // 第四輪（第三輪重驗的 N5）：大括號檢查用遞迴的 expandBraces() 展開命令位置上的每個字，每個逗號群組一層。
+  // 這個 fixture 那一行是有 8,000 個逗號群組的一個字，讓堆疊溢位，hook 以 exit 2 拒絕了 41878e9 會放行的命令。
+  // 攔下溢位、對這個字改答「可能 source」仍會拒絕這一行（寫這段時實測），但這些物件展不出 `.` 或 `source`，
+  // $TMPDIR 必須照常解析。
+  assert.equal(
+    decisionFor(`cat > fixture.json <<'EOF'\n${EIGHT_THOUSAND_OBJECTS_JSON}\nEOF\nrm -rf "$TMPDIR/fixtures"`),
+    undefined,
+    'a one-line JSON heredoc of 8,000 objects keeps $TMPDIR resolvable: no object can expand to a dot command',
+  );
+  variableResolutionChecks += 1;
+  // The one-pass brace reading against the expansion it replaced: every word of up
+  // to eight characters over `{ } , . x`, every word made by inserting up to four
+  // of `{ } , x` into `source` (the only words here that spell it across groups,
+  // which the word-anywhere `source` test cannot see), and seeded random words
+  // over the letters of both names, get the answer expandBraces() gives to "does
+  // some expansion equal `.` or `source`" (each small enough to expand in full).
+  // 一次讀完的大括號判斷，對照它取代的展開：`{ } , . x` 組成、長度至多 8 的每一個字；在 `source` 裡插入至多
+  // 四個 `{ } , x` 得到的每一個字（這裡只有它們把 `source` 拆在群組之間拼出來，「任何位置的 source 字」那條
+  // 檢查看不到）；以及用兩個名字的字母組成的固定種子隨機字。對「有沒有某個展開等於 `.` 或 `source`」的答案
+  // 都必須與 expandBraces() 相同。
+  {
+    let compared = 0;
+    const spelled = { '.': 0, source: 0 };
+    const differences = [];
+    const compare = (word) => {
+      const expansion = expandBraces(word, 1 << 20);
+      if (expansion.truncated) throw new Error(`the reference expansion of ${word} is incomplete`);
+      const names = Object.keys(spelled).filter((name) => expansion.patterns.includes(name));
+      for (const name of names) spelled[name] += 1;
+      if (braceWordCanBeADotCommand(word) !== (names.length > 0) && differences.length < 10) differences.push(word);
+      compared += 1;
+    };
+    const everyWord = (prefix, alphabet, longest) => {
+      compare(prefix);
+      if (prefix.length < longest) for (const char of alphabet) everyWord(prefix + char, alphabet, longest);
+    };
+    everyWord('', ['{', '}', ',', '.', 'x'], 8);
+    let insertedInto = new Set(['source']);
+    for (let round = 0; round < 4; round += 1) {
+      const longer = new Set();
+      for (const word of insertedInto) {
+        for (let at = 0; at <= word.length; at += 1) {
+          for (const char of ['{', '}', ',', 'x']) longer.add(word.slice(0, at) + char + word.slice(at));
+        }
+      }
+      for (const word of longer) compare(word);
+      insertedInto = longer;
+    }
+    let seed = 12345;
+    const next = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed; };
+    const letters = ['{', '}', ',', '.', 's', 'o', 'u', 'r', 'c', 'e', 'x', '{', '}', ','];
+    for (let n = 0; n < 200000; n += 1) {
+      let word = '';
+      for (let k = 1 + (next() % 14); k > 0; k -= 1) word += letters[next() % letters.length];
+      if ((word.match(/,/g) || []).length <= 6) compare(word);
+    }
+    assert.deepEqual(differences, [], 'the one-pass brace reading disagrees with expandBraces() on these words');
+    assert.ok(spelled['.'] > 0 && spelled.source > 0,
+      `the sweep holds words that spell each name (${JSON.stringify(spelled)} of ${compared})`);
+    variableResolutionChecks += 2;
   }
 
   // ACCEPTED over-refusal, KNOWN-RESIDUALS.md R6-e: the bare NAME anywhere but a
@@ -6198,6 +6284,55 @@ let findClauseTimingChecks = 0;
       + 'an extglob lead is being matched by rescanning the rest of the input',
     );
     findClauseTimingChecks += 2;
+  }
+  // BRACE WORDS THE DOT WALK READS (round 4, N5 of the round-3 re-validation).
+  // Whether a command-position word could expand to `.` or `source` was asked by
+  // expanding it with the recursive expandBraces() -- one level per comma group
+  // and a copy of the word at each level -- in every text the walk reads: the top
+  // level, quoted words read again, heredoc bodies, decoded copies. Measured on
+  // the round-3 tree: each of the first three rows threw RangeError (the hook
+  // exited 2 on commands with no rm, ALLOW at 41878e9), and the fourth, the
+  // validator's 391 KB shape, took 0.4-1.9 s where it did not throw as well.
+  // None of them removes anything.
+  // 點命令走訪讀到的大括號字（第四輪，第三輪重驗的 N5）。「命令位置上的字能不能展開成 `.` 或 `source`」原本是用
+  // 遞迴的 expandBraces() 展開來問的：每個逗號群組一層、每層複製一次整個字，而且走訪讀的每一段文字都問。
+  // 第三輪的樹上實測：前三列都丟出 RangeError（沒有 rm 的命令被 exit 2 拒絕，41878e9 放行），第四列（驗證者的
+  // 391 KB 形狀）沒丟例外時要 0.4-1.9 秒。這幾列都不刪任何東西。
+  const braceWordBudgetMs = 1000 * hostFactor();
+  // The fourth row's text is read nine times (its backslash run), like the cd-01
+  // rows above, so it has their budget.
+  // 第四列的文字因為那串反斜線會被讀九次，和上面 cd-01 那幾列一樣，所以用它們的預算。
+  const braceWordRows = [
+    ['a one-line JSON heredoc of 8,000 objects',
+      `cat > fixture.json <<'EOF'\n${EIGHT_THOUSAND_OBJECTS_JSON}\nEOF`, braceWordBudgetMs],
+    // Parentheses make the quoted word one that the walk reads again as commands.
+    // 括號讓這個引號裡的字被走訪當成命令再讀一次。
+    ['8,000 objects with parentheses in their strings, in a quoted argument',
+      `echo '${JSON.stringify(Array.from({ length: 8000 }, (_, id) => ({ id, note: `f(${id})` })))}' > fixture.json`,
+      braceWordBudgetMs],
+    ['20,000 comma groups in one word at command position', `${'{a,b}'.repeat(20000)} x`, braceWordBudgetMs],
+    ['20 heredoc lines of 4,000 comma groups and a run of backslashes',
+      `cat <<'EOF' > n.txt\n${Array.from({ length: 20 }, () => '{a,b}'.repeat(4000)).join('\n')}\n${'\\'.repeat(256)}x\nEOF`,
+      projectionBudgetMs],
+  ];
+  for (const [label, command, rowBudgetMs] of braceWordRows) {
+    const run = time(command);
+    assert.equal(run.verdict, undefined, `${label}: a command that removes nothing was refused`);
+    assert.ok(
+      run.ms < rowBudgetMs,
+      `${label} took ${run.ms.toFixed(1)}ms against a ${rowBudgetMs.toFixed(0)}ms budget: `
+      + 'a brace word is being expanded to ask whether it names the dot command',
+    );
+    findClauseTimingChecks += 2;
+  }
+  // The first and third rows again through the real stdin entry point, where the
+  // overflow was exit 2 with "Invalid hook input; tool call denied".
+  // 第一與第三列再走一次真正的 stdin 入口：溢位在那裡是 exit 2 加「Invalid hook input」。
+  for (const [label, command] of [braceWordRows[0], braceWordRows[2]]) {
+    const { status, stdout } = runHookOverStdin(claude(command));
+    assert.equal(status, 0, `${label}: the hook must answer through stdin, not exit ${status}`);
+    assert.equal(stdout, '', `${label}: a command that removes nothing was refused through stdin`);
+    stdinChecks += 1;
   }
   // Advancing past a consumed clause must land ON the separator that ended it,
   // never past it: skipping one would swallow the command after it, and the rm
@@ -7343,7 +7478,7 @@ async function runOpenCodePluginChecks() {
 // 現在都會「指名」失敗，而不是留下一次更短、更安靜、看起來仍然是綠的執行。
 const PINNED_TIMING_COUNTERS = [
   ['globTimingChecks', globTimingChecks, 4],
-  ['findClauseTimingChecks', findClauseTimingChecks, 40],
+  ['findClauseTimingChecks', findClauseTimingChecks, 48],
   ['targetLimitChecks', targetLimitChecks, 9],
 ];
 for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {
@@ -7373,8 +7508,8 @@ for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {
 // 用 __filename 而不是用 __dirname 組出來的路徑：清查必須讀「它自己」這個檔案。
 const ownSource = require('fs').readFileSync(__filename, 'utf8');
 const wallClockRows = ownSource.match(/\.ms\s*[<>]=?\s*[A-Za-z0-9_.]+/g) || [];
-assert.equal(wallClockRows.length, 7,
-  `this file holds ${wallClockRows.length} wall-clock comparisons, not the 7 pinned here: `
+assert.equal(wallClockRows.length, 8,
+  `this file holds ${wallClockRows.length} wall-clock comparisons, not the 8 pinned here: `
   + `${wallClockRows.join(', ')}. A new one needs a scaled budget and a pinned counter, `
   + 'which is what this number is for');
 const constantBudgetRows = wallClockRows.filter((row) => /[<>]=?\s*[0-9]/.test(row));
