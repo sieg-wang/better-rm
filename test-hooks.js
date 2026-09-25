@@ -2675,6 +2675,10 @@ for (const command of [
   "bash -O extglob -c 'rm -rf dist/@(.gi*)'",
   "bash -O extglob -c 'rm -rf dist/?(x).git'",
   "bash -O extglob -c 'rm -rf @(.git)'",
+  // Round 2: two more that echo shows selecting dist/.git (bash 5.3.20).
+  // 第二輪：再兩個 echo 實測會選到 dist/.git 的。
+  "bash -O extglob -c 'rm -rf dist/?(*).git'",
+  "bash -O extglob -c 'rm -rf dist/+(x|.)git'",
 ]) {
   assert.equal(evaluate(claude(command), env)?.hookSpecificOutput?.permissionDecision, 'deny',
     `an extglob group that spells a leading dot selects .git: ${command}`);
@@ -2696,6 +2700,18 @@ for (const command of [
   "bash -O extglob -c 'rm -rf dist/!(.git)'",
   "bash -O extglob -c 'rm -rf dist/!(src)'",
   'shopt -s extglob\nrm -rf !(.git)',
+  // Round 2, O3 of the independent validation: the first version called ANY
+  // component with a `.` and a group dot-capable, which refused the ordinary
+  // extension alternation with extglob on. A leading `*` or a literal never
+  // matches a leading dot, whatever group follows: echo shows d3/*.@(o|a),
+  // d3/*.@(tmp|bak) and d3/*@(.git) selecting no dot entry (bash 5.3.20).
+  // 第二輪（獨立驗證的 O3）：第一版把「有 `.` 又有群組」的段都當成選得到點開頭項目，於是 extglob 開時
+  // 連普通的副檔名交替都被擋。開頭是 `*` 或字面時，後面接什麼群組都配不到開頭的點（echo 實測）。
+  'shopt -s extglob\nrm -f build/*.@(o|a)',
+  "bash -O extglob -c 'rm -rf dist/*.@(map|js)'",
+  "bash -O extglob -c 'rm -f *.@(tmp|bak)'",
+  "bash -O extglob -c 'rm -rf dist/*@(.git)'",
+  'case $f in *.@(js|ts)) echo js;; esac',
 ]) {
   assert.equal(evaluate(claude(command), env), null,
     `a group that cannot select a dot entry stays ordinary: ${command}`);

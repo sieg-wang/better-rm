@@ -2452,21 +2452,27 @@ function globMatchesPath(pattern, target) {
   if (patternParts.length !== targetParts.length) return false;
   // BRM-ab-07: a component whose extglob group can put a LITERAL dot first is
   // exempt from the leading-dot rule, because bash matches that dot: with
-  // extglob on, `@(.git)`, `@(x|.git)`, `?(.)git`, `+(.git|x)`, `@(.gi*)` and
-  // `?(x).git` all select .git (echo under bash 5.3.20, 2026-09-25). The test is
-  // "has a `.` and a `?`, `*`, `+` or `@` group" -- wider than bash, so it can
-  // only over-refuse. Negation groups are left out on the same measurement:
+  // extglob on, `@(.git)`, `@(x|.git)`, `?(.)git`, `+(.git|x)`, `@(.gi*)`,
+  // `?(x).git`, `?(*).git` and `+(x|.)git` all select .git (echo under bash
+  // 5.3.20, 2026-09-25). The test is "STARTS with a `?`, `*`, `+` or `@` group and
+  // has a `.`" -- wider than bash, so it can only over-refuse. Starting with the
+  // group matters (round 2, O3 of the independent validation): a leading `*` or
+  // literal never matches a leading dot whatever follows -- `*.@(o|a)`,
+  // `*.@(tmp|bak)` and `*@(.git)` selected no dot entry -- and the first version,
+  // which asked only for "a `.` and a group", refused `rm -f build/*.@(o|a)`.
+  // Negation groups are left out on the same measurement:
   // `!(.git)`, `!(x|.x)`, `!(src).git`, `!(x)git`, `!(x).*` and `!(!(.git))`
-  // selected no dot entry, and `rm -rf !(.git)` is an ordinary cleanup. A group
+  // selected no dot entry, and neither did `!(x)@(.git)` or `!(x).git` (a
+  // negation first), and `rm -rf !(.git)` is an ordinary cleanup. A group
   // never spans a '/' here (widenExtglob returns null for one that does), so the
   // original pattern's components line up with the widened ones.
   // BRM-ab-07：某一段的 extglob 群組能把「字面的點」放在最前面時，那一段不受開頭點規則限制，因為 bash
-  // 會配那個點（六種寫法 echo 實測都選到 .git）。判斷是「有 `.`、也有 `?`/`*`/`+`/`@` 群組」——比 bash
-  // 寬，只會多擋。否定群組依同一次實測排除（六種寫法都沒選到點開頭項目），`rm -rf !(.git)` 是普通的
+  // 會配那個點（六種寫法 echo 實測都選到 .git）。判斷是「以 `?`/`*`/`+`/`@` 群組開頭、而且有 `.`」——比 bash
+  // 寬，只會多擋。以群組開頭是第二輪（O3）加的：開頭是 `*` 或字面時後面接什麼都配不到開頭的點（實測）。否定群組依同一次實測排除（六種寫法都沒選到點開頭項目），`rm -rf !(.git)` 是普通的
   // 清理。群組在這裡不會跨 '/'（跨的話 widenExtglob 回 null），所以原樣式的段與放寬後的段一一對應。
   const originalParts = pattern.split('/');
   for (let i = 0; i < patternParts.length; i += 1) {
-    const dotCapable = originalParts[i].includes('.') && /[?*+@]\(/.test(originalParts[i]);
+    const dotCapable = originalParts[i].includes('.') && /^[?*+@]\(/.test(originalParts[i]);
     if (targetParts[i].startsWith('.') && !patternParts[i].startsWith('.') && !dotCapable) return false;
     if (!componentMatches(patternParts[i], targetParts[i])) return false;
   }
