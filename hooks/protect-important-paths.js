@@ -19,11 +19,17 @@ const path = require('path');
 // /private/etc 與 /private/var 是 macOS 上 /etc 與 /var 真正指到的地方（實測 realpath）。
 // 受保護的拼寫如果內容存在一條沒受保護的路徑上，那份保護就是空的。/private/tmp 刻意不
 // 加：那是暫存工作的地方。
+// /pkg (BRM-ab-09) is the root-level firmlink macOS 27 added: /usr/share/firmlinks
+// lists `/pkg pkg` on this Mac since the 2026-09-20 upgrade, and every other
+// firmlinked root present here was already on both lists. Harmless where it does
+// not exist, like /boot or /lib64 on a Mac.
+// /pkg（BRM-ab-09）是 macOS 27 新增的根層 firmlink；這裡存在的其他 firmlink 根目錄都早已在兩份清單上。
+// 在不存在它的系統上無害，與 Mac 上的 /boot、/lib64 一樣。
 const SYSTEM_DIRS = [
   '/', '/Applications', '/Library', '/Network', '/System', '/System/Volumes',
   '/Users', '/Volumes',
   '/bin', '/boot', '/cores', '/dev', '/etc', '/home', '/lib', '/lib64', '/mnt',
-  '/opt', '/private', '/private/etc', '/private/var', '/proc', '/root', '/sbin',
+  '/opt', '/pkg', '/private', '/private/etc', '/private/var', '/proc', '/root', '/sbin',
   '/sys', '/usr', '/var',
 ];
 

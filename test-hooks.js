@@ -1380,6 +1380,13 @@ const blocked = [
   "sudo dtruss 'rm -rf x #y /etc'",
   "sudo dtruss 'true ; rm -rf /etc'",
   "sudo dtruss 'rm -rf' \"$BUILD_DIR\"",
+  // BRM-ab-09: /pkg, the root-level firmlink macOS 27 added (/usr/share/firmlinks
+  // lists `/pkg pkg` on this Mac since the 2026-09-20 upgrade; root-owned, hidden).
+  // Every other firmlinked root present here was already on both lists. The
+  // data-volume spelling is the same object, as for every firmlink.
+  // BRM-ab-09：/pkg，macOS 27 新增的根層 firmlink。這裡存在的其他 firmlink 根目錄都早已在兩份清單上。
+  'sudo rm -rf /pkg',
+  'sudo rm -rf /System/Volumes/Data/pkg',
   // ROUND 4, BRM-ab-08: xcrun. The 56121b0 commit named it as an unmodelled
   // wrapper recorded in KNOWN-RESIDUALS.md R6-a -- a section that did not exist --
   // and it execs any tool on PATH: touch markers (2026-09-25) for the bare form

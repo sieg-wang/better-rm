@@ -4112,9 +4112,14 @@ is_protected_says_yes() {
 }
 protected_unguarded=""
 protected_probe_broken=""
+# /pkg (BRM-ab-09): a root-level firmlink that macOS 27 added -- /usr/share/firmlinks
+# lists `/pkg pkg` on this Mac since the 2026-09-20 upgrade -- and the one firmlinked
+# root that neither list named.
+# /pkg（BRM-ab-09）：macOS 27 新增的根層 firmlink（2026-09-20 升級後 /usr/share/firmlinks
+# 列出 `/pkg pkg`），是兩份清單都沒列到的那一個。
 for protected_path in / /Applications /Library /Network /System /System/Volumes \
                       /Users /Volumes \
-                      /bin /boot /cores /dev /etc /home /lib /lib64 /mnt /opt \
+                      /bin /boot /cores /dev /etc /home /lib /lib64 /mnt /opt /pkg \
                       /private /proc /root /sbin /sys /usr /var \
                       "$protected_home" "$protected_home/" \
                       "$protected_home/.claude" "$protected_home/.ssh"; do

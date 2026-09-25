@@ -49,6 +49,7 @@ PROTECTED_DIRS=(
     "/lib64"
     "/mnt"
     "/opt"
+    "/pkg"
     "/private"
     # /private/etc 與 /private/var 是 macOS 上 /etc 與 /var 真正指到的地方（實測
     # readlink -f）。受保護的拼寫如果內容存在一條沒受保護的路徑上，那份保護就是空的：
