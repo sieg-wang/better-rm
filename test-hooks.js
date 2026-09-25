@@ -2556,6 +2556,59 @@ for (const operator of EXTGLOB_OPERATORS) {
 assert.ok(extglobChecks >= EXTGLOB_OPERATORS.length * 4,
   `the extglob table produced only ${extglobChecks} checks`);
 
+// BRM-ab-07: AN EXTGLOB GROUP THAT CAN SELECT A DOT ENTRY. The gate widens every
+// group to '*' and then applied the leading-dot rule to the WIDENED component,
+// where '*' can never match `.git` -- but bash matches a leading dot that the
+// PATTERN spells: with extglob on, `dist/@(.git)`, `dist/@(x|.git)`,
+// `dist/?(.)git`, `dist/+(.git|x)`, `dist/@(.gi*)` and `dist/?(x).git` all expand
+// to dist/.git (echo under bash 5.3.20, 2026-09-25), and every row below was ALLOW
+// at 41878e9. Negation groups are the exception on the same measurement --
+// `dist/!(.git)`, `!(x|.x)`, `!(src).git`, `!(x)git`, `!(x).*` and `!(!(.git))`
+// never selected a dot entry -- which is why `dist/!(.git)`, the ordinary
+// "everything but the repository" spelling, must stay allowed beside them. (The
+// bare `rm -rf !(.git)` row is allowed for a second reason too: a word that is
+// exactly `!` is not read as an extglob lead at all, KNOWN-RESIDUALS.md R6-c.)
+// BRM-ab-07：可以選到點開頭項目的 extglob 群組。閘門把每個群組放寬成 '*'，再對「放寬後」的段套
+// 開頭點規則——'*' 永遠配不到 `.git`；但 bash 會配「樣式自己寫出來的」開頭點（上面那六種 echo 實測
+// 都展開成 dist/.git），41878e9 下面每一列都放行。否定群組是例外（同一次實測六種寫法都沒選到點開頭
+// 項目），所以「除了儲存庫以外全刪」的 `dist/!(.git)` 必須在旁邊照舊放行（裸的 `rm -rf !(.git)` 另有
+// 一個理由：整個字就是 `!` 時根本不被當成 extglob 開頭，見 KNOWN-RESIDUALS.md R6-c）。
+for (const command of [
+  "bash -O extglob -c 'rm -rf dist/@(.git)'",
+  'shopt -s extglob\nrm -rf dist/@(.git)',
+  "bash -O extglob -c 'rm -rf dist/@(x|.git)'",
+  "bash -O extglob -c 'rm -rf dist/?(.)git'",
+  "bash -O extglob -c 'rm -rf dist/+(.git|x)'",
+  "bash -O extglob -c 'rm -rf dist/@(.gi*)'",
+  "bash -O extglob -c 'rm -rf dist/?(x).git'",
+  "bash -O extglob -c 'rm -rf @(.git)'",
+]) {
+  assert.equal(evaluate(claude(command), env)?.hookSpecificOutput?.permissionDecision, 'deny',
+    `an extglob group that spells a leading dot selects .git: ${command}`);
+  extglobChecks += 1;
+}
+// A declared dot-directory under an unprotected parent: before the fix only the
+// literal spelling was refused.
+// 宣告在「未受保護父目錄」底下的點目錄：修正前只有字面拼法會被擋。
+for (const command of ['rm -rf /work/.secrets', "bash -O extglob -c 'rm -rf /work/@(.secrets)'"]) {
+  assert.equal(
+    evaluate(claude(command), { ...env, BETTER_RM_PROTECTED_DIRS: '/work/.secrets' })
+      ?.hookSpecificOutput?.permissionDecision,
+    'deny', `a declared dot-directory named through an extglob group: ${command}`,
+  );
+  extglobChecks += 1;
+}
+for (const command of [
+  "bash -O extglob -c 'rm -rf dist/@(src)'",
+  "bash -O extglob -c 'rm -rf dist/!(.git)'",
+  "bash -O extglob -c 'rm -rf dist/!(src)'",
+  'shopt -s extglob\nrm -rf !(.git)',
+]) {
+  assert.equal(evaluate(claude(command), env), null,
+    `a group that cannot select a dot entry stays ordinary: ${command}`);
+  extglobChecks += 1;
+}
+
 // ---------------------------------------------------------------------------
 // THE COMMAND-POSITION BOUNDARY, pinned in BOTH directions.
 // 命令位置的邊界，雙向釘住。

@@ -2225,14 +2225,18 @@ function plainExtglobEnd(text, start) {
 // group it replaces: `@(c)` matches exactly `c`, `?(c)` matches `` or `c`, `+(c)`
 // and `*(c)` match repetitions of it and `!(zzz)` matches everything except
 // `zzz` -- and '*' inside a component matches any run of non-'/' characters, so
-// it is a superset of all five. Widening is the fail-closed direction: the answer
-// can only OVER-match, which costs an over-refusal and cannot open a hole.
+// it is a superset of all five. Widening is the fail-closed direction only
+// together with the rule in globMatchesPath() that lets a widened component
+// match a leading dot when the group can: '*' alone is barred from leading-dot
+// names, and bash is not -- `dist/@(.git)` selects dist/.git (BRM-ab-07). This
+// comment used to say widening "cannot open a hole", and that was false.
 // Null means "this gate cannot model the pattern": a group containing a '/' does
 // not survive being widened one component at a time, and the caller treats a null
 // as capable of naming anything.
 // 每個 extglob 群組改寫成 '*'——刻意比它取代的群組「更寬」，因為 '*' 在單一路徑段裡匹配任
-// 意一段非 '/' 字元，是那五種的超集。放寬是 fail-closed 的方向：答案只會過度匹配，開不了
-// 洞。回傳 null 表示「這道閘門建模不了」：群組裡含 '/' 時逐段放寬會失真，呼叫端把 null 當
+// 意一段非 '/' 字元，是那五種的超集。放寬只有在搭配 globMatchesPath() 那條規則時才是
+// fail-closed：'*' 單獨不配開頭點，bash 卻會——`dist/@(.git)` 選得到 dist/.git（BRM-ab-07）。
+// 這段註解原本說放寬「開不了洞」，那是錯的。回傳 null 表示「這道閘門建模不了」：群組裡含 '/' 時逐段放寬會失真，呼叫端把 null 當
 // 成「可能指到任何東西」。
 function widenExtglob(pattern) {
   if (!/[!?*+@]\(/.test(pattern)) return pattern;
@@ -2325,8 +2329,24 @@ function globMatchesPath(pattern, target) {
   const patternParts = widened.split('/');
   const targetParts = target.split('/');
   if (patternParts.length !== targetParts.length) return false;
+  // BRM-ab-07: a component whose extglob group can put a LITERAL dot first is
+  // exempt from the leading-dot rule, because bash matches that dot: with
+  // extglob on, `@(.git)`, `@(x|.git)`, `?(.)git`, `+(.git|x)`, `@(.gi*)` and
+  // `?(x).git` all select .git (echo under bash 5.3.20, 2026-09-25). The test is
+  // "has a `.` and a `?`, `*`, `+` or `@` group" -- wider than bash, so it can
+  // only over-refuse. Negation groups are left out on the same measurement:
+  // `!(.git)`, `!(x|.x)`, `!(src).git`, `!(x)git`, `!(x).*` and `!(!(.git))`
+  // selected no dot entry, and `rm -rf !(.git)` is an ordinary cleanup. A group
+  // never spans a '/' here (widenExtglob returns null for one that does), so the
+  // original pattern's components line up with the widened ones.
+  // BRM-ab-07：某一段的 extglob 群組能把「字面的點」放在最前面時，那一段不受開頭點規則限制，因為 bash
+  // 會配那個點（六種寫法 echo 實測都選到 .git）。判斷是「有 `.`、也有 `?`/`*`/`+`/`@` 群組」——比 bash
+  // 寬，只會多擋。否定群組依同一次實測排除（六種寫法都沒選到點開頭項目），`rm -rf !(.git)` 是普通的
+  // 清理。群組在這裡不會跨 '/'（跨的話 widenExtglob 回 null），所以原樣式的段與放寬後的段一一對應。
+  const originalParts = pattern.split('/');
   for (let i = 0; i < patternParts.length; i += 1) {
-    if (targetParts[i].startsWith('.') && !patternParts[i].startsWith('.')) return false;
+    const dotCapable = originalParts[i].includes('.') && /[?*+@]\(/.test(originalParts[i]);
+    if (targetParts[i].startsWith('.') && !patternParts[i].startsWith('.') && !dotCapable) return false;
     if (!componentMatches(patternParts[i], targetParts[i])) return false;
   }
   return true;
