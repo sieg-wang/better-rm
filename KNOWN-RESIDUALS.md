@@ -1118,7 +1118,7 @@ same class: the gate reads only this command's text.
 之後，printf 印出的 `~/etc` 仍是原本的家目錄（`-c` 同一行、換行分隔、腳本檔、`eval` 都一樣），只有
 `$HOME` 是新值；3.2、zsh、sh 則不接受 `. -p`。shell 的行為只用 printf 實測，沒有執行任何刪除。
 
-**四、引號裡的 `<<` 被當成 heredoc 開頭（fail-closed，已知誤擋）。** `python3 -c 'print(1 << 3)';
+**四、引號裡或 heredoc 內文裡的 `<<` 被當成 heredoc 開頭（fail-closed，已知誤擋）。** `python3 -c 'print(1 << 3)';
 rm -rf "$TMPDIR/x"` 在本輪分支拒絕、41878e9 放行：引號裡的 `<<` 讓檢查一路遞迴到深度上限，結果是
 「解不開、拒絕」，不是放行。補正的測試已寫好但沒有落地（修法未完成），留待下一輪。
 
@@ -1150,7 +1150,8 @@ here, `. -p ./d envx.sh; rm -rf ~/etc`, is not itself a fail-open in any shell m
 `HOME=/tmp` or a sourced assignment, printf still shows the old home for `~/etc` (on the same `-c`
 line, on the next line, in a script file and through `eval`), and only `$HOME` changes -- while
 3.2, zsh and sh reject `. -p`. The shell behaviour was measured with printf only.
-Accepted over-refusal (fails closed): a `<<` inside quotes is read as a heredoc opener, so
+Accepted over-refusal (fails closed): a `<<` inside quotes or inside a heredoc body (e.g.
+`std::cout << x;`) is read as a heredoc opener, so
 `python3 -c 'print(1 << 3)'; rm -rf "$TMPDIR/x"` is refused on this branch (ALLOW at 41878e9).
 Accepted over-refusal (fails closed): a `. ` at command position inside quoted data or a heredoc
 body -- the dot walk reads a quoted word that holds more than one word, and each heredoc body, again
@@ -1171,3 +1172,33 @@ or `bash -O extglob`), printf shows bash 5.3.20 handing over `dist/.git/objects`
 `shopt -s extglob; rm -rf dist/@(x|.git)/objects` is a syntax error in both (the line is parsed
 before shopt runs), and the hook ALLOWs it as well.
 
+**七、極大輸入約 2 秒（已知成本，仍拒絕）。** 第四輪驗收的 S1／S4／S7：一段 256 個反斜線，後接約 1.6 MB
+重複的引號字。本分支 2.0–2.2 秒，41878e9 約 124–130 毫秒，判決都是 DENY。成本來自第三輪（902b706）對解碼副本
+的走訪，隨長度線性，低於 5 秒的 hook 逾時。
+
+**八、rm 操作元的大括號展開仍是遞迴（OPEN，僅記錄）。** `protectedSpelling()`（經由 `protectedReason()`）對含
+glob 或大括號的操作元呼叫遞迴的 `expandBraces()`，41878e9 就是如此：6,000–20,000 個 `{a,b}` 群組的操作元在
+41878e9 與本分支都以 exit 2（「Invalid hook input; tool call denied」）結束。本分支的 de0292d（BRM-ab-03）另外讓
+`targetFromWord()` 對同時含 `{` 與 `~` 的字呼叫它。第四輪之前，點命令檢查走同一種遞迴時，一個約 1.1 MB 的大括號字
+曾讓 V8 耗盡 heap、以 SIGABRT 結束，不是 exit 2；rm 操作元路徑會不會走到同一種中止，沒有探測。exit 2 會擋下工具
+呼叫，是 hook 註解與 Claude Code hooks 文件的說法；Codex 如何處理 exit 2、兩者如何處理被訊號殺掉的 hook，都沒有實測。
+
+**九、其他已知但未處理的邊界（OPEN，僅記錄）。** (1) `tool_input` 是陣列時，`command` 讀成空字串而放行
+（2026-09-25 以 stdin 實測：本分支無輸出、rc 0）。Claude Code 送的是物件；Codex 的輸入 schema 對 `tool_input`
+不限型別，這次沒有看到任何 live 來源送陣列。(2) bash 的序列展開 `{x..y}` 沒有建模，也沒有探測。(3) 命令位置的
+`{x,.}` 會關掉 `$HOME`／`$PWD`／`$TMPDIR` 的解析（實際執行的是 `x`），是小的誤擋。
+
+Known cost: S1/S4/S7 of the round-4 validation -- one 256-backslash run followed by about 1.6 MB
+of repeated quoted words -- take 2.0-2.2 s on this branch and about 124-130 ms at 41878e9, still
+DENY; the cost is round 3's linear walk over decoded copies (902b706), below the 5 s hook timeout.
+OPEN, recorded: protectedSpelling() (via protectedReason()) still expands rm-operand braces with
+the recursive expandBraces(), as at 41878e9 -- 6,000-20,000 `{a,b}`-group operands exit 2 there
+and on this branch; de0292d (BRM-ab-03) added a second caller, targetFromWord(), for words holding
+both `{` and `~`. Before round 4 a ~1.1 MB brace word on the dot-command path exhausted the V8 heap
+and died of SIGABRT rather than exit 2; whether rm operands can reach that abort is unprobed. That
+exit 2 blocks the tool call is what the hook comments and the Claude Code hooks documentation say;
+how Codex handles exit 2, and how either handles a hook killed by a signal, is untested. Also OPEN:
+a `tool_input` that is an array reads as an empty command and is ALLOW (measured through stdin);
+Claude Code sends an object, Codex's input schema does not constrain the type, and no live producer
+was seen sending an array. `{x..y}` sequence expressions are not modelled or probed. `{x,.}` at
+command position turns off `$HOME`/`$PWD`/`$TMPDIR` resolution although it runs `x`.
