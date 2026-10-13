@@ -1150,6 +1150,27 @@ const staleDeclarations = corpus
     && row.hook === declared.hook && row.cli === declared.cli));
 const emptyClasses = crossLayerClasses.filter((cls) => !corpus.some((row) => row.crossLayerClass === cls
   && row.hook === cls.hook && row.cli === cls.cli));
+// The stale check above sees only the rows a class still claims. A class's
+// mechanism begins with "the hook refuses it", so a member the HOOK stops
+// refusing leaves the class in silence: both guards now agree, nothing claims
+// the row, nothing is stale, and of the checks above only an empty class would
+// fail. Measured (2026-10-14, as the 2026-10-13 review found): with the hook's
+// exact-directory glob rule removed (H-ps-globexact) the hook stops refusing
+// `$SANDBOX/*`, the member table goes from 7 rows to 6, and this file as it
+// stood before the check below exited 0 with 1084 checks instead of 1085. The
+// shell-layer group exists for the spellings only one layer sees, so an 'agree'
+// row of that group that no class claims and on which both guards agree has
+// converged, and it is named here. A row better-rm started refusing is still
+// claimed and is reported as stale above.
+// 上面的「過期」檢查只看得到仍被類認領的列。類的判準以「hook 拒絕它」開頭，所以 hook
+// 不再拒絕的成員會無聲地離開類：兩道守衛變成一致、沒有類認領、不算過期，上面的檢查裡只有
+// 類變空才會失敗。實測（2026-10-14，與 2026-10-13 的審查相同）：拿掉 hook 的完全比對樣式
+// 規則（H-ps-globexact）後，hook 不再拒絕 `$SANDBOX/*`，成員表從 7 列變 6 列，加上下面這項
+// 檢查之前的本檔案 exit 0、檢查數 1084 而不是 1085。shell-layer 這一組就是「只有一層看得到」
+// 的拼寫，所以這一組裡沒有類認領、兩邊又一致的 'agree' 列就是收斂了，在這裡指名。better-rm
+// 開始拒絕的那種仍會被認領，由上面的「過期」回報。
+const shellLayerAgreeRows = corpus.filter((row) => row.group === 'shell-layer' && row.expect === 'agree');
+const silentlyConverged = shellLayerAgreeRows.filter((row) => !row.crossLayerClass && row.hook === row.cli);
 
 // The corpus header belongs with whichever report is being produced. Splitting
 // it across stdout and stderr let the two streams interleave differently on
@@ -1213,15 +1234,28 @@ function declaredReport() {
 }
 
 if (undeclaredDivergences.length === 0 && staleDeclarations.length === 0
-  && emptyClasses.length === 0 && expectationFailures.length === 0) {
+  && emptyClasses.length === 0 && expectationFailures.length === 0
+  && silentlyConverged.length === 0) {
   console.log(header);
   console.log(declaredReport());
   const declaredMembers = corpus.filter((row) => row.crossLayerClass).length;
-  console.log(`Guard parity 測試通過 / Guard parity checks passed: ${corpus.length * 2 + declaredMembers}`);
+  console.log(`Guard parity 測試通過 / Guard parity checks passed: ${corpus.length * 2 + declaredMembers + shellLayerAgreeRows.length}`);
   process.exit(0);
 }
 
 console.error(header);
+
+if (silentlyConverged.length > 0) {
+  console.error('');
+  console.error(`跨層差異無聲收斂 / ${silentlyConverged.length} shell-layer spellings no longer differ between the layers, and no class claims them:`);
+  console.error(table(silentlyConverged, [
+    { header: 'hook', value: (row) => row.hook },
+    { header: 'better-rm', value: (row) => row.cli },
+    { header: 'path', value: (row) => display(row.spelling) + (row.note ? `  (${row.note})` : '') },
+  ]));
+  console.error('兩邊都 ALLOW 表示 hook 不再拒絕它（危險的方向）；若收斂是對的，就把這一列改成 allow 或 deny。');
+  console.error('Both ALLOW means the hook stopped refusing it, the dangerous direction; if the convergence is right, make the row an allow or deny row.');
+}
 
 if (emptyClasses.length > 0) {
   console.error('');
