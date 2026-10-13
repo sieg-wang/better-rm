@@ -5254,6 +5254,46 @@ process.exit(1);
   hookShapeChecks += 1;
 }
 
+// A loop condition that a comment in the hook quotes as code has to be one the
+// code has. From 2026-09-05, when r5-fix-better-rm-6 (2ee9bf0) moved
+// envArgvAfter and the walk below it to operatorAt(), the comment above that
+// envArgvAfter still quoted the walk with `separators.has(...)`, still said
+// `rm -rf ';' /etc` was allowed, and still called the gap an open finding --
+// three statements the code and KNOWN-RESIDUALS.md R5-f ("Closed 2026-09-05")
+// contradict, written where a reviewer looks first. A second envArgvAfter,
+// added inside resolveExecutable() by 0e2567b on 2026-09-25, read operatorAt()
+// from the start; the stale comment stayed on the first.
+// The detector is run on a sample first, so a detector that finds nothing
+// cannot pass this by reading nothing.
+// hook 註解裡當成程式碼引用的迴圈條件，必須是程式碼裡真的有的。r5-fix-better-rm-6（2ee9bf0）
+// 在 2026-09-05 把 envArgvAfter 與它下面的走訪改成 operatorAt() 之後，那份 envArgvAfter
+// 上方的註解仍引用 `separators.has(...)` 版的走訪、仍說 `rm -rf ';' /etc` 被放行、仍說這是
+// 一個未修的 finding——三句話都與程式碼及 KNOWN-RESIDUALS.md R5-f（2026-09-05 已關閉）矛盾。
+// 第二份 envArgvAfter 是 0e2567b 在 2026-09-25 加進 resolveExecutable() 的，一開始就讀
+// operatorAt()；過期的註解一直留在第一份上。
+// 偵測器先跑一個樣本，免得「什麼都沒讀到」也算通過。
+{
+  const isComment = (line) => /^\s*\/\//.test(line);
+  const collapse = (text) => text.replace(/\s+/g, ' ').trim();
+  const staleLoopQuotes = (source) => {
+    const lines = source.split('\n');
+    const commentText = collapse(lines.filter(isComment)
+      .map((line) => line.replace(/^\s*\/\/\s?/, '')).join(' '));
+    const codeText = collapse(lines.filter((line) => !isComment(line)).join(' '));
+    return [...commentText.matchAll(/`((?:while|for) \([^`]*)`/g)]
+      .map((match) => collapse(match[1]))
+      .filter((condition) => !codeText.includes(condition));
+  };
+  assert.deepStrictEqual(
+    staleLoopQuotes('// the walk (`while (i < n &&\n// !done(i))`) stops here\nwhile (i < n && !next(i)) i += 1;\n'),
+    ['while (i < n && !done(i))'],
+    'the stale-quote detector must find a quoted loop condition the code does not have');
+  const stale = staleLoopQuotes(fs.readFileSync(`${__dirname}/hooks/protect-important-paths.js`, 'utf8'));
+  assert.deepStrictEqual(stale, [],
+    `a comment in the hook quotes a loop condition the code does not have: ${stale.join(' | ')}`);
+  hookShapeChecks += 1;
+}
+
 // ---------------------------------------------------------------------------
 // What the FILESYSTEM says the argument names.
 //

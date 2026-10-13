@@ -3733,31 +3733,6 @@ function commandTargetsScanOneReading(
       .join(' ');
     targets.push(...nestedScan(asEnvArgv, depth + 1, false, expansionEnv));
   };
-  // The words that follow the `-S` option, up to the end of this simple command.
-  // `separators` alone is what the enclosing walk (`while (i < words.length &&
-  // !separators.has(words[i]))` just below) and both rm operand scans use to
-  // decide where a simple command ends, so this stops exactly where they do.
-  // That shared rule treats a QUOTED separator-shaped word as a separator too,
-  // which is a real pre-existing gap -- `rm -rf ';' /etc` yields no targets and
-  // is ALLOWED with no env(1) involved at all -- but it is one property of the
-  // whole gate, not of this reconstruction, and reading `operatorTokens` here
-  // alone would fork the convention without closing anything: the operand scan
-  // truncates on the same word a moment later. Measured: making this site read
-  // `operatorTokens` changes no row of the 47-row env probe and no row of the
-  // 823-row corpus. Reported as a finding instead of patched here.
-  // 跟在 `-S` 選項後面、到這條簡單命令結束為止的那些字。外層走訪（緊接在下面那句
-  // `while (i < words.length && !separators.has(words[i]))`）與兩處 rm 操作元掃描，判斷
-  // 簡單命令在哪裡結束用的都是 `separators` 本身，所以這裡停的位置與它們完全一致。那條共用
-  // 規則會把「加了引號、長得像分隔符」的字也當成分隔符，這確實是既有的缺口——`rm -rf ';'
-  // /etc` 掃不出任何目標、而且完全沒有 env(1) 也一樣被放行——但那是整道閘門的性質，不是這段
-  // 重組的性質；只在這裡改讀 `operatorTokens` 會分岔慣例卻關不掉任何東西：操作元掃描下一步
-  // 就會在同一個字上截斷。實測：這一處改讀 `operatorTokens`，47 列 env 探針與 823 列語料
-  // 都沒有任何一列改變。因此列為 finding 回報，不在這裡就地修補。
-  const envArgvAfter = (from) => {
-    const rest = [];
-    for (let k = from; k < words.length && !operatorAt(k, separators); k += 1) rest.push(words[k]);
-    return rest;
-  };
   let carrierPresent = bodiesAreCodeFromCaller;
   if (!carrierPresent) {
     let atCommandPosition = true;
@@ -3960,6 +3935,18 @@ function commandTargetsScanOneReading(
     // 刻意遮蔽：下面的走訪原本寫給原始字流，原封不動地讀；從這裡起「字流」就是 argv 投影。
     const words = argv.words;
     const operatorAt = (index, set) => argv.operatorTokens[index] === true && set.has(words[index]);
+    // The words that follow env's `-S` option, up to the end of this simple
+    // command. They stop where operatorAt() says the command ends, as the walk
+    // below and the rm operand scans do since r5-fix-better-rm-6
+    // (KNOWN-RESIDUALS.md R5-f, closed 2026-09-05): a QUOTED separator-shaped
+    // word, such as the `';'` in `env -S 'rm' ';' -rf /etc`, is an ordinary word
+    // of env's argv, so it is carried into the reconstruction and the `/etc`
+    // after it is judged.
+    // 跟在 env 的 `-S` 選項後面、到這條簡單命令結束為止的那些字。停在 operatorAt() 判定
+    // 命令結束的地方——自 r5-fix-better-rm-6（KNOWN-RESIDUALS.md R5-f，2026-09-05 已關閉）
+    // 起，下面的走訪與 rm 操作元掃描也都這樣停：加了引號、長得像分隔符的字（例如
+    // `env -S 'rm' ';' -rf /etc` 裡的 `';'`）是 env argv 的普通字，所以會被帶進重組，它後面
+    // 的 `/etc` 也就會被判定。
     const envArgvAfter = (from) => {
       const rest = [];
       for (let k = from; k < words.length && !operatorAt(k, separators); k += 1) rest.push(words[k]);
