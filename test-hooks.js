@@ -3733,6 +3733,86 @@ for (const badInput of ['not-json{', '', '{"tool_input":']) {
   errorPathChecks += 1;
 }
 
+// A stdin that FAILS mid-read has to fail closed too, and the loop above cannot
+// deliver one: spawnSync writes its input and then ends the pipe cleanly. The
+// hook's read sat outside main()'s try, so a stream error rejected main()'s
+// promise with nothing to catch it, and node ends an unhandled rejection with
+// exit 1 -- the non-blocking status, so the tool call would run. A loopback TCP
+// connection that is reset (ECONNRESET) is a stdin that really errors. The bytes
+// are the third bad input above. Measured on 0cb283e over this same kind of
+// connection: exit 1 after a reset, exit 2 after a clean end of the same bytes.
+// Async, so it runs from the chain at the end of this file.
+// stdin 讀到一半「出錯」也必須失敗關閉，而上面那個迴圈送不出這種輸入：spawnSync 寫完輸入
+// 就乾淨地關上 pipe。hook 的讀取原本在 main() 的 try 外面，串流錯誤讓 main() 的 promise
+// reject 卻沒人接，node 對未處理的 rejection 以 1 結束——非阻擋，工具照跑。被重設的
+// loopback TCP 連線（ECONNRESET）就是一個真的會出錯的 stdin。位元組與上面第三個壞輸入相
+// 同。0cb283e 上以同一種連線實測：重設後 exit 1，同樣位元組乾淨結束則 exit 2。
+// 這是 async，從檔案最後的串接呼叫。
+async function runStdinStreamErrorChecks() {
+  const net = require('net');
+  const { spawn } = require('child_process');
+  const hookOverResetConnection = (bytes) => new Promise((resolve, reject) => {
+    const server = net.createServer();
+    let client = null;
+    let child = null;
+    let accepted = null;
+    // Bounded: a hook still running after 10 s fails this row instead of hanging
+    // the suite, and the process killed is the one spawned here.
+    // 有上限：10 秒後仍未結束的 hook 讓這一列失敗而不是卡住整套；殺的是這裡自己 spawn 的那個行程。
+    const guard = setTimeout(() => {
+      if (child) child.kill('SIGKILL');
+      server.close();
+      reject(new Error('the hook did not exit within 10 s of its stdin being reset'));
+    }, 10000);
+    const start = () => {
+      child = spawn(process.execPath, [`${__dirname}/hooks/protect-important-paths.js`], {
+        stdio: [client, 'ignore', 'pipe'],
+        env: { ...process.env, ...env },
+      });
+      // The child holds its own copy of the descriptor. Dropping this process's
+      // handle leaves the hook as the only reader, so it is the hook that
+      // receives the reset.
+      // 子行程持有自己的那份描述子；放掉本行程的 handle，讀者就只剩 hook，重設由它接到。
+      client.destroy();
+      let stderr = '';
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (data) => { stderr += data; });
+      child.on('close', (status) => {
+        clearTimeout(guard);
+        resolve({ status, stderr });
+      });
+      accepted.write(bytes, () => setTimeout(() => accepted.resetAndDestroy(), 200));
+    };
+    server.on('error', (error) => {
+      clearTimeout(guard);
+      reject(error);
+    });
+    server.once('connection', (socket) => {
+      server.close();
+      accepted = socket;
+      accepted.on('error', () => {});
+      if (client.connecting) client.once('connect', start);
+      else start();
+    });
+    server.listen(0, '127.0.0.1', () => {
+      client = net.connect(server.address().port, '127.0.0.1');
+      client.on('error', () => {});
+    });
+  });
+
+  const { status, stderr } = await hookOverResetConnection('{"tool_input":');
+  assert.equal(status, 2,
+    `a stdin that errors mid-read must exit 2 (blocking), got ${status}: ${stderr.split('\n')[0]}`);
+  // ECONNRESET in the message is what shows the reset reached the hook as a
+  // stream error: a hook that saw a clean end instead would also exit 2, with
+  // "Unexpected end of JSON input", and this row would have tested nothing.
+  // 訊息裡有 ECONNRESET，才證明重設是以串流錯誤到達 hook；若 hook 看到的是乾淨結束，
+  // 它同樣 exit 2（訊息是 JSON 不完整），這一列就什麼都沒測到。
+  assert.match(stderr, /Invalid hook input; tool call denied: .*ECONNRESET/,
+    `the refusal must name the stream error: ${stderr.split('\n')[0]}`);
+  return 1;
+}
+
 // A command word that only exists after expansion (`CMD=rm; $CMD -rf /`) is
 // still `rm` when the shell runs it, so the hook must fail closed on it. These
 // run through the real stdin JSON contract, because that is the seam every
@@ -7526,14 +7606,16 @@ for (const [name] of PINNED_TIMING_COUNTERS) {
 }
 let timingInventoryChecks = PINNED_TIMING_COUNTERS.length * 2 + 3;
 
-// The plugin handler is async, so its checks cannot run before the summary is
-// printed the way every check above does. Exit non-zero until they finish:
-// a file that exited 0 without having run them would look green.
-// 外掛 handler 是 async，無法在總結列印前完成，因此先設為失敗，跑完才清為 0——
-// 否則「沒跑到」會看起來是綠的。
+// The plugin handler and the stdin stream-error check are async, so they cannot
+// run before the summary is printed the way the synchronous checks above do.
+// Exit non-zero until they finish: a file that exited 0 without having run them
+// would look green.
+// 外掛 handler 與 stdin 串流錯誤檢查是 async，無法在總結列印前完成，因此先設為失敗，
+// 跑完才清為 0——否則「沒跑到」會看起來是綠的。
 process.exitCode = 1;
-runOpenCodePluginChecks().then((pluginChecks) => {
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks}`);
+runOpenCodePluginChecks().then(async (pluginChecks) => {
+  const stdinStreamChecks = await runStdinStreamErrorChecks();
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + stdinStreamChecks}`);
   process.exitCode = 0;
 }).catch((error) => {
   console.error(error && error.stack ? error.stack : error);

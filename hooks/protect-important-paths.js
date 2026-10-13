@@ -6635,8 +6635,15 @@ function evaluate(payload, env = process.env) {
 
 async function main() {
   let input = '';
-  for await (const chunk of process.stdin) input += chunk;
   try {
+    // The read is inside the try because a stdin that errors mid-read (a reset
+    // connection: ECONNRESET) rejects this loop. Outside the try nothing caught
+    // that rejection, and node ends an unhandled one with exit 1 -- the
+    // non-blocking status described below, so the tool call ran.
+    // 讀取放在 try 裡：stdin 讀到一半出錯（連線被重設：ECONNRESET）會讓這個迴圈 reject。
+    // 放在 try 外面時沒人接住它，node 對未處理的 rejection 以 1 結束——就是下面說的非阻擋
+    // 狀態，工具呼叫照樣執行。
+    for await (const chunk of process.stdin) input += chunk;
     const result = evaluate(JSON.parse(input.replace(/^\uFEFF/, '')));
     if (result) process.stdout.write(JSON.stringify(result));
   } catch (error) {
