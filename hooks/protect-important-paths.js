@@ -6643,6 +6643,15 @@ async function main() {
     // 讀取放在 try 裡：stdin 讀到一半出錯（連線被重設：ECONNRESET）會讓這個迴圈 reject。
     // 放在 try 外面時沒人接住它，node 對未處理的 rejection 以 1 結束——就是下面說的非阻擋
     // 狀態，工具呼叫照樣執行。
+    // setEncoding gives the loop text from one decoder, which carries a
+    // character's leading bytes over into the next piece. `input += chunk`
+    // decoded each piece on its own, so a multibyte character split between two
+    // pieces became replacement characters and the hook judged a path the shell
+    // will not run: a declared non-ASCII directory was allowed.
+    // setEncoding 讓迴圈拿到同一個解碼器的輸出，被切開的字元前半段會接到下一塊。原本
+    // `input += chunk` 每一塊各自解碼，跨兩塊的多位元組字元變成替代字元，hook 判的是 shell
+    // 不會執行的路徑：宣告的非 ASCII 目錄因此被放行。
+    process.stdin.setEncoding('utf8');
     for await (const chunk of process.stdin) input += chunk;
     const result = evaluate(JSON.parse(input.replace(/^\uFEFF/, '')));
     if (result) process.stdout.write(JSON.stringify(result));

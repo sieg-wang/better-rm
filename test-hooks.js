@@ -5446,6 +5446,70 @@ withScratchDir('better-rm-hook-resolve-', (scratchDir) => {
     allows(nfdSpelling, 'a normalisation-sensitive filesystem: the NFD spelling is a different path');
   }
 
+  // The declared NFC directory again, through the stdin contract, with its
+  // accented character placed across a boundary where node hands the hook its
+  // input in pieces. main() decoded each piece on its own (`input += chunk`), so
+  // a character split across two pieces became two U+FFFD, the JSON still
+  // parsed, and the hook judged a path nobody named: it matched nothing declared
+  // and was ALLOWED, while the shell would remove the declared directory.
+  // Measured on this Mac through spawnSync's input: the first piece is 65,536
+  // bytes (30 of 30 runs) and the second boundary is at 131,072 (20 of 20). The
+  // padding is JSON whitespace outside the value, so the command is the same
+  // string the row above judges. The two controls keep the verdict with no
+  // padding, and with the character moved to the middle of the first piece and
+  // 128 KiB of padding after the payload, so the size of the payload is not
+  // what is being tested.
+  // 同一個以 NFC 宣告的目錄，改走 stdin 契約，並把它的重音字元放在 node 把輸入切塊交給
+  // hook 的邊界上。main() 原本每一塊各自解碼（`input += chunk`），跨兩塊的字元變成兩個
+  // U+FFFD，JSON 照樣解析得過，hook 判的是一個沒人寫過的路徑：它不符合任何宣告而被放行，
+  // shell 卻會刪掉那個宣告的目錄。本機以 spawnSync 的 input 實測：第一塊 65,536 bytes
+  // （30 次中 30 次），第二個邊界在 131,072（20 次中 20 次）。填充是值之外的 JSON 空白，
+  // 命令與上面那一列判的是同一個字串。兩個對照組（不填充；以及把字元移到第一塊中間、
+  // payload 後面再填 128 KiB）判定不變，證明測的不是 payload 的大小。
+  {
+    const accented = [...unicodeFixture].find((character) => character.codePointAt(0) > 0x7f);
+    const accentedBytes = Buffer.from(accented, 'utf8');
+    assert.equal(accentedBytes.length, 2, 'the fixture\'s accented character takes two bytes in UTF-8');
+    const payloadBytes = Buffer.from(JSON.stringify({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: rmOf(unicodeFixture) },
+      cwd: box,
+    }), 'utf8');
+    const at = payloadBytes.indexOf(accentedBytes);
+    assert.ok(at > 0, 'the payload carries the fixture\'s accented character');
+    const PIECE = 65536;
+    const stdinVerdict = (leading, trailing, prefix = Buffer.alloc(0)) => {
+      const child = spawnSync('node', [`${__dirname}/hooks/protect-important-paths.js`], {
+        input: Buffer.concat([
+          prefix, Buffer.alloc(leading, 0x20), payloadBytes, Buffer.alloc(trailing, 0x20),
+        ]),
+        encoding: 'utf8',
+        env: { ...process.env, ...boxEnv },
+      });
+      assert.equal(child.status, 0, `the hook exits 0 (leading padding ${leading}): ${child.stderr}`);
+      return /"permissionDecision":"deny"/.test(child.stdout) ? 'DENY' : 'ALLOW';
+    };
+    for (const [leading, trailing, why] of [
+      [0, 0, 'unpadded'],
+      [PIECE / 2 - at, 2 * PIECE, 'the character in the middle of the first piece, 128 KiB of padding after the payload'],
+      [PIECE - 1 - at, 0, 'the character split across the 65,536-byte boundary'],
+      [2 * PIECE - 1 - at, 0, 'the character split across the 131,072-byte boundary'],
+    ]) {
+      assert.equal(stdinVerdict(leading, trailing), 'DENY',
+        `the declared directory through stdin, ${why}: ${unicodeFixture}`);
+      resolutionChecks += 1;
+    }
+    // The same payload behind a UTF-8 byte-order mark. main() strips the mark
+    // after decoding, so whatever decodes stdin has to hand it over as text
+    // rather than drop or mangle it; without the strip JSON.parse rejects it.
+    // 同一個 payload 前面加上 UTF-8 BOM。main() 在解碼之後才去掉它，所以解碼 stdin 的那一層
+    // 必須把它原樣交出來；少了那一步，JSON.parse 會拒絕它。
+    assert.equal(stdinVerdict(0, 0, Buffer.from([0xef, 0xbb, 0xbf])), 'DENY',
+      `the declared directory through stdin, behind a byte-order mark: ${unicodeFixture}`);
+    resolutionChecks += 1;
+  }
+
   // A path that does not exist has to be judged exactly as it was before this
   // hook could see anything. That is the whole reason it was filesystem-free:
   // an inode needs the path to exist, and a home directory that has not been
