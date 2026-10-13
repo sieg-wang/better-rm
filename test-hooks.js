@@ -5226,6 +5226,34 @@ process.exit(1);
   hookShapeChecks += 1;
 });
 
+// Each name the hook exports has a reader in this repository: one of the three
+// node suites or one of the two TypeScript hooks. An export nothing reads is dead
+// or has outlived its consumer, and its comment then sends the next reader to a
+// rule that no longer runs. One stood for two months after 952582a deleted both
+// of its callers, under a comment naming test-guard-parity.js as its consumer,
+// and a 2026-09-25 review record listed it among the expandBraces() calls on
+// rm-target paths.
+// A mention anywhere in a reader counts, comments included, so this can miss a
+// dead export that some comment still names; it cannot fail a live one.
+// hook 匯出的每個名字，在本 repo 裡都要有讀者：三套 node 測試之一，或兩支 TypeScript hook
+// 之一。沒人讀的匯出要嘛是死碼、要嘛它的使用者已經不在，而它的註解會把下一個讀者帶到一條
+// 早就不跑的規則上。952582a 刪掉某個函式的兩個呼叫端之後，它照樣匯出了兩個月，註解還說
+// test-guard-parity.js 在用它，2026-09-25 的一份審查紀錄還把它列為「rm 目標路徑上的
+// expandBraces() 呼叫」之一。
+// 讀者裡任何地方提到都算（含註解），所以註解仍提到的死匯出這裡抓不到；活的匯出則不會誤報。
+{
+  const readerFiles = ['test-hooks.js', 'test-guard-parity.js', 'test-wrapper-model.js',
+    '.opencode/plugins/protect-important-paths.ts', '.omp/hooks/pre/protect-important-paths.ts'];
+  const readers = readerFiles.map((file) => fs.readFileSync(`${__dirname}/${file}`, 'utf8'));
+  const exported = Object.keys(require('./hooks/protect-important-paths'));
+  assert.ok(exported.includes('evaluate'), 'the export list was read from the hook module');
+  const unread = exported.filter((name) => !readers.some(
+    (source) => new RegExp(`\\b${name}\\b`).test(source)));
+  assert.deepStrictEqual(unread, [],
+    `the hook exports names that nothing in ${readerFiles.join(', ')} reads: ${unread.join(', ')}`);
+  hookShapeChecks += 1;
+}
+
 // ---------------------------------------------------------------------------
 // What the FILESYSTEM says the argument names.
 //

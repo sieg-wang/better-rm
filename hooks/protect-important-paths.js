@@ -2634,17 +2634,6 @@ function hasGlob(value) {
   return /[*?[\]{}]/.test(value) || /[!?*+@]\(/.test(value);
 }
 
-// Kept as its own name because test-guard-parity.js asks the hook this exact
-// question when it classifies a declared cross-layer difference.
-function globCanMatchGit(value) {
-  const basename = value.slice(value.lastIndexOf('/') + 1);
-  if (!hasGlob(basename)) return false;
-  const expansion = expandBraces(basename);
-  // A truncated expansion has words this never saw; one of them could be .git.
-  if (expansion.truncated) return true;
-  return expansion.patterns.some((pattern) => globMatchesPath(pattern, '.git'));
-}
-
 // Today's rules, asked of ONE already-normalised spelling. Split out of
 // protectedReason() so the same rules can be asked of the spelling as written
 // and of what the filesystem says it is, without either being a second copy.
@@ -6665,4 +6654,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, braceWordCanBeADotCommand, commandSubstitutions, commandTargets, evaluate, execWrappers, expandBraces, globCanMatchGit, hasGlob, normalizedTarget, protectedReason, shellCarriers, shellWords, wrapperCommands };
+module.exports = { HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, braceWordCanBeADotCommand, commandSubstitutions, commandTargets, evaluate, execWrappers, expandBraces, hasGlob, normalizedTarget, protectedReason, shellCarriers, shellWords, wrapperCommands };
