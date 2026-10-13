@@ -137,6 +137,42 @@ process.stdout.write(String(count));
 NODE
 }
 
+# hook_descriptor_field <settings> <agent> <field>：印出這支安裝程式替 <agent> 寫的那一筆
+# better-rm hook 的某個欄位（不存在印 (absent)；筆數不是 1 就印筆數）。
+# hook_descriptor_field <settings> <agent> <field>: print one field of the better-rm
+# hook entry this installer wrote for <agent> ("(absent)" when it is missing, and
+# the entry count when there is not exactly one).
+hook_descriptor_field() {
+    node - "$1" "$2" "$3" <<'NODE'
+const fs = require('fs');
+const settings = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const agent = process.argv[3];
+const field = process.argv[4];
+const ours = (command) => typeof command === 'string' && command.includes('protect-important-paths.js');
+const entries = [];
+if (agent === 'cursor') {
+  for (const hook of settings?.hooks?.beforeShellExecution ?? []) if (ours(hook?.command)) entries.push(hook);
+} else if (agent === 'copilot') {
+  for (const entry of settings?.hooks?.preToolUse ?? []) {
+    if (ours(entry?.bash) || ours(entry?.powershell)) entries.push(entry);
+  }
+} else {
+  const preToolUse = agent === 'antigravity'
+    ? settings?.hooks?.['better-rm-protection']?.PreToolUse
+    : settings?.hooks?.PreToolUse;
+  for (const entry of preToolUse ?? []) {
+    for (const hook of entry?.hooks ?? []) if (ours(hook?.command)) entries.push(hook);
+  }
+}
+if (entries.length !== 1) {
+  process.stdout.write(`(${entries.length} entries)`);
+} else {
+  const value = entries[0][field];
+  process.stdout.write(value === undefined ? '(absent)' : String(value));
+}
+NODE
+}
+
 file_mode() {
     node -e 'process.stdout.write((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$1"
 }
@@ -214,9 +250,47 @@ for agent in claude codex cursor copilot antigravity qoder pi grok; do
     )
     assert_equal "matrix ${agent} install is idempotent" "$AGENT_HASH_BEFORE" "$(file_hash "$AGENT_SETTINGS")"
 
-    # Non-Claude agents should reject --global
+    # 安裝程式寫進註冊內容的欄位，逐一 agent 釘住。2026-10-13 的審查把 claude 的
+    # `timeout: 5`（claude、codex、pi 共用這份描述）、copilot 的 `timeoutSec: 5`、cursor 的
+    # `matcher: '.*'` 輪流拿掉，安裝程式這套仍綠。5 秒是 agent 對每次 hook 呼叫設的上限，
+    # hook 自己的時間預算就是對著它量的（見 JUDGING_BUDGET_MS 的註解）；少了這個欄位，agent
+    # 就用它自己的預設值。Qoder 的描述本來就沒有 timeout 欄位，所以不釘。
+    # The fields the installer writes into each registration, pinned per agent.
+    # The 2026-10-13 review removed claude's `timeout: 5` (the descriptor claude,
+    # codex and pi share), copilot's `timeoutSec: 5` and cursor's `matcher: '.*'`
+    # one at a time, and this suite stayed green. The 5 s is the limit the agent
+    # puts on each hook call, the one the hook's own time budgets are measured
+    # against (see JUDGING_BUDGET_MS's comment); without the field the agent
+    # falls back to its own default. Qoder's descriptor has no timeout field, so
+    # none is pinned for it.
+    case "$agent" in
+        cursor)
+            assert_equal "matrix cursor hook keeps matcher .*" ".*" \
+                "$(hook_descriptor_field "$AGENT_SETTINGS" cursor matcher)" ;;
+        copilot)
+            assert_equal "matrix copilot hook keeps timeoutSec 5" "5" \
+                "$(hook_descriptor_field "$AGENT_SETTINGS" copilot timeoutSec)" ;;
+        qoder) ;;
+        *)
+            assert_equal "matrix ${agent} hook keeps timeout 5" "5" \
+                "$(hook_descriptor_field "$AGENT_SETTINGS" "$agent" timeout)" ;;
+    esac
+
+    # claude 以外的 agent 必須「自己」拒絕 --global（exit 2，訊息指名這個旗標）。這一列原本
+    # 在 $TMP_ROOT 跑，那裡不是 repository，所以不管有沒有那個拒絕，resolve_project_root 都會
+    # exit 1，這一列兩種情況都通過（審查的 X-codex-global 拿掉 codex 的拒絕：仍綠）。改在該
+    # agent 的專案裡跑，少了拒絕就會以專案範圍安裝並 exit 0。
+    # Agents other than claude must refuse --global THEMSELVES (exit 2, naming the
+    # flag). This row used to run from $TMP_ROOT, which is not a repository, so
+    # resolve_project_root exited 1 with or without the refusal and the row passed
+    # either way (the review's X-codex-global removed codex's refusal: still green).
+    # From inside the agent's project, a missing refusal installs at project scope
+    # and exits 0.
     if [ "$agent" != "claude" ]; then
-        assert_failure "matrix ${agent} rejects global" bash -c "cd '$TMP_ROOT' && '$INSTALLER' -a '$agent' --global"
+        GLOBAL_STATUS=0
+        GLOBAL_OUTPUT=$(cd "$AGENT_PROJECT" && "$INSTALLER" -a "$agent" --global 2>&1) || GLOBAL_STATUS=$?
+        assert_equal "matrix ${agent} rejects global as a usage error" "2" "$GLOBAL_STATUS"
+        assert_contains "matrix ${agent} refusal names --global" "$GLOBAL_OUTPUT" "does not support --global"
     fi
 done
 
@@ -244,8 +318,13 @@ assert_contains "opencode plugin references project-local runtime" "$(cat "$OPEN
 assert_equal "opencode plugin hash is idempotent" "$OPENCODE_PLUGIN_HASH_BEFORE" "$(file_hash "$OPENCODE_PLUGIN")"
 assert_equal "opencode runtime hash is idempotent" "$OPENCODE_RUNTIME_HASH_BEFORE" "$(file_hash "$OPENCODE_RUNTIME")"
 
-# OpenCode should also reject project-level global install flag.
-assert_failure "opencode rejects global" bash -c "cd '$TMP_ROOT' && '$INSTALLER' -a opencode --global"
+# OpenCode should also reject project-level global install flag. Run from inside
+# its project, for the reason given in the matrix above.
+# OpenCode 也必須自己拒絕 --global；在它的專案裡跑，理由同上面的矩陣。
+OPENCODE_GLOBAL_STATUS=0
+OPENCODE_GLOBAL_OUTPUT=$(cd "$OPENCODE_PROJECT" && "$INSTALLER" -a opencode --global 2>&1) || OPENCODE_GLOBAL_STATUS=$?
+assert_equal "opencode rejects global as a usage error" "2" "$OPENCODE_GLOBAL_STATUS"
+assert_contains "opencode refusal names --global" "$OPENCODE_GLOBAL_OUTPUT" "does not support --global"
 
 # OpenCode must reject dangling symbolic links before copying plugin or runtime files.
 OPENCODE_PLUGIN_SYMLINK_REPO="$TMP_ROOT/opencode-plugin-symlink-project"
