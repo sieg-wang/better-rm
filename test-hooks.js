@@ -3996,6 +3996,68 @@ for (const [label, payload, read] of [
   stdinChecks += 1;
 }
 
+// The rest of extractInput()'s edge, through the same stdin contract. Three of
+// its clauses were pinned by no row: (a) a tool_input that is a string but not
+// JSON is the command itself; (b) the Antigravity payload, as antigravity()
+// above builds it, carries its cwd only as toolCall.args.Cwd, and a relative
+// BETTER_RM_PROTECTED_DIRS entry is resolved against it; (c)
+// `hookEventName: 'PreToolUse'` without a toolInput key still selects the Grok
+// contract, whose refusal is { decision: 'deny' }. The 2026-10-13 review deleted
+// each clause in turn (H-ex-strcatch, H-ex-cwd, H-ex-grokdetect) and the hook,
+// parity and wrapper suites stayed green. Which agents send (a) or (c) is not
+// established here; the rows pin what extractInput() promises, with commands and
+// declarations taken from existing rows of this file: (a) and (c) use
+// `rm -rf /` and `ls -la /etc` from rows above, and (b) uses the relative
+// `secrets` declaration and its command from the OpenCode plugin block below
+// (runOpenCodePluginChecks). Each refusal has an allowed twin so that a blanket
+// refusal cannot pass.
+// extractInput() 這道邊界的其餘部分，同樣走 stdin 契約。它有三個子句沒有任何一列釘住：
+// (a) tool_input 是字串但不是 JSON 時，它就是命令本身；(b) 上面 antigravity() 組出來的
+// Antigravity payload 只把 cwd 放在 toolCall.args.Cwd，相對的 BETTER_RM_PROTECTED_DIRS
+// 以它為基準解析；(c) 沒有 toolInput、只有 `hookEventName: 'PreToolUse'` 時仍選 Grok 契約，
+// 拒絕的形狀是 { decision: 'deny' }。2026-10-13 的審查把三個子句各自刪掉，hook、parity、
+// wrapper 三套仍綠。哪些 agent 真的送 (a) 或 (c) 這裡沒有確認；這些列釘的是 extractInput()
+// 承諾的行為，命令與宣告取自本檔案既有的列：(a) 與 (c) 用上面各列的 `rm -rf /` 與
+// `ls -la /etc`，(b) 用下面 OpenCode 外掛區塊（runOpenCodePluginChecks）的相對宣告
+// `secrets` 與它的命令。每個拒絕都有一個放行的雙胞胎，一律拒絕的實作過不了。
+{
+  const stdinVerdictWith = (payload, overrides = {}) => {
+    const child = spawnSync('node', [`${__dirname}/hooks/protect-important-paths.js`], {
+      input: JSON.stringify(payload),
+      encoding: 'utf8',
+      env: { ...process.env, ...env, ...overrides },
+    });
+    assert.equal(child.status, 0, `extractInput edge: exit status for ${JSON.stringify(payload)}`);
+    let parsed = null;
+    try { parsed = JSON.parse(child.stdout); } catch (_) { parsed = null; }
+    return { stdout: child.stdout, parsed };
+  };
+  const asStringInput = (command) => ({
+    hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: command, cwd: '/workspace/project',
+  });
+  assert.equal(stdinVerdictWith(asStringInput('rm -rf /')).parsed?.hookSpecificOutput?.permissionDecision,
+    'deny', 'a tool_input string that is not JSON is the command itself, and is judged');
+  assert.equal(stdinVerdictWith(asStringInput('ls -la /etc')).stdout, '',
+    'the allowed twin, as a tool_input string, stays allowed');
+  stdinChecks += 2;
+
+  assert.equal(stdinVerdictWith(antigravity('rm -rf /workspace/project/secrets'),
+    { BETTER_RM_PROTECTED_DIRS: 'secrets' }).parsed?.allow_tool, false,
+  "a relative declaration is resolved against Antigravity's toolCall.args.Cwd");
+  assert.equal(stdinVerdictWith(antigravity('rm -rf /workspace/project/secrets')).parsed?.allow_tool, true,
+    'without the relative declaration the same Antigravity command is allowed');
+  stdinChecks += 2;
+
+  const grokShaped = (command) => ({
+    hookEventName: 'PreToolUse', tool_input: { command }, cwd: '/workspace/project',
+  });
+  assert.equal(stdinVerdictWith(grokShaped('rm -rf /')).parsed?.decision, 'deny',
+    "hookEventName 'PreToolUse' without toolInput is refused in the Grok shape");
+  assert.equal(stdinVerdictWith(grokShaped('ls -la /etc')).parsed?.decision, 'allow',
+    "hookEventName 'PreToolUse' without toolInput is allowed in the Grok shape");
+  stdinChecks += 2;
+}
+
 // The line-continuation rows again, through the REAL stdin contract rather than
 // evaluate(). The tables above prove the parser; these prove the file that
 // every agent actually executes, which is the seam the bypass was found on.
@@ -5202,6 +5264,43 @@ process.stdin.on('end', () => {
 `);
   assert.notEqual(runInstallerProbe(selectiveHook).status, 0,
     'a hook that denies only the first payload must be rejected');
+  hookShapeChecks += 1;
+
+  // The other direction: a hook that denies every probe payload but ONE. The
+  // list is what makes the probe a test of protection rather than of
+  // truncation, so each payload has to count. The 2026-10-13 review deleted
+  // `rmdir /var` and the .git row from the list in turn and the hook and
+  // installer suites stayed green, so a hook that stopped refusing rmdir, or a
+  // .git removal, would have been installed. The control spares a command the
+  // probe does not send and must be accepted, so the two rejections are about
+  // the spared payload and not about the stub.
+  // 反方向：除了「一個」以外每個探測 payload 都拒絕的 hook。是這份清單讓探測測的是保護
+  // 而不只是截斷，所以每個 payload 都要算數。2026-10-13 的審查把 `rmdir /var` 與 .git
+  // 那一列輪流從清單刪掉，hook 與安裝程式兩套仍綠——不再拒絕 rmdir 或 .git 刪除的 hook
+  // 會被裝上。對照組放過的是探測不會送的命令，必須被接受，證明兩個拒絕是因為被放過的那個
+  // payload，而不是 stub 本身。
+  const sparingHook = (spared) => {
+    const file = `${scratch}/spares-${spared.replace(/[^a-z]+/g, '-')}.js`;
+    fs.writeFileSync(file, `
+const chunks = [];
+process.stdin.on('data', (c) => chunks.push(c));
+process.stdin.on('end', () => {
+  const payload = JSON.parse(chunks.join(''));
+  if (payload.tool_input.command !== ${JSON.stringify(spared)}) {
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny' } }));
+  }
+  process.exit(0);
+});
+`);
+    return file;
+  };
+  for (const spared of ['rmdir /var', 'rm -rf /project/.git']) {
+    assert.notEqual(runInstallerProbe(sparingHook(spared)).status, 0,
+      `a hook that allows only ${JSON.stringify(spared)} must be rejected`);
+    hookShapeChecks += 1;
+  }
+  assert.equal(runInstallerProbe(sparingHook('a command the probe does not send')).status, 0,
+    'a hook that denies each probe payload must be accepted');
   hookShapeChecks += 1;
 
   // Printing deny while exiting 1: for Claude Code PreToolUse exit 1 is a
@@ -7669,6 +7768,84 @@ async function runOpenCodePluginChecks() {
 }
 
 // ---------------------------------------------------------------------------
+// The oh-my-pi hook's own decision, for the reason the OpenCode block above
+// exists. README's Pi section recommends this native TypeScript hook (方式 A),
+// and on that path it is the whole guard, but no suite ran it: the 2026-10-13
+// review flipped its deny comparison, its tool name, its cwd and its block flag
+// one at a time, and the suites the review ran stayed green. It is loaded the
+// same way: the erasable type syntax is stripped by rewrites that are each
+// asserted first, the hook import is bound to the module this file loaded, and
+// the decision is the shipped source. The rows are the OpenCode block's rows.
+// oh-my-pi hook 自己的判斷，理由與上面 OpenCode 那一段相同。README 的 Pi 章節推薦這支
+// 原生 TypeScript hook（方式 A），走那條路時它就是全部的防護，卻沒有任何一套測試執行過它：
+// 2026-10-13 的審查把它的 deny 比對、工具名、cwd、block 旗標輪流改掉，審查跑的那幾套仍綠。
+// 載入方式相同：可抹除的型別語法用逐一先斷言過的改寫拿掉，hook 的 import 綁到本檔案已載入
+// 的模組，判斷本身是出貨的原始碼。使用的列就是 OpenCode 那一段的列。
+// ---------------------------------------------------------------------------
+const ompHookPath = `${__dirname}/.omp/hooks/pre/protect-important-paths.ts`;
+const ompRewrites = [
+  [/^import type \{ HookAPI \} from "@oh-my-pi\/pi-coding-agent\/extensibility\/hooks";$/m, ''],
+  [/^\/\/ @ts-ignore$/m, ''],
+  [
+    /^import \{ evaluate \} from "\.\.\/\.\.\/\.\.\/hooks\/protect-important-paths";$/m,
+    'const { evaluate } = hookModule;',
+  ],
+  [/^export default function hook\(pi: HookAPI\): void \{$/m, 'function hook(pi) {'],
+  [/\(ctx as any\)/, 'ctx'],
+  [/ as string;/, ';'],
+];
+let ompBody = fs.readFileSync(ompHookPath, 'utf8');
+for (const [pattern, replacement] of ompRewrites) {
+  assert.match(ompBody, pattern, `the oh-my-pi hook no longer matches ${pattern}; update this loader`);
+  ompBody = ompBody.replace(pattern, replacement);
+}
+const ompHook = new Function('hookModule', `${ompBody}\nreturn hook;`)({ evaluate });
+
+async function runOmpHookChecks() {
+  let ompChecks = 0;
+  const registered = [];
+  ompHook({ on: (name, handler) => registered.push({ name, handler }) });
+  assert.deepStrictEqual(registered.map(({ name }) => name), ['tool_call'],
+    'the oh-my-pi hook registers one tool_call handler');
+  const handler = registered[0].handler;
+  ompChecks += 1;
+  const ctx = { cwd: '/workspace/project' };
+
+  for (const command of pluginDenied) {
+    const result = await handler({ toolName: 'bash', input: { command } }, ctx);
+    assert.equal(result?.block, true, `the oh-my-pi hook must block: ${command}`);
+    assert.match(result.reason, REFUSAL_WORDING, `the oh-my-pi refusal must name the reason: ${command}`);
+    ompChecks += 1;
+  }
+  // Negative controls, as for the OpenCode plugin.
+  // 負對照，與 OpenCode 外掛相同。
+  for (const command of pluginAllowed) {
+    assert.equal(await handler({ toolName: 'bash', input: { command } }, ctx), undefined,
+      `the oh-my-pi hook must not block: ${command}`);
+    ompChecks += 1;
+  }
+  assert.equal(await handler({ toolName: 'read', input: { command: 'rm -rf /' } }, ctx), undefined,
+    'a tool that is not bash carries no command to inspect');
+  ompChecks += 1;
+
+  // ctx.cwd has to reach evaluate(), as ctx.directory does for OpenCode.
+  // ctx.cwd 必須傳到 evaluate()，就像 OpenCode 的 ctx.directory。
+  const previousExtraDirs = process.env.BETTER_RM_PROTECTED_DIRS;
+  process.env.BETTER_RM_PROTECTED_DIRS = 'secrets';
+  try {
+    const result = await handler(
+      { toolName: 'bash', input: { command: 'rm -rf /workspace/project/secrets' } }, ctx);
+    assert.equal(result?.block, true, 'the oh-my-pi hook must pass ctx.cwd to evaluate as cwd');
+    ompChecks += 1;
+  } finally {
+    if (previousExtraDirs === undefined) delete process.env.BETTER_RM_PROTECTED_DIRS;
+    else process.env.BETTER_RM_PROTECTED_DIRS = previousExtraDirs;
+  }
+
+  return ompChecks;
+}
+
+// ---------------------------------------------------------------------------
 // RUN TO COMPLETION: every timing group reached its expected number of checks,
 // and no wall-clock row in this file compares against a bare constant.
 // 跑到底：每個計時區塊都做到了預期的次數，而且沒有任何牆鐘列在比對裸常數。
@@ -7746,8 +7923,9 @@ let timingInventoryChecks = PINNED_TIMING_COUNTERS.length * 2 + 3;
 // 跑完才清為 0——否則「沒跑到」會看起來是綠的。
 process.exitCode = 1;
 runOpenCodePluginChecks().then(async (pluginChecks) => {
+  const ompChecks = await runOmpHookChecks();
   const stdinStreamChecks = await runStdinStreamErrorChecks();
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + stdinStreamChecks}`);
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + ompChecks + stdinStreamChecks}`);
   process.exitCode = 0;
 }).catch((error) => {
   console.error(error && error.stack ? error.stack : error);
