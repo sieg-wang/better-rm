@@ -66,9 +66,15 @@ podman run -v $(pwd):/app:z ubuntu:latest bash /app/test-better-rm.sh
 - 組合參數 (-rf)
 
 ### 測試 9: 受保護目錄
+- 柵欄自我檢查：find、xargs、md5sum、sha256sum、mv 在 PATH 最前面換成只記錄、從不執行真工具的 shim，先對沙箱目錄跑一次 better-rm，證明五個都攔得住
 - 拒絕刪除根目錄 (/)
 - 拒絕刪除 /home
+- 拒絕刪除 /mnt 與第一層掛載根
+- 允許處理 /mnt 掛載根內的一般路徑
 - 拒絕刪除 .git 目錄
+
+對真實 /、/home、/mnt 的那幾列都在柵欄後面跑、各有 15 秒上限，而且柵欄紀錄必須是空的；柵欄自我檢查沒過，那幾列就不執行、直接判失敗。refusal 退化時，better-rm 的 find、md5sum 與 mv 打到的是 shim 而不是真的工具（以 root 在容器裡執行時也一樣）；柵欄沒涵蓋的工具則在 15 秒後被終止。
+The rows on the real /, /home and /mnt run behind that fence, each bounded at 15 s, and each requires an empty fence log; if the fence self-check fails, those rows are not run and fail instead. With the refusal regressed, better-rm's find, md5sum and mv reach the shims instead of the real tools (under the root docker run above as well), and a tool the fence does not cover is stopped after 15 s.
 
 ### 測試 10: 快速連續刪除
 - 測試奈秒時間戳記避免檔名衝突

@@ -1076,35 +1076,154 @@ fi
 # ============================================================================
 test_title "測試 9: 受保護目錄"
 
+# 這一段對「真實的」/、/home 與 /mnt 執行 better-rm，所以它必須在一道柵欄後面跑。
+# setup() 把垃圾桶與狀態目錄指進沙箱，但 / 這種操作對象沒辦法放進沙箱；refusal 一旦
+# 退化（is_protected 本身，或 move_to_trash 叫它的那一處），better-rm -rf / 就會 cd /、
+# 對 .// 跑
+# find | sort | xargs md5sum（find 沒有 -x，會走進掛載的卷宗；md5sum 讀 find 列出的檔案，
+# 雲端硬碟的 FileProvider 目錄也在內），接著 mv。2026-10-13 的審查用一個拿掉 refusal 的
+# 版本跑到這一列，那個 find 與 md5sum 一直跑到審查者手動中止為止。非 root 不能改名 root
+# 擁有的 / 底下的項目，但 TEST_README 列出的 docker 執行是 root。
+# 柵欄：find、xargs、md5sum、sha256sum、mv 這五個名字在 PATH 最前面換成只記錄、然後以
+# 97 結束的 shim，從不交給真正的工具；better-rm 用 PATH 找它們（它不設 PATH、也不寫絕對
+# 路徑）。每一列都要求柵欄紀錄是空的——被拒絕的路徑根本不該走到 hash 或 mv——並用
+# run_bounded 設上限，萬一有柵欄沒擋到的新工具也不會讓整套卡住。
+# 柵欄先在沙箱目錄上證明自己：對它跑一次 better-rm，五個名字都必須出現在紀錄裡、目錄
+# 原封不動。證明不了，下面的真實路徑列就一列都不跑、直接失敗。
+# These rows run better-rm on the REAL /, /home and /mnt, so they run behind a
+# fence. setup() points the trash and the state directory into the sandbox, but
+# an operand like / cannot be sandboxed; with the refusal regressed
+# (is_protected itself, or move_to_trash's call to it),
+# `better-rm -rf /` does `cd /`, runs find | sort | xargs md5sum on `.//` (find
+# has no -x, so it descends into mounted volumes, and md5sum reads the files find
+# lists, cloud FileProvider folders included), then mv. The 2026-10-13 review ran
+# a build without the refusal into this block, and that find and md5sum ran until
+# the reviewer killed them. A non-root user cannot rename an entry of the
+# root-owned /, but TEST_README's docker line runs as root.
+# The fence: find, xargs, md5sum, sha256sum and mv are, first on PATH, shims that
+# record the call and exit 97 without ever running the real tool; better-rm finds
+# them through PATH (it neither sets PATH nor names an absolute path). Each row
+# requires an empty fence log -- a refused path must never reach the hash or the
+# mv -- and runs under run_bounded, so a tool the fence does not cover cannot
+# hang the suite.
+# The fence proves itself on a sandbox directory first: one run of better-rm on it
+# must record each of the five names and leave the directory in place. Without
+# that proof none of the real-path rows run; they fail instead.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+protected_fence_bin="$TEST_WORK_DIR/protected-fence-bin"
+protected_fence_log="$TEST_WORK_DIR/protected-fence.log"
+protected_fence_out="$TEST_WORK_DIR/protected-fence.out"
+protected_fence_tools="find xargs md5sum sha256sum mv"
+mkdir -p "$protected_fence_bin"
+for fenced_tool in $protected_fence_tools; do
+    cat > "$protected_fence_bin/$fenced_tool" <<'EOF'
+#!/bin/sh
+printf '%s cwd=%s argv=%s\n' "${0##*/}" "$PWD" "$*" >> "$BETTER_RM_FENCE_LOG"
+exit 97
+EOF
+    chmod +x "$protected_fence_bin/$fenced_tool"
+done
+
+# fenced_run <better-rm 引數...>：在柵欄後面、有上限地跑一次；結束回傳 0、逾時回傳 1。
+# fenced_run <better-rm arguments...>: one bounded run behind the fence; 0 when it
+# finished, 1 when it timed out.
+fenced_run() {
+    : > "$protected_fence_log"
+    run_bounded 15 env BETTER_RM_FENCE_LOG="$protected_fence_log" \
+        PATH="$protected_fence_bin:$PATH" "$BETTER_RM" "$@" \
+        > "$protected_fence_out" 2>&1
+}
+
+# protected_root_refused <better-rm 引數...>：在時限內結束、印出拒絕訊息、柵欄紀錄是空的。
+# protected_root_refused <better-rm arguments...>: finished in time, printed the
+# refusal, and left the fence log empty.
+protected_root_refused() {
+    PROTECTED_FENCE_NOTE=""
+    if ! fenced_run "$@"; then
+        PROTECTED_FENCE_NOTE="$*: 逾時 (timed out)"
+        return 1
+    fi
+    if [ -s "$protected_fence_log" ]; then
+        PROTECTED_FENCE_NOTE="$*: 柵欄攔到 $(head -n 3 "$protected_fence_log" | tr '\n' ';')"
+        return 1
+    fi
+    if ! grep -q "拒絕刪除受保護的目錄" "$protected_fence_out"; then
+        PROTECTED_FENCE_NOTE="$*: 沒有拒絕訊息"
+        return 1
+    fi
+    return 0
+}
+
+test_item "柵欄先在沙箱目錄上證明攔得住 better-rm 的 hash 與 mv"
+mkdir -p fence-probe/inner
+printf '%s\n' "fence probe" > fence-probe/inner/item.txt
+protected_fence_proven=false
+protected_fence_missing=""
+if fenced_run -rf fence-probe; then
+    for fenced_tool in $protected_fence_tools; do
+        if ! grep -q "^$fenced_tool " "$protected_fence_log"; then
+            protected_fence_missing="$protected_fence_missing $fenced_tool"
+        fi
+    done
+    if [ -z "$protected_fence_missing" ] && [ -f fence-probe/inner/item.txt ]; then
+        protected_fence_proven=true
+    fi
+else
+    protected_fence_missing=" (逾時 / timed out)"
+fi
+if [ "$protected_fence_proven" = true ]; then
+    test_pass "柵欄攔下了 ${protected_fence_tools}，沙箱目錄原封不動"
+else
+    test_fail "柵欄沒攔到:${protected_fence_missing:- 沙箱目錄不見了}；下面的真實路徑列不會執行"
+fi
+
 test_item "拒絕刪除根目錄 (/)"
-if "$BETTER_RM" -rf / 2>&1 | grep -q "拒絕刪除受保護的目錄"; then
+if [ "$protected_fence_proven" != true ]; then
+    test_fail "柵欄未經證明，沒有對真實的 / 執行 better-rm"
+elif protected_root_refused -rf /; then
     test_pass "正確拒絕刪除根目錄"
 else
-    test_fail "未正確保護根目錄"
+    test_fail "未正確保護根目錄（${PROTECTED_FENCE_NOTE}）"
 fi
 
 test_item "拒絕刪除 /home"
-if "$BETTER_RM" -rf /home 2>&1 | grep -q "拒絕刪除受保護的目錄"; then
+if [ "$protected_fence_proven" != true ]; then
+    test_fail "柵欄未經證明，沒有對真實的 /home 執行 better-rm"
+elif protected_root_refused -rf /home; then
     test_pass "正確拒絕刪除 /home"
 else
-    test_fail "未正確保護 /home"
+    test_fail "未正確保護 /home（${PROTECTED_FENCE_NOTE}）"
 fi
 
 test_item "拒絕刪除 /mnt 與第一層掛載根"
 mnt_protected=true
-for protected_mnt_path in /mnt /mnt/c /mnt/../mnt/wsl; do
-    if ! "$BETTER_RM" -rf "$protected_mnt_path" 2>&1 | grep -q "拒絕刪除受保護的目錄"; then
-        mnt_protected=false
-    fi
-done
+mnt_protected_notes=""
+if [ "$protected_fence_proven" != true ]; then
+    mnt_protected=false
+    mnt_protected_notes="柵欄未經證明，沒有對真實的 /mnt 執行 better-rm"
+else
+    for protected_mnt_path in /mnt /mnt/c /mnt/../mnt/wsl; do
+        if ! protected_root_refused -rf "$protected_mnt_path"; then
+            mnt_protected=false
+            mnt_protected_notes="$mnt_protected_notes $PROTECTED_FENCE_NOTE"
+        fi
+    done
+fi
 if [ "$mnt_protected" = true ]; then
     test_pass "正確保護 /mnt 與第一層掛載根"
 else
-    test_fail "未正確保護 /mnt 掛載根"
+    test_fail "未正確保護 /mnt 掛載根（${mnt_protected_notes}）"
 fi
 
 test_item "允許處理 /mnt 掛載根內的一般路徑"
-if "$BETTER_RM" -f /mnt/c/project/nonexistent 2>&1 | grep -q "拒絕刪除受保護的目錄"; then
+if [ "$protected_fence_proven" != true ]; then
+    test_fail "柵欄未經證明，沒有對真實的 /mnt/c/project/nonexistent 執行 better-rm"
+elif ! fenced_run -f /mnt/c/project/nonexistent; then
+    test_fail "對 /mnt 掛載根內的一般路徑逾時"
+elif [ -s "$protected_fence_log" ]; then
+    test_fail "對不存在的路徑碰到了柵欄：$(head -n 3 "$protected_fence_log" | tr '\n' ';')"
+elif grep -q "拒絕刪除受保護的目錄" "$protected_fence_out"; then
     test_fail "錯誤封鎖 /mnt 掛載根內的一般路徑"
 else
     test_pass "未封鎖 /mnt 掛載根內的一般路徑"
