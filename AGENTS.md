@@ -596,10 +596,6 @@ decision is pinned by allow rows in the suite: adding `~/Library` turns them red
   directory — it displaced by a predictable `$$`-suffixed name and `rm -rf`'d it,
   which is the defect this whole section exists to remove. Deletion is
   unaffected; only `--restore` needs it.
-- **The exit-1 wording for a set-aside that reached the trash unlogged** (the
-  publish then failing as well) is the one message branch here with no test: it
-  needs a log-write failure and a publish failure in the same run. Its sibling on
-  the success path is covered.
 
 ## Suggested Future Enhancements
 
