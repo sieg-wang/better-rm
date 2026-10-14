@@ -2841,6 +2841,58 @@ else
     test_fail "日誌沒寫成功時仍宣稱可用 --restore 取回或漏講 (status=$unlogged_status, again=$unlogged_again)"
 fi
 
+test_item "還原：讓位未記錄又就位失敗時，兩份資料保留並明說 --restore 取不回舊目的地"
+# 同時行使兩個失敗：舊目的地已進垃圾桶但日誌無法寫入，之後 publish 失敗。
+# Exercise both failures: the old destination reaches the trash without a log,
+# then publishing the original fails. Recovery advice must describe both copies.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+printf '%s\n' "UNLOGGED PUBLISH ORIGINAL" > unlogged-publish.txt
+"$BETTER_RM" unlogged-publish.txt
+unlogged_publish_original=$(find "$TEST_TRASH_DIR" -type f \
+    -name 'unlogged-publish.txt__*' -print -quit)
+grep -v '^#' "$TEST_STATE_DIR/deletion.log" > "$TEST_TRASH_DIR/.deletion_log"
+rm -f "$TEST_STATE_DIR/deletion.log"
+mkdir -p "$TEST_STATE_DIR/deletion.log" unlogged-publish.txt
+printf '%s\n' "UNLOGGED PUBLISH DESTINATION" > unlogged-publish.txt/keep.txt
+unlogged_publish_bin="$TEST_WORK_DIR/unlogged-publish-bin"
+mkdir -p "$unlogged_publish_bin"
+cat > "$unlogged_publish_bin/mv" <<'SH'
+#!/bin/bash
+args=("$@")
+source="${args[$#-2]}"
+destination="${args[$#-1]}"
+if [ "$destination" = "$BETTER_RM_FAIL_PUBLISH_DEST" ] &&
+   [[ "$source" = "$BETTER_RM_FAIL_PUBLISH_DEST".better-rm-restore-*/unlogged-publish.txt ]]; then
+    printf '%s\n' 'publish failed' > "$BETTER_RM_FAIL_PUBLISH_MARKER"
+    exit 1
+fi
+exec "$BETTER_RM_REAL_MV" "$@"
+SH
+chmod +x "$unlogged_publish_bin/mv"
+unlogged_publish_status=0
+unlogged_publish_output=$(BETTER_RM_REAL_MV="$(command -v mv)" \
+BETTER_RM_FAIL_PUBLISH_DEST="$(pwd)/unlogged-publish.txt" \
+BETTER_RM_FAIL_PUBLISH_MARKER="$TEST_WORK_DIR/unlogged-publish-marker" \
+PATH="$unlogged_publish_bin:$PATH" \
+    "$BETTER_RM" -f --restore unlogged-publish.txt 2>&1) || unlogged_publish_status=$?
+unlogged_publish_displaced=$(find "$TEST_TRASH_DIR" -type f -name 'keep.txt' -print -quit)
+
+if [ "$unlogged_publish_status" -eq 1 ] && \
+   [ -f "$TEST_WORK_DIR/unlogged-publish-marker" ] && \
+   [ ! -e unlogged-publish.txt ] && [ ! -L unlogged-publish.txt ] && \
+   [ -n "$unlogged_publish_original" ] && \
+   grep -qFx "UNLOGGED PUBLISH ORIGINAL" "$unlogged_publish_original" && \
+   [ -n "$unlogged_publish_displaced" ] && \
+   grep -qFx "UNLOGGED PUBLISH DESTINATION" "$unlogged_publish_displaced" && \
+   [[ "$unlogged_publish_output" == *"deletion log was not written, so rm --restore cannot find it"* ]] && \
+   [[ "$unlogged_publish_output" == *"look under the trash root '$TEST_TRASH_DIR'"* ]] && \
+   [[ "$unlogged_publish_output" != *"recover it with rm --restore"* ]]; then
+    test_pass "就位失敗仍保留原項目與舊目的地，未記錄的那份提供正確手動復原指示"
+else
+    test_fail "雙重失敗遺失資料、漏講舊目的地或給出錯誤 --restore 指示 (status=$unlogged_publish_status)"
+fi
+
 test_item "還原：跨裝置時暫存落點被目錄佔走、項目被搬了進去，不得當成取出成功"
 # 跨裝置沒有 inode 可比，驗收只剩三個條件。少了「落點不是那個吞了項目的目錄」這一
 # 條，攻擊者先建好的目錄就會被當成取出結果：它會被 publish 到使用者的路徑上、使用者
