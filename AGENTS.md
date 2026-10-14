@@ -6,6 +6,21 @@ This document describes the AI agents and automation used in the development of 
 
 This project uses GitHub Copilot, Google Antigravity, Pi, Grok Build, and AI-assisted development to maintain code quality, implement features, and address issues efficiently.
 
+## Remotes and delivery (this fork)
+
+This checkout is Sieg's hard fork of doggy8088/better-rm and the live rm guard on
+this machine.
+
+- `mine` (`git@github.com:sieg-wang/better-rm.git`) is the tracked upstream of
+  `main` and the only push target. Commit reviewed local work and push it there
+  under the standing Git rule, then check CI with
+  `gh run list -R sieg-wang/better-rm` (a bare `gh` here resolves to doggy8088).
+- The README one-line installer fetches raw `main` from `mine`, so every push
+  to `main` is what the installer serves.
+- `origin` is the third-party doggy8088 upstream: read-only. Never pull, merge,
+  rebase or cherry-pick from it (Sieg, 2026-08-15). Being ahead of or behind
+  `origin/main` is not a reason to act.
+
 ## Development Agents
 
 ### Google Antigravity (CLI / 2.0)
