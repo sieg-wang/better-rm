@@ -146,6 +146,23 @@ install() {
     if [ -d "$INSTALL_DIR" ]; then
         info "發現現有安裝，正在更新... / Found existing installation, updating..."
         cd "$INSTALL_DIR"
+        # 安裝目錄本身必須是 worktree root，不能掃描或接管 parent repo。
+        # Verify the installation's own worktree root before scanning a parent repo.
+        local install_root repo_root
+        if ! install_root=$(pwd -P) ||
+           ! repo_root=$(git rev-parse --show-toplevel 2>/dev/null) ||
+           ! repo_root=$(cd -- "$repo_root" && pwd -P); then
+            error "錯誤：無法確認現有安裝的 Git root，拒絕自動更新"
+            error "Error: cannot verify the existing installation's Git root; refusing automatic update"
+            exit 1
+        fi
+        if [ "$repo_root" != "$install_root" ]; then
+            error "錯誤：現有安裝是其他 Git repository 的子目錄，拒絕自動更新"
+            error "Error: existing installation is a child of another Git repository; refusing automatic update"
+            error "安裝目錄 / Installation root: $install_root"
+            error "Git root: $repo_root"
+            exit 1
+        fi
         # 檢查是否為有效的 git 儲存庫 (Check if it's a valid git repository)
         if ! git status >/dev/null 2>&1; then
             error "錯誤：$INSTALL_DIR 存在但不是有效的 git 儲存庫"

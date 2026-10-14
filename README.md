@@ -37,6 +37,8 @@ wget -qO- https://raw.githubusercontent.com/sieg-wang/better-rm/main/install.sh 
 - ✅ 加入 `alias rm='~/.better-rm/better-rm'` 到你的 shell 設定檔
 - ✅ 提供清楚的後續步驟說明
 
+更新既有 `~/.better-rm` 時，該目錄必須是它自己的 Git worktree root；若只是其他 repository 的子目錄，installer 會在更新前拒絕。Linked worktree 與合法 symlink 路徑仍受支援，並沿用既有可信 upstream 檢查。
+
 安裝完成後，執行以下命令啟用：
 
 ```bash

@@ -6,15 +6,27 @@ set -u
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 INSTALLER="$SCRIPT_DIR/install.sh"
 TRUSTED_REPO_URL="https://github.com/sieg-wang/better-rm.git"
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/better-rm-install.XXXXXX")
-FAKE_BIN="$TMP_ROOT/bin"
-PASSED=0
-FAILED=0
+REAL_GIT=$(command -v git) || exit 1
+# 真實 Git fixtures 不繼承現場 repository/config context。
+# Keep real Git fixtures independent of inherited repository/config context.
+git_local_vars=$("$REAL_GIT" rev-parse --local-env-vars) || exit 1
+for git_local_var in $git_local_vars; do
+    unset "$git_local_var"
+done
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/better-rm-install.XXXXXX") || exit 1
+TMP_PATH_ROOT=''
 
 cleanup() {
     rm -rf -- "$TMP_ROOT"
+    [ -z "$TMP_PATH_ROOT" ] || rm -rf -- "$TMP_PATH_ROOT"
 }
 trap cleanup EXIT
+TMP_PATH_ROOT=$(mktemp -d /tmp/better-rm-install-path.XXXXXX) || exit 1
+FAKE_BIN="$TMP_ROOT/bin"
+REAL_BIN="$TMP_ROOT/real-bin"
+PASSED=0
+FAILED=0
 
 pass() {
     PASSED=$((PASSED + 1))
@@ -69,6 +81,11 @@ cat > "$FAKE_BIN/git" <<'EOF'
 printf '%s\n' "$*" >> "$BETTER_RM_TEST_GIT_LOG"
 case "$1" in
     status)
+        exit 0
+        ;;
+    rev-parse)
+        [ "${2:-}" = --show-toplevel ] || exit 1
+        pwd -P
         exit 0
         ;;
     clone)
@@ -250,6 +267,156 @@ for scenario in \
     esac
     assert_file_contains "$scenario reports its exact trust failure" \
         "$EXPECTED_ERROR" "$BRANCH_OUTPUT"
+done
+
+# 真正 Git discovery/config；只有網路邊界由 shim 攔截。
+# Use real Git discovery/config; intercept every network operation.
+mkdir -p "$REAL_BIN"
+cat > "$REAL_BIN/git" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$BETTER_RM_TEST_GIT_LOG"
+case "$1" in
+    pull) exit 0 ;;
+    clone|fetch|push) exit 97 ;;
+    rev-parse)
+        if [ "${2:-}" = --show-toplevel ]; then
+            case "${BETTER_RM_TEST_GIT_SCENARIO:-trusted}" in
+                root-fails) exit 1 ;;
+                root-missing) printf '%s/missing-root\n' "$HOME"; exit 0 ;;
+            esac
+        fi
+        ;;
+    status|symbolic-ref|config|remote) ;;
+    *) exit 97 ;;
+esac
+exec "$BETTER_RM_TEST_REAL_GIT" "$@"
+EOF
+cat > "$REAL_BIN/chmod" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$BETTER_RM_TEST_WRITE_LOG"
+exec /bin/chmod "$@"
+EOF
+chmod +x "$REAL_BIN/git" "$REAL_BIN/chmod"
+
+make_real_repo() {
+    local repo="$1"
+    mkdir -p "$repo"
+    "$REAL_GIT" init --quiet --template= "$repo" || return 1
+    "$REAL_GIT" -C "$repo" symbolic-ref HEAD refs/heads/main || return 1
+    printf '#!/bin/bash\n# fixture payload\n' > "$repo/better-rm"
+    "$REAL_GIT" -C "$repo" add better-rm || return 1
+    "$REAL_GIT" -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid \
+        -c commit.gpgsign=false commit --quiet -m fixture || return 1
+    "$REAL_GIT" -C "$repo" remote add origin "$TRUSTED_REPO_URL" || return 1
+    "$REAL_GIT" -C "$repo" config branch.main.remote origin || return 1
+    "$REAL_GIT" -C "$repo" config branch.main.merge refs/heads/main || return 1
+}
+
+run_real_installer() {
+    local home="$1" scenario="${2:-trusted}"
+    env PATH="$REAL_BIN:$PATH" HOME="$home" SHELL=/bin/bash \
+        BETTER_RM_TEST_GIT_LOG="$home/git.log" \
+        BETTER_RM_TEST_WRITE_LOG="$home/write.log" \
+        BETTER_RM_TEST_REAL_GIT="$REAL_GIT" \
+        BETTER_RM_TEST_GIT_SCENARIO="$scenario" \
+        "$INSTALLER" >"$home/installer.output" 2>&1
+}
+
+assert_real_refusal() {
+    local home="$1" label="$2" expected="$3" scenario="${4:-trusted}" status=0 mode
+    cp "$home/.better-rm/better-rm" "$home/payload.before"
+    mode=$(stat -c '%a' "$home/.better-rm/better-rm" 2>/dev/null || \
+        stat -f '%Lp' "$home/.better-rm/better-rm")
+    cp "$home/.bashrc" "$home/shell.before"
+    : > "$home/write.log"
+    : > "$home/git.log"
+    run_real_installer "$home" "$scenario" || status=$?
+    if [ "$status" -ne 0 ]; then pass "$label refuses"; else fail "$label refuses"; fi
+    assert_file_contains "$label names the refusal" "$expected" "$home/installer.output"
+    assert_no_log_prefix "$label never pulls" 'pull ' "$home/git.log"
+    if [ ! -s "$home/write.log" ] && \
+       [ "$mode" = "$(stat -c '%a' "$home/.better-rm/better-rm" 2>/dev/null || \
+           stat -f '%Lp' "$home/.better-rm/better-rm")" ] && \
+       cmp -s "$home/payload.before" "$home/.better-rm/better-rm" && \
+       cmp -s "$home/shell.before" "$home/.bashrc"; then
+        pass "$label preserves payload/mode/shell config without chmod"
+    else
+        fail "$label preserves payload/mode/shell config without chmod"
+    fi
+}
+
+PARENT_HOME="$TMP_ROOT/parent-home"
+make_real_repo "$PARENT_HOME" || exit 1
+make_existing_install "$PARENT_HOME"
+printf '# parent shell fixture\n' > "$PARENT_HOME/.bashrc"
+chmod 640 "$PARENT_HOME/.better-rm/better-rm"
+"$REAL_GIT" -C "$PARENT_HOME" add .better-rm .bashrc
+"$REAL_GIT" -C "$PARENT_HOME" -c user.name=Fixture -c user.email=fixture@example.invalid \
+    -c commit.gpgsign=false commit --quiet -m child
+PARENT_HEAD=$("$REAL_GIT" -C "$PARENT_HOME" rev-parse HEAD)
+cp "$PARENT_HOME/.git/config" "$TMP_ROOT/parent.config.before"
+cp "$PARENT_HOME/.git/index" "$TMP_ROOT/parent.index.before"
+# 未追蹤的 harness logs 排除；tracked worktree/index 必須原樣。
+# Harness logs are untracked; preserve every tracked worktree/index byte.
+assert_real_refusal "$PARENT_HOME" 'a real parent-repo child' \
+    'existing installation is a child of another Git repository'
+if [ "$PARENT_HEAD" = "$("$REAL_GIT" -C "$PARENT_HOME" rev-parse HEAD)" ] && \
+   cmp -s "$TMP_ROOT/parent.config.before" "$PARENT_HOME/.git/config" && \
+   cmp -s "$TMP_ROOT/parent.index.before" "$PARENT_HOME/.git/index" && \
+   "$REAL_GIT" -C "$PARENT_HOME" diff --quiet HEAD --; then
+    pass 'parent HEAD/config/index/tracked worktree remain unchanged'
+else
+    fail 'parent HEAD/config/index/tracked worktree remain unchanged'
+fi
+assert_no_log_prefix 'root mismatch refuses before branch/upstream trust checks' \
+    'symbolic-ref ' "$PARENT_HOME/git.log"
+assert_no_log_prefix 'root mismatch refuses before even scanning parent status' \
+    'status' "$PARENT_HOME/git.log"
+
+OWN_HOME="$TMP_ROOT/own-home"
+SPACE_HOME="$TMP_ROOT/home with spaces"
+LINKED_HOME="$TMP_ROOT/linked-home"
+PHYSICAL_HOME="$TMP_PATH_ROOT/physical-home"
+for real_home in "$OWN_HOME" "$SPACE_HOME" "$PHYSICAL_HOME"; do
+    make_real_repo "$real_home/.better-rm" || exit 1
+done
+make_real_repo "$TMP_ROOT/worktree-source" || exit 1
+"$REAL_GIT" -C "$TMP_ROOT/worktree-source" worktree add --quiet -b linked \
+    "$LINKED_HOME/.better-rm" || exit 1
+"$REAL_GIT" -C "$LINKED_HOME/.better-rm" config branch.linked.remote origin
+"$REAL_GIT" -C "$LINKED_HOME/.better-rm" config branch.linked.merge refs/heads/main
+[ -f "$LINKED_HOME/.better-rm/.git" ] || exit 1
+ln -s "$SPACE_HOME" "$TMP_ROOT/symlink-home"
+for real_home in "$OWN_HOME" "$LINKED_HOME" "$TMP_ROOT/symlink-home" "$PHYSICAL_HOME"; do
+    printf '# shell fixture\n' > "$real_home/.bashrc"
+    : > "$real_home/git.log"
+    if run_real_installer "$real_home"; then
+        pass "own-root update accepts ${real_home##*/}"
+    else
+        fail "own-root update accepts ${real_home##*/}"
+    fi
+    assert_log_line 'own-root update retains fast-forward-only intercepted pull' \
+        'pull --ff-only --quiet' "$real_home/git.log"
+    assert_log_line 'own-root update still resolves the trusted real remote' \
+        'remote get-url origin' "$real_home/git.log"
+    assert_file_contains 'own-root install retains alias configuration' \
+        "alias rm='$real_home/.better-rm/better-rm'" "$real_home/.bashrc"
+done
+
+for scenario in root-fails root-missing not-a-repo bare; do
+    FAILURE_HOME="$TMP_ROOT/real-$scenario"
+    if [ "$scenario" = bare ]; then
+        mkdir -p "$FAILURE_HOME"
+        "$REAL_GIT" init --bare --quiet --template= "$FAILURE_HOME/.better-rm" || exit 1
+        printf '#!/bin/bash\n' > "$FAILURE_HOME/.better-rm/better-rm"
+    elif [ "$scenario" = not-a-repo ]; then
+        make_existing_install "$FAILURE_HOME"
+    else
+        make_real_repo "$FAILURE_HOME/.better-rm" || exit 1
+    fi
+    printf '# shell fixture\n' > "$FAILURE_HOME/.bashrc"
+    EXPECTED_ERROR="cannot verify the existing installation's Git root"
+    assert_real_refusal "$FAILURE_HOME" "$scenario" "$EXPECTED_ERROR" "$scenario"
 done
 
 printf 'Passed: %s\nFailed: %s\n' "$PASSED" "$FAILED"
