@@ -1083,11 +1083,138 @@ function readParenthesized(input, openIndex) {
   // one: there `<<` is a left shift, not a heredoc.
   // 算術區段（`$(( … ))`、`(( … ))`）開始時的深度，不在其中時為 0：那裡的 `<<` 是左移。
   let arithmeticFrom = input[openIndex + 1] === '(' ? 1 : 0;
+  // The depths of substitutions opened INSIDE a double quote. Their body is a
+  // fresh, unquoted context, and the quote resumes at their `)`. Counting such a
+  // `$(` as depth while still reading its body as quoted text never saw its `)`,
+  // so `$(echo "$(date)")` failed to read -- silently at 6a3edb1, and refused as
+  // unreadable once 765c6bb made a failed read inside double quotes fail closed
+  // (`echo "$(echo "$(date)")"` and the commit form
+  // `git commit -m "$(printf '%s' "$(git log -1 --format=%s)")"` were DENIED at
+  // 5451a62, ALLOWED at 6a3edb1).
+  // 在雙引號裡開的替換的深度。它們的內文是全新、未加引號的脈絡，引號在它們的 `)` 之後恢復。把這種
+  // `$(` 算進深度、卻仍把內文當引號文字讀，就永遠看不到它的 `)`：`$(echo "$(date)")` 讀不出來——
+  // 6a3edb1 時無聲，765c6bb 讓雙引號裡讀取失敗改成拒絕之後，就變成擋掉普通命令。
+  const quotedFrom = [];
+  // BR-NEW-1 (2026-10-17): case statements opened inside this read, innermost
+  // last: { depth, state, patternDepth }. A case PATTERN ends at its own `)`,
+  // which is not the end of the substitution. Without this model
+  // `echo "$(case x in a) :;; esac; rm -rf /etc)"` ended at `a)`, the rest was
+  // walked as text of the outer double-quoted string, and the deletion bash runs
+  // there was ALLOWED (at 6a3edb1 and 5451a62; bash 5.3 parses it inside the
+  // substitution -- declare -f on a never-called function, a touch in its place).
+  // States: 'subject-pending' (after `case`), 'subject', 'expect-in',
+  // 'pattern-start' (after `in` or `;;`/`;&`/`;;&`: blanks, an optional `(`, or
+  // `esac`), 'pattern' (until the `)` at patternDepth 0; `(` opens an extglob
+  // group), 'body' (scanned as usual until `;;`/`;&`/`;;&` or `esac` at command
+  // position). A header of any other shape drops the frame and the text is read
+  // as before. `case` is a reserved word only at command position, which is
+  // tracked through separators, `$(`/`(` and the list keywords below; a
+  // `case WORD in` header shape at any OTHER position is where this reader
+  // cannot be sure (a context it does not model as command position, such as a
+  // function body, may be one), so the read fails -- inside double quotes that
+  // is the UNREADABLE_QUOTED_SUBSTITUTION refusal.
+  // BR-NEW-1：這次讀取裡開的 case 敘述（最內層在最後）。case「樣式」在它自己的 `)` 結束，那不是替換的結尾。
+  // 少了這個模型，上面那條在 `a)` 就結束了，剩下的被當成外層雙引號字串的文字走過去，bash 會執行的刪除因此放行。
+  // `case` 只有在命令位置才是保留字；命令位置由分隔符、`$(`／`(` 與下面的清單關鍵字追蹤。在「其他位置」
+  // 出現 `case WORD in` 標頭形狀，就是這個 reader 沒把握的地方（例如函式內文這種沒建模成命令位置的脈絡），
+  // 讀取以失敗收場——在雙引號裡就是 UNREADABLE_QUOTED_SUBSTITUTION 的拒絕。
+  const caseFrames = [];
+  let commandPosition = true;
+  const isWordEnd = (k) => k >= input.length || /[\s;&|()<>]/.test(input[k]);
+  const wordAt = (k, word) => input.startsWith(word, k) && isWordEnd(k + word.length);
+  const KEEPS_COMMAND_POSITION = ['if', 'then', 'else', 'elif', 'while', 'until', 'do', '!', '{', 'time'];
+  const looksLikeCaseHeader = (k) => {
+    let j = k + 4;
+    while (j < input.length && (input[j] === ' ' || input[j] === '\t')) j += 1;
+    const subjectStart = j;
+    while (j < input.length && !/[\s;&|()<>]/.test(input[j])) j += 1;
+    if (j === subjectStart) return false;
+    while (j < input.length && /\s/.test(input[j])) j += 1;
+    return wordAt(j, 'in');
+  };
   for (let i = openIndex + 1; i < input.length; i += 1) {
     const char = input[i];
     const wasAtWordStart = atWordStart;
+    const wasEscaped = innerEscaped;
     atWordStart = false;
-    if (innerEscaped) {
+    // Case bookkeeping, on unquoted, unescaped text that is not a comment
+    // start. A character it consumes is not seen by the chain below.
+    // case 的記帳，只在未加引號、未跳脫、也不是註解開頭的文字上做。它吃掉的字元，下面那串分支看不到。
+    let caseConsumed = false;
+    if (!innerEscaped && !innerQuote && char !== '\\' && !(char === '#' && wasAtWordStart)) {
+      const top = caseFrames.length > 0 ? caseFrames[caseFrames.length - 1] : null;
+      const frame = top && top.depth === depth ? top : null;
+      const blank = char === ' ' || char === '\t' || char === '\n';
+      const operatorChar = /[;&|()<>]/.test(char);
+      if (frame && frame.state === 'subject-pending') {
+        if (char === ' ' || char === '\t') caseConsumed = true;
+        else if (char === '\n' || operatorChar) caseFrames.pop();
+        else frame.state = 'subject';
+      } else if (frame && frame.state === 'subject') {
+        if (blank) frame.state = 'expect-in';
+        else if (operatorChar) caseFrames.pop();
+      } else if (frame && frame.state === 'expect-in') {
+        if (blank) caseConsumed = true;
+        else if (wordAt(i, 'in')) {
+          frame.state = 'pattern-start';
+          i += 1;
+          caseConsumed = true;
+        } else caseFrames.pop();
+      } else if (frame && frame.state === 'pattern-start' && blank) {
+        caseConsumed = true;
+      } else if (frame && frame.state === 'pattern-start' && wasAtWordStart && wordAt(i, 'esac')) {
+        caseFrames.pop();
+        i += 3;
+        commandPosition = false;
+        caseConsumed = true;
+      } else if (frame && frame.state === 'pattern-start' && char === '(') {
+        frame.state = 'pattern';
+        caseConsumed = true;
+      } else if (frame && (frame.state === 'pattern-start' || frame.state === 'pattern')) {
+        frame.state = 'pattern';
+        if (char === '(') {
+          frame.patternDepth += 1;
+          caseConsumed = true;
+        } else if (char === ')') {
+          if (frame.patternDepth > 0) frame.patternDepth -= 1;
+          else {
+            frame.state = 'body';
+            commandPosition = true;
+          }
+          caseConsumed = true;
+        }
+      } else if (
+        frame && frame.state === 'body' && char === ';'
+        && (input[i + 1] === ';' || input[i + 1] === '&')
+      ) {
+        frame.state = 'pattern-start';
+        i += input[i + 1] === ';' && input[i + 2] === '&' ? 2 : 1;
+        caseConsumed = true;
+      } else if (wasAtWordStart && !blank && !operatorChar) {
+        if (!commandPosition) {
+          if (arithmeticFrom === 0 && wordAt(i, 'case') && looksLikeCaseHeader(i)) return null;
+        } else if (frame && frame.state === 'body' && wordAt(i, 'esac')) {
+          caseFrames.pop();
+          i += 3;
+          commandPosition = false;
+          caseConsumed = true;
+        } else if (arithmeticFrom === 0 && wordAt(i, 'case')) {
+          caseFrames.push({ depth, state: 'subject-pending', patternDepth: 0 });
+          i += 3;
+          commandPosition = false;
+          caseConsumed = true;
+        } else {
+          const keeper = KEEPS_COMMAND_POSITION.find((word) => wordAt(i, word));
+          if (keeper) {
+            i += keeper.length - 1;
+            caseConsumed = true;
+          } else commandPosition = false;
+        }
+      }
+    }
+    if (caseConsumed) {
+      // Consumed by the case bookkeeping above.
+    } else if (innerEscaped) {
       innerEscaped = false;
     } else if (char === '\\' && innerQuote !== "'") {
       innerEscaped = true;
@@ -1117,6 +1244,11 @@ function readParenthesized(input, openIndex) {
       else if (innerQuote === '"' && char === '$' && input[i + 1] === '(') {
         depth += 1;
         i += 1;
+        quotedFrom.push(depth);
+        innerQuote = '';
+        commandPosition = true;
+        atWordStart = true;
+        if (input[i + 1] === '(' && arithmeticFrom === 0) arithmeticFrom = depth;
       } else if (innerQuote === '"' && char === '`') {
         const close = readBackquoted(input, i);
         if (close === null) return null;
@@ -1158,18 +1290,38 @@ function readParenthesized(input, openIndex) {
     } else if (char === '$' && input[i + 1] === '(') {
       depth += 1;
       i += 1;
+      // The body of a nested `$(` starts a word and a command, exactly as the
+      // body of the outer one does (atWordStart and commandPosition start true).
+      // 巢狀 `$(` 的內文從一個字、一條命令開始，與外層那一個的內文相同。
+      commandPosition = true;
+      atWordStart = true;
       if (input[i + 1] === '(' && arithmeticFrom === 0) arithmeticFrom = depth;
     } else if (char === '(') {
       depth += 1;
       if (wasAtWordStart && input[i + 1] === '(' && arithmeticFrom === 0) arithmeticFrom = depth;
     } else if (char === ')') {
+      const closing = depth;
       depth -= 1;
       if (arithmeticFrom !== 0 && depth < arithmeticFrom) arithmeticFrom = 0;
+      while (caseFrames.length > 0 && caseFrames[caseFrames.length - 1].depth > depth) caseFrames.pop();
+      if (quotedFrom.length > 0 && quotedFrom[quotedFrom.length - 1] === closing) {
+        quotedFrom.pop();
+        innerQuote = '"';
+      }
       if (depth === 0) {
         return { command: input.slice(openIndex + 1, i), end: i };
       }
     }
     if (!innerQuote && !innerEscaped && /[\s;&|()<>]/.test(char)) atWordStart = true;
+    // A separator, `(` or a newline puts the next word at command position; a
+    // `)` ends one. Not for a character the case bookkeeping consumed (it set
+    // the position itself), nor for an escaped or quoted one.
+    // 分隔符、`(`、換行之後的下一個字在命令位置；`)` 結束它。case 記帳吃掉的字元（它自己設好了）、
+    // 跳脫或加了引號的字元都不算。
+    if (!caseConsumed && !wasEscaped && !innerQuote) {
+      if (/[;&|(\n]/.test(char)) commandPosition = true;
+      else if (char === ')') commandPosition = false;
+    }
   }
   return null;
 }
@@ -6552,18 +6704,20 @@ function unreadableHeredocDelimiterDenial(spelling, isCopilot, isAntigravity, is
 // commit 訊息一定走得通的檔案寫法。
 function unreadableQuotedSubstitutionDenial(count, isCopilot, isAntigravity, isCursor, isGrok) {
   const zh = '拒絕執行：這條命令在雙引號裡有 ' + count + ' 個 `$(`，這道閘門找不到它的收尾 `)`'
-    + '（引號、反引號或 heredoc 沒有收尾），所以替換裡的命令這道閘門一條都沒有讀到——包括可能'
-    + '寫在那裡的刪除（這不是說一定有，是說這道閘門沒有讀到）。規則：unreadable command substitution。'
-    + '繞法：讓替換裡的引號、反引號成對、heredoc 寫上結束行，或把文字放進檔案再讓命令去讀'
-    + '（例如 git commit -F <檔案>）。';
+    + '（裡面的引號、反引號或 heredoc 沒有收尾，或 `case WORD in` 出現在這道閘門判斷不了是不是'
+    + 'case 敘述的位置），所以替換裡的命令這道閘門一條都沒有讀到——包括可能寫在那裡的刪除'
+    + '（這不是說一定有，是說這道閘門沒有讀到）。規則：unreadable command substitution。'
+    + '繞法：讓替換裡的引號、反引號成對、heredoc 寫上結束行，把 case 敘述寫在命令開頭，'
+    + '或把文字放進檔案再讓命令去讀（例如 git commit -F <檔案>）。';
   const en = 'Refused to run: this command has ' + count + ' `$(` inside double quotes whose closing'
-    + ' `)` this gate could not find (a quote, a backquote or a heredoc inside it never closes),'
+    + ' `)` this gate could not find (a quote, a backquote or a heredoc inside it never closes, or'
+    + ' `case WORD in` appears where this gate cannot tell whether it starts a case statement),'
     + ' so none of the commands inside the substitution were read -- including any deletion'
     + ' written there (this does not say one is there; it says this gate did not read it).'
     + ' Rule: unreadable command substitution.'
-    + ' Workaround: balance the quotes and backquotes inside the substitution and end every'
-    + ' heredoc with its delimiter line, or put the text in a file and have the command read it'
-    + ' (git commit -F <file>).';
+    + ' Workaround: balance the quotes and backquotes inside the substitution, end every heredoc'
+    + ' with its delimiter line, start a case statement at the beginning of a command, or put the'
+    + ' text in a file and have the command read it (git commit -F <file>).';
   return denialShape(zh + ' / ' + en, isCopilot, isAntigravity, isCursor, isGrok);
 }
 

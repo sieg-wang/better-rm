@@ -975,6 +975,24 @@ const blocked = [
   // when no `case` stands in front of it.
   // 前面沒有 `case` 時，展開後才知道的命令字仍然假設是 rm。
   '"$a" in /etc',
+  // BR-NEW-1 (2026-10-17): a case statement INSIDE "$( )". The `)` reader took
+  // the `)` that ends a case pattern for the end of the substitution, so the
+  // rest of the substitution was walked as text of the outer double-quoted
+  // string. bash 5.3 keeps parsing and runs the deletion (declare -f on a
+  // never-called function with a touch in its place). The first five rows were
+  // ALLOWED at 5451a62. The backquote rows were ALLOWED at 6a3edb1 and refused
+  // at 5451a62 (765c6bb reads a backquote whole); the nested-quote row was
+  // refused at 5451a62 only because that read failed outright.
+  // BR-NEW-1：`"$( )"` 裡的 case 敘述。找 `)` 的 reader 把 case 樣式結尾的 `)` 當成替換的結尾，替換剩下的部分
+  // 被當成外層雙引號字串的文字走過去；bash 5.3 會繼續解析並執行那個刪除。前五列在 5451a62 放行。
+  "echo \"$(case x in a) :;; esac; rm -rf /etc)\"",
+  "echo \"$(case \"$a\" in *x*) :;; esac; rm -rf /etc)\"",
+  "echo \"$(x=$(case x in a) echo a;; esac); rm -rf /etc)\"",
+  "echo \"$(case x in a) rm -rf /etc;; esac)\"",
+  "echo \"$(case x in *) rm -rf ~/.git;; esac)\"",
+  "echo \"$(echo `case x in a) :;; esac`; rm -rf /etc)\"",
+  "echo \"$(`case x in a) :;; esac`; rm -rf /etc)\"",
+  "echo \"$(echo \"$(case x in a) :;; esac; rm -rf /etc)\")\"",
   // Two heredocs, and it is the SECOND that feeds the shell: a body must go back
   // to the operator it belongs to, not to whichever came first.
   "cat <<'A' ; bash <<'B'\njust data\nA\nrm -rf /etc\nB",
@@ -1731,6 +1749,22 @@ const allowed = [
   "echo \"$(cat <<< 'here string'; echo done)\"",
   "printf '%s\\n' \"$(cat <<-'EOF'\n\tit's tab-indented\n\tEOF\n)\"",
   "echo \"$(echo $'it\\'s')\"",
+  // A "$( )" NESTED inside a double-quoted string within "$( )". The `)` reader
+  // counted the inner `$(` but kept reading it as text of the quote, so its `)`
+  // never closed it and the whole read failed. At 6a3edb1 that failure was
+  // silent and these were allowed; 765c6bb turned a failed read inside double
+  // quotes into a refusal, and every row here was DENIED at 5451a62 as
+  // "unreadable command substitution" -- ordinary commands, the commit-message
+  // form among them.
+  // 雙引號字串裡、又包在 "$( )" 裡的 "$( )"。找 `)` 的 reader 數了內層的 `$(`，卻仍把它當引號
+  // 裡的文字讀，內層的 `)` 永遠關不掉它，整次讀取失敗。6a3edb1 時失敗是無聲的、這幾列放行；
+  // 765c6bb 把雙引號裡讀取失敗改成拒絕之後，這裡每一列在 5451a62 都被以「unreadable command
+  // substitution」拒絕——全是普通命令，包括 commit 訊息的寫法。
+  "echo \"$(echo \"$(date)\")\"",
+  "git commit -m \"$(printf '%s' \"$(git log -1 --format=%s)\")\"",
+  "x=\"$(basename \"$(pwd)\")\"; echo \"$x\"",
+  "echo \"$(dirname \"$(dirname \"$PWD\")\")\"",
+  "echo \"a $(echo \"b $(echo c) d\") e\"",
   // BR-OBS-1 (2026-10-17): the SUBJECT of a `case` was read as a command word
   // after the control word `case` was skipped; an unresolvable subject was then
   // assumed to be rm, so `in` and the first pattern became its operands. Rows
@@ -1751,6 +1785,18 @@ const allowed = [
   'case " $seen " in *" $f "*) continue;; esac',
   'case $1 in (-h|--help) echo usage;; *) echo run;; esac',
   'echo case "$a" in x',
+  // BR-NEW-1 (2026-10-17): the same idioms INSIDE "$( )" and in a nested one.
+  // The two absolute-path rows were DENIED at 5451a62 ("protected directory:
+  // /*"): the reader ended the substitution at the first pattern's `)`, and
+  // the stub `case "$p" in /*` was scanned with no header to step over.
+  // BR-NEW-1：同樣的寫法放在 "$( )" 裡與巢狀的 "$( )" 裡。兩列絕對路徑的在 5451a62 被拒（「/*」）：reader
+  // 在第一個樣式的 `)` 就結束替換，剩下的 `case "$p" in /*` 沒有可跳過的標頭。
+  "echo \"$(case \"$a\" in *x*) echo hit;; esac)\"",
+  "echo \"$(case \"$p\" in /*) echo abs;; *) echo rel;; esac)\"",
+  "x=$(case \"$p\" in /*) echo abs;; esac)",
+  "echo \"$(echo \"$(case \"$p\" in /*) echo abs;; esac)\")\"",
+  "echo \"$(case $1 in (-h|--help) echo usage;; @(a|b)) echo ab;; esac)\"",
+  "echo \"$(case $x in a) echo A;& b) echo B;;& *) echo C;; esac)\"",
   // find that does not delete is a reader, and the overwhelming majority of find
   // invocations are readers. Only -delete and the -exec family reaching rm make
   // it a deleter.
@@ -4090,7 +4136,22 @@ const HEREDOC_IN_SUBSTITUTION_BLOCKED = [
   ["echo \"$(echo `echo )`; rm -rf /etc)\"", /Refused to remove protected directory: \/etc$/],
   ["git commit -m \"$(cat <<EOF\nfix: $(rm -rf /etc)\nEOF\n)\"", /Refused to remove protected directory: \/etc$/],
   ["echo \"$(cat <<'EOF'\nit's fine\nrm -rf /etc\n)\"", /Rule: unreadable command substitution/],
+  // A "$( )" nested in a quoted string within "$( )" is READ, not refused as
+  // unreadable: the deletion inside it is refused for its own target.
+  // 引號字串裡巢狀的 "$( )" 要被「讀到」，不是以讀不到拒絕：裡面的刪除因為它自己的目標被拒。
+  ["echo \"$(echo \"$(rm -rf /etc)\")\"", /Refused to remove protected directory: \/etc$/],
 ];
+const NESTED_QUOTED_SUBSTITUTION_ALLOWED = [
+  "echo \"$(echo \"$(date)\")\"",
+  "git commit -m \"$(printf '%s' \"$(git log -1 --format=%s)\")\"",
+  "x=\"$(basename \"$(pwd)\")\"; echo \"$x\"",
+];
+for (const command of NESTED_QUOTED_SUBSTITUTION_ALLOWED) {
+  const { status, stdout } = runHookOverStdin(claude(command));
+  assert.equal(status, 0, `${command} (exit)`);
+  assert.equal(stdout, '', `a "$( )" nested in a quoted string within "$( )" is ordinary, but this was denied: ${command}`);
+  stdinChecks += 1;
+}
 for (const command of HEREDOC_IN_SUBSTITUTION_ALLOWED) {
   const { status, stdout } = runHookOverStdin(claude(command));
   assert.equal(status, 0, `${command} (exit)`);
@@ -4125,6 +4186,10 @@ const CASE_STATEMENT_ALLOWED = [
   ['case " $seen " in *" $f "*) continue;; esac', '/workspace/project'],
   ['case "$a" in *x*) echo hit;; esac', '/home/tester'],
   ['case "$f" in *.json) echo j;; esac', '/home/tester'],
+  // BR-NEW-1: the same idioms inside "$( )" (both DENIED at 5451a62 as "/*").
+  // BR-NEW-1：同樣的寫法放在 "$( )" 裡（5451a62 時兩列都以「/*」被拒）。
+  ['echo "$(case "$p" in /*) echo abs;; *) echo rel;; esac)"', '/workspace/project'],
+  ['x=$(case "$p" in /*) echo abs;; esac)', '/workspace/project'],
 ];
 const CASE_STATEMENT_BLOCKED = [
   ['case "$a" in *x*) rm -rf /etc;; esac', '/home/tester', /Refused to remove protected directory: \/etc$/],
@@ -4138,6 +4203,30 @@ const CASE_STATEMENT_BLOCKED = [
   // to be rm, so the glob at HOME is still refused.
   // 前面沒有 `case` 時，展開本身就是命令字：照舊假設是 rm，HOME 底下的 glob 照舊拒絕。
   ['"$a" in *x*', '/home/tester', /Refused to remove protected directory: \*x\*$/],
+  // BR-NEW-1 (2026-10-17): a case statement inside "$( )" -- the deletion after
+  // `esac` or in an arm is read and refused for its own target (ALLOWED at
+  // 5451a62: the first pattern's `)` ended the substitution).
+  // BR-NEW-1：`"$( )"` 裡的 case 敘述——`esac` 之後或 arm 裡的刪除要被讀到，並因為它自己的目標被拒。
+  ['echo "$(case x in a) :;; esac; rm -rf /etc)"', '/workspace/project',
+    /Refused to remove protected directory: \/etc$/],
+  ['echo "$(case "$a" in *x*) :;; esac; rm -rf /etc)"', '/workspace/project',
+    /Refused to remove protected directory: \/etc$/],
+  ['echo "$(x=$(case x in a) echo a;; esac); rm -rf /etc)"', '/workspace/project',
+    /Refused to remove protected directory: \/etc$/],
+  ['echo "$(case x in a) rm -rf /etc;; esac)"', '/workspace/project',
+    /Refused to remove protected directory: \/etc$/],
+  ['echo "$(case x in *) rm -rf ~/.git;; esac)"', '/workspace/project',
+    /Refused to remove protected directory: \/home\/tester\/\.git$/],
+  ['echo "$(echo "$(case x in a) :;; esac; rm -rf /etc)")"', '/workspace/project',
+    /Refused to remove protected directory: \/etc$/],
+  // The fail-closed side, deliberately pinned: a `case WORD in` header shape at
+  // a position the reader does not count as command position. Here bash reads
+  // `case x in y` as echo's arguments, but the reader cannot tell that apart
+  // from a command position it does not model, so the read fails and the
+  // substitution is refused as unread. It names no deletion.
+  // 刻意釘住的 fail-closed 那一側：在 reader 不算命令位置的地方出現 `case WORD in` 標頭形狀。這裡 bash
+  // 把它當 echo 的引數，但 reader 分不出它與沒建模的命令位置，所以讀取失敗、以沒讀到拒絕。
+  ['echo "$(echo case x in y)"', '/workspace/project', /Rule: unreadable command substitution/],
 ];
 for (const [command, cwd] of CASE_STATEMENT_ALLOWED) {
   const { status, stdout } = runHookOverStdin(claude(command, cwd));
