@@ -106,16 +106,20 @@ The rows on the real /, /home and /mnt run behind that fence, each bounded at 15
 
 ## 環境需求 (Requirements)
 
-- Bash 4.0+
+- Bash 3.2+（macOS 內建的 /bin/bash 3.2.57 即可；腳本以 `#!/bin/bash` 執行）
 - 基本 Unix 工具（find, grep, awk, wc 等）
 - md5sum 或 sha256sum
 
 ## 測試目錄 (Test Directories)
 
-測試腳本會使用以下臨時目錄：
-- `/tmp/better-rm-test-trash` - 測試用垃圾桶目錄
-- `/tmp/better-rm-test-state` - 測試用狀態與日誌目錄
-- `/tmp/better-rm-test-work` - 測試工作目錄
+測試腳本使用的臨時目錄都以這一次執行的識別碼結尾（`<id>` 是 `BETTER_RM_TEST_RUN_ID`，未設定時是腳本的 PID），所以同時跑的兩次測試不會互相刪掉對方的 fixture：
+- `/tmp/better-rm-test-trash.<id>` - 測試用垃圾桶目錄
+- `/tmp/better-rm-test-state.<id>` - 測試用狀態與日誌目錄
+- `/tmp/better-rm-test-work.<id>` - 測試工作目錄
+- `/tmp/better-rm-test-state-blocker.<id>` - 測試「狀態目錄不可用」的一般檔案
+- `/tmp/custom-trash-test.<id>`、`/tmp/custom-better-rm-state-test.<id>`、`/tmp/custom-xdg-state-test.<id>`、`/tmp/better-rm-state-fallback-home.<id>` - 測試 12 的自訂位置
+
+唯一刻意不帶識別碼的是測試 0 的 `/tmp/better-rm-test-work`：它模擬「舊版寫死名稱的另一次執行」，裡面只放帶識別碼的 canary 檔，清理時只刪自己的 canary，目錄只有在是這一次建立且已清空時才移除。
 
 測試完成後會自動清理。
 

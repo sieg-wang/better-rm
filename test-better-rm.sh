@@ -187,16 +187,53 @@ test_item "setup() 不得刪掉另一個並行執行的 fixture"
 # Plant a directory a CONCURRENT run would own, spelled with the fixed name these
 # paths used to have, so this row is red on that version by construction: its
 # setup() deletes exactly this path.
+# The canary carries this run's id, and the cleanup removes only that file, plus
+# the directory when this run created it and it is empty (BR1-N-1): another run
+# may be using the same fixed-name directory at the same moment.
+# canary 帶著這一次執行的識別碼，清理只刪那個檔案；目錄只有在是這一次建的、而且空了的時候才
+# 移除（BR1-N-1）：另一個執行可能正在用同一個寫死名稱的目錄。
 concurrent_fixture="/tmp/better-rm-test-work"
-mkdir -p "$concurrent_fixture"
-: > "$concurrent_fixture/canary"
-setup
-if [ -f "$concurrent_fixture/canary" ]; then
+concurrent_canary_check() {
+    local created=0
+    local survived=1
+    local canary="$concurrent_fixture/canary.$TEST_RUN_ID"
+    [ -e "$concurrent_fixture" ] || [ -L "$concurrent_fixture" ] || created=1
+    mkdir -p "$concurrent_fixture"
+    : > "$canary"
+    setup
+    [ -f "$canary" ] || survived=0
+    rm -f "$canary"
+    if [ "$created" -eq 1 ]; then
+        rmdir "$concurrent_fixture" 2>/dev/null || true
+    fi
+    [ "$survived" -eq 1 ]
+}
+if concurrent_canary_check; then
     test_pass "並行執行的 fixture 未被這一次的 setup 刪除"
 else
     test_fail "setup() 刪掉了另一個執行的 fixture（fixture 路徑又變回寫死的了）"
 fi
-rm -rf "$concurrent_fixture"
+
+test_item "上一列只收拾自己的 canary：另一個執行的 canary 與目錄都留著"
+# BR1-N-1（2026-10-17）：上一列原本在結尾無條件 rm -rf 那個寫死名稱的目錄，所以兩個同時跑的
+# 套件會互相刪掉對方的 canary——對方那一列就假紅。這裡先放一個「另一個執行」的 canary，再跑一次
+# 上一列的檢查，要求那個 canary 與目錄都還在。
+# BR1-N-1 (2026-10-17): the row above ended with an unconditional rm -rf of that
+# fixed-name directory, so two suites running at once deleted each other's
+# canary and the other run's row went falsely red. Plant "another run's" canary,
+# run the row's check once more, and require that canary and the directory to
+# survive.
+concurrent_foreign_canary="$concurrent_fixture/canary.foreign.$TEST_RUN_ID"
+mkdir -p "$concurrent_fixture"
+: > "$concurrent_foreign_canary"
+concurrent_canary_check >/dev/null 2>&1
+if [ -f "$concurrent_foreign_canary" ] && [ -d "$concurrent_fixture" ]; then
+    test_pass "那一列只收拾了自己的 canary"
+else
+    test_fail "那一列刪掉了另一個執行的 canary 或目錄"
+fi
+rm -f "$concurrent_foreign_canary"
+rmdir "$concurrent_fixture" 2>/dev/null || true
 
 test_item "四個 fixture 路徑都必須帶著這一次執行的識別碼"
 # 上一項是行為，這一項是結構：任何一個路徑被改回寫死的字面值，這裡就紅。兩項都要，
@@ -215,6 +252,28 @@ if [ -z "$runid_missing" ]; then
     test_pass "四個 fixture 路徑都以執行識別碼結尾"
 else
     test_fail "這些 fixture 路徑沒有帶執行識別碼:${runid_missing}"
+fi
+
+test_item "這個檔案指派的每一個 /tmp 路徑都帶著執行識別碼（刻意寫死的 canary 除外）"
+# BR1-N-1（2026-10-17）：上一列只看四個 TEST_* 根目錄，而測試 12 另有四個寫死的 /tmp 名稱
+# （自訂垃圾桶、自訂狀態目錄、XDG、回退用的 HOME），每一列前後都 rm -rf。兩個同時跑的套件會刪掉
+# 對方的 fixture（假紅），而 `find "$custom_trash" -name ...` 這種斷言也會被對方留下的項目滿足
+# （假綠）。這一列讀本檔自己的原始碼，任何 `名稱="/tmp/...` 的指派都必須含 $TEST_RUN_ID；唯一的
+# 例外是第 0 節刻意用舊的寫死名稱放的 canary。
+# BR1-N-1 (2026-10-17): the row above checks the four TEST_* roots only, and Test
+# 12 had four more fixed /tmp names (custom trash, custom state dir, XDG, the
+# fallback HOME), each rm -rf'ed before and after its row. Two suites running at
+# once deleted each other's fixtures (false red), and an assertion like
+# `find "$custom_trash" -name ...` could be satisfied by the other run's entry
+# (false green). This row reads this file's own source: every `name="/tmp/...`
+# assignment must carry $TEST_RUN_ID, except the canary Test 0 plants under the
+# old fixed name on purpose.
+fixed_tmp_assignments=$(grep -nE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*="/tmp/' "${BASH_SOURCE[0]}" |
+    grep -v 'TEST_RUN_ID' | grep -vE '^[0-9]+:[[:space:]]*concurrent_fixture="/tmp/better-rm-test-work"$')
+if [ -z "$fixed_tmp_assignments" ]; then
+    test_pass "沒有任何寫死、不帶執行識別碼的 /tmp fixture 路徑"
+else
+    test_fail "這些 /tmp 指派沒有帶執行識別碼: $(printf '%s' "$fixed_tmp_assignments" | tr '\n' ';')"
 fi
 
 test_title "測試 1: 版本與說明資訊"
@@ -1869,7 +1928,7 @@ fi
 test_title "測試 12: 自訂垃圾桶目錄"
 
 test_item "使用自訂 TRASH_DIR"
-custom_trash="/tmp/custom-trash-test"
+custom_trash="/tmp/custom-trash-test.$TEST_RUN_ID"
 rm -rf "$custom_trash"
 cd "$TEST_WORK_DIR"
 echo "custom trash test" > customtest.txt
@@ -1885,7 +1944,7 @@ fi
 rm -rf "$custom_trash"
 
 test_item "使用自訂 BETTER_RM_STATE_DIR"
-custom_state="/tmp/custom-better-rm-state-test"
+custom_state="/tmp/custom-better-rm-state-test.$TEST_RUN_ID"
 rm -rf "$custom_state"
 echo "custom state test" > customstatetest.txt
 BETTER_RM_STATE_DIR="$custom_state" "$BETTER_RM" customstatetest.txt
@@ -1897,7 +1956,7 @@ fi
 rm -rf "$custom_state"
 
 test_item "使用 XDG_STATE_HOME"
-custom_xdg_state="/tmp/custom-xdg-state-test"
+custom_xdg_state="/tmp/custom-xdg-state-test.$TEST_RUN_ID"
 rm -rf "$custom_xdg_state"
 echo "xdg state test" > xdgstatetest.txt
 BETTER_RM_STATE_DIR="" XDG_STATE_HOME="$custom_xdg_state" "$BETTER_RM" xdgstatetest.txt
@@ -1910,7 +1969,7 @@ fi
 rm -rf "$custom_xdg_state"
 
 test_item "相對 XDG_STATE_HOME 回退預設狀態目錄"
-fallback_home="/tmp/better-rm-state-fallback-home"
+fallback_home="/tmp/better-rm-state-fallback-home.$TEST_RUN_ID"
 rm -rf "$fallback_home"
 mkdir -p "$fallback_home"
 echo "fallback state test" > fallbackstatetest.txt

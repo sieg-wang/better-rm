@@ -1225,7 +1225,7 @@ mv ~/.Trash/home/user/projects/myapp/file.txt__20251209_143052_123456789__hash /
 ### 相容性
 
 - **作業系統**：Linux, macOS, Unix-like 系統
-- **Shell**：Bash 4.0+
+- **Shell**：Bash 3.2+（macOS 內建的 /bin/bash 3.2.57 即可）
 - **依賴**：基本的 Unix 工具（`mv`, `mkdir`, `readlink`/`realpath`）
 - **`--restore` 另外硬性依賴 `mktemp`**：覆蓋流程建立在「只有本行程能建立、名稱不可預測的暫存目錄」之上，沒有它就沒有安全的還原路徑，因此找不到 `mktemp` 時 `--restore` 會直接中止並指名缺的是什麼。刪除功能不受影響。跨裝置的空間判斷另外會用到 `df` 與 `du`，量不到時一律照舊走「移入垃圾桶」。
 
