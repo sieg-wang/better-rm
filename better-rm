@@ -1102,11 +1102,29 @@ move_to_trash() (
             move_error=$(move_without_clobber "$source" "$target" 2>&1 >/dev/null) ||
                 move_status=$?
             if [ "$move_status" -eq 0 ]; then
+                # 回傳 0 不代表搬走了：BSD 的 -n 在目標已存在時什麼都不做也回傳 0。要看
+                # 「原本那個 inode 還在不在原處」，不能只看名字：別的行程可能在 mv 之後
+                # 立刻用同一個名字建出新東西（lock/pid/log 檔、編輯器 swap 檔），那時原本
+                # 的項目已經在垃圾桶裡，當成「沒搬」就會漏掉日誌並回報失敗。名字還在但
+                # 身分讀不到時照舊當成略過：無法確認不等於已搬走。
+                # A zero exit does not mean the move happened: BSD -n does nothing and
+                # returns 0 when the target exists. Ask whether the ORIGINAL inode is
+                # still at its name, not just whether the name exists: another process
+                # can recreate the name right after the mv (lock, pid or log files,
+                # editor swap files), and the original then already sits in the trash;
+                # calling that "not moved" loses its log record and reports a failure.
+                # A name that exists but whose identity cannot be read still counts as
+                # a skip: "cannot confirm" is not "moved".
                 if [ -e "$source" ] || [ -L "$source" ]; then
-                    rmdir "$reservation" 2>/dev/null || true
-                    reservation=""
-                    attempt=$((attempt + 1))
-                    continue
+                    local at_source_identity=""
+                    at_source_identity=$(path_identity "$source")
+                    if [ -z "$at_source_identity" ] ||
+                       [ "$at_source_identity" = "$source_identity" ]; then
+                        rmdir "$reservation" 2>/dev/null || true
+                        reservation=""
+                        attempt=$((attempt + 1))
+                        continue
+                    fi
                 fi
                 # BSD mv 仍可能把實際目錄視為容器；若晚到的 writer 建立 target，
                 # 真實目的地會是 target/basename(source)，須回復來源後改用 suffix。

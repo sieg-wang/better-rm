@@ -4591,6 +4591,112 @@ else
     test_fail "同 device 的反覆失敗沒有停下來（exit=${samedev_status}；mv 呼叫=${samedev_call_count}；垃圾桶項目=${samedev_entry_count}；訊息=$(printf '%s' "$samedev_output" | head -c 400)）"
 fi
 
+# mv 成功之後，「BSD -n 略過了」原本是從「來源的名字還在」推論出來的。別的行程在 mv 之後
+# 立刻用同一個名字建出新東西（lock/pid/log 檔、編輯器的 swap 檔、watcher），下一輪的身分
+# 檢查就會失敗、回報「未移動」，而原本的項目已經在垃圾桶裡、沒有任何日誌。判斷要看身分：
+# 原本那個 inode 還在原處才是略過。
+# After a successful mv, "BSD -n skipped" used to be inferred from the source NAME
+# still existing. When another process recreates that name right after the mv
+# (lock, pid or log files, editor swap files, watchers), the next pass fails its
+# identity check and reports "not moved" while the original already sits in the
+# trash with no log record. The decision has to be by identity: only the original
+# inode still at its name is a skip.
+test_item "mv 成功後來源名字立刻被別人重建：原本的項目照樣算刪除、有日誌、還原得回來"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+recreate_bin="$TEST_WORK_DIR/recreate-mv-bin"
+recreate_mark="$TEST_WORK_DIR/recreate-mv.mark"
+mkdir -p "$recreate_bin"
+cat > "$recreate_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+done
+"$BETTER_RM_REAL_MV" "$@"
+mv_status=$?
+if [ "$mv_status" -eq 0 ] && [ ! -e "$BETTER_RM_RECREATE_MARK" ]; then
+    : > "$BETTER_RM_RECREATE_MARK"
+    printf '%s\n' "NEW CONTENT" > "$src"
+fi
+exit "$mv_status"
+EOF
+chmod +x "$recreate_bin/mv"
+printf '%s\n' "ORIGINAL CONTENT" > recreated.txt
+recreate_status=0
+recreate_output=$(BETTER_RM_RECREATE_MARK="$recreate_mark" \
+    BETTER_RM_REAL_MV="$(command -v mv)" \
+    PATH="$recreate_bin:$PATH" "$BETTER_RM" recreated.txt 2>&1) || recreate_status=$?
+recreate_entries=$(find "$TEST_TRASH_DIR" -type f -name 'recreated.txt__*' 2>/dev/null | wc -l | tr -d ' ')
+recreate_entry=$(find "$TEST_TRASH_DIR" -type f -name 'recreated.txt__*' 2>/dev/null | head -n 1)
+recreate_records=$(grep -v '^#' "$TEST_STATE_DIR/deletion.log" 2>/dev/null | grep -c 'recreated\.txt')
+mkdir -p recreate_restore_here
+recreate_restore_status=0
+(cd recreate_restore_here && "$BETTER_RM" --restore recreated.txt >/dev/null 2>&1) ||
+    recreate_restore_status=$?
+if [ "$recreate_status" -eq 0 ] &&
+   [ "$(cat recreated.txt 2>/dev/null)" = "NEW CONTENT" ] &&
+   [ "$recreate_entries" = "1" ] &&
+   [ "$recreate_records" = "1" ] &&
+   grep -qF " | $recreate_entry | " "$TEST_STATE_DIR/deletion.log" &&
+   [ "$recreate_restore_status" -eq 0 ] &&
+   [ "$(cat recreate_restore_here/recreated.txt 2>/dev/null)" = "ORIGINAL CONTENT" ]; then
+    test_pass "名字被重建時，原本的項目仍記錄為已刪除並能還原，新檔案原封不動"
+else
+    test_fail "名字被重建時原本的項目被當成沒移動（exit=${recreate_status}；垃圾桶項目=${recreate_entries}；日誌=${recreate_records}；還原=${recreate_restore_status}；訊息=${recreate_output}）"
+fi
+
+test_item "mv 回傳 0 卻什麼都沒搬（BSD -n 遇到既有目標）：不得記錄別人的物件，改用 suffixed 目標"
+# 上一列的修法若寫成「mv 回傳 0 就記錄」，這一列會紅：真實的 BSD `mv -n` 在目標已存在
+# 時回傳 0 而不搬；這裡用 shim 在第一次呼叫時放一個別人的檔案到目標並回傳 0，以便在
+# GNU 與 BSD 上都重現。
+# A fix for the row above written as "log whenever mv returned 0" turns this row
+# red: real BSD `mv -n` returns 0 and moves nothing when the target exists; a shim
+# puts someone else's file at the target on its first call and returns 0, so the
+# shape reproduces on GNU and BSD alike.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+skip_bin="$TEST_WORK_DIR/skip-mv-bin"
+skip_calls="$TEST_WORK_DIR/skip-mv.calls"
+skip_mark="$TEST_WORK_DIR/skip-mv.mark"
+mkdir -p "$skip_bin"
+cat > "$skip_bin/mv" <<'EOF'
+#!/bin/sh
+dst=""
+for arg in "$@"; do dst="$arg"; done
+printf '%s\n' "$dst" >> "$BETTER_RM_SKIP_CALLS"
+if [ ! -e "$BETTER_RM_SKIP_MARK" ]; then
+    : > "$BETTER_RM_SKIP_MARK"
+    printf '%s\n' "FOREIGN" > "$dst"
+    exit 0
+fi
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$skip_bin/mv"
+printf '%s\n' "SKIP ORIGINAL" > skipped.txt
+skip_status=0
+skip_output=$(BETTER_RM_SKIP_CALLS="$skip_calls" \
+    BETTER_RM_SKIP_MARK="$skip_mark" \
+    BETTER_RM_REAL_MV="$(command -v mv)" \
+    PATH="$skip_bin:$PATH" "$BETTER_RM" skipped.txt 2>&1) || skip_status=$?
+skip_foreign=$(head -n 1 "$skip_calls" 2>/dev/null)
+skip_entry=$(find "$TEST_TRASH_DIR" -type f -name 'skipped.txt__*__*__1_*' 2>/dev/null | head -n 1)
+skip_records=$(grep -v '^#' "$TEST_STATE_DIR/deletion.log" 2>/dev/null | grep -c 'skipped\.txt')
+if [ "$skip_status" -eq 0 ] &&
+   [ ! -e skipped.txt ] &&
+   [ "$(cat "$skip_foreign" 2>/dev/null)" = "FOREIGN" ] &&
+   [ -n "$skip_entry" ] &&
+   [ "$(cat "$skip_entry" 2>/dev/null)" = "SKIP ORIGINAL" ] &&
+   [ "$skip_records" = "1" ] &&
+   grep -qF " | $skip_entry | " "$TEST_STATE_DIR/deletion.log"; then
+    test_pass "略過的 mv 改用 suffixed 目標完成，日誌只記錄自己的項目，別人的檔案原封不動"
+else
+    test_fail "略過的 mv 處理錯誤（exit=${skip_status}；日誌=${skip_records}；suffixed='${skip_entry}'；訊息=${skip_output}）"
+fi
+
 # ============================================================================
 # 測試 15: 受保護清單全覆蓋 (Test 15: every PROTECTED_DIRS entry)
 # ============================================================================
