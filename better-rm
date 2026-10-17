@@ -2400,6 +2400,14 @@ main() {
 
     # 檢查是否有指定檔案
     # Check if files are specified
+    # -f 而沒有操作對象：POSIX 規定不得改變結束狀態，/bin/rm -f 安靜地以 0 結束。force_mode
+    # 已經是 -f／-i「最後一個說了算」的結果，所以 -fi 照舊報錯、-if 安靜成功（BR2-4）。
+    # -f with no operands: POSIX says the exit status must not change, and /bin/rm -f
+    # exits 0 silently. force_mode already encodes the -f/-i last-wins rule, so -fi
+    # still errors and -if succeeds quietly (BR2-4).
+    if [ ${#files[@]} -eq 0 ] && [ "$force_mode" = "1" ]; then
+        return 0
+    fi
     if [ ${#files[@]} -eq 0 ]; then
         error_msg "缺少操作對象"
         error_msg "missing operand"

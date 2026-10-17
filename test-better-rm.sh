@@ -862,6 +862,39 @@ else
     test_fail "-f 參數未正確處理"
 fi
 
+test_item "-f 而沒有任何操作對象時安靜地以 0 結束；沒有 -f 時仍是 missing operand"
+# BR2-4（2026-10-17）：POSIX 規定 rm -f 在沒有操作對象時不得改變結束狀態，/bin/rm -f 安靜地
+# 以 0 結束；better-rm -f 卻以 1 與「missing operand」結束。rm 在這台機器上是 better-rm 的
+# alias，所以 `rm -f $(ls *.tmp 2>/dev/null) && make` 在沒有符合的檔案時就停了。-f 與 -i 照舊
+# 是最後一個說了算：-fi 由 -i 勝出（仍是 missing operand），-if 由 -f 勝出。裸的 better-rm
+# 仍然報錯，否則「無條件成功」的修法也會通過。
+# BR2-4 (2026-10-17): POSIX says rm -f must not change the exit status when
+# there are no operands, and /bin/rm -f exits 0 silently; better-rm -f exited 1
+# with "missing operand". rm is aliased to better-rm on this machine, so
+# `rm -f $(ls *.tmp 2>/dev/null) && make` stopped whenever nothing matched. -f
+# and -i keep their last-wins rule: -fi lets -i win (still a missing operand),
+# -if lets -f win. A bare better-rm still errors, or an unconditional success
+# would pass too.
+noop_f_status=0
+noop_f_err=$("$BETTER_RM" -f 2>&1 >/dev/null) || noop_f_status=$?
+noop_rf_status=0
+noop_rf_err=$("$BETTER_RM" -rf 2>&1 >/dev/null) || noop_rf_status=$?
+noop_bare_status=0
+noop_bare_err=$("$BETTER_RM" 2>&1 >/dev/null) || noop_bare_status=$?
+noop_fi_status=0
+noop_fi_err=$("$BETTER_RM" -fi 2>&1 >/dev/null) || noop_fi_status=$?
+noop_if_status=0
+noop_if_err=$("$BETTER_RM" -if 2>&1 >/dev/null) || noop_if_status=$?
+if [ "$noop_f_status" -eq 0 ] && [ -z "$noop_f_err" ] &&
+   [ "$noop_rf_status" -eq 0 ] && [ -z "$noop_rf_err" ] &&
+   [ "$noop_bare_status" -eq 1 ] && [[ "$noop_bare_err" == *"missing operand"* ]] &&
+   [ "$noop_fi_status" -eq 1 ] && [[ "$noop_fi_err" == *"missing operand"* ]] &&
+   [ "$noop_if_status" -eq 0 ] && [ -z "$noop_if_err" ]; then
+    test_pass "-f／-rf／-if 無操作對象時安靜成功，裸呼叫與 -fi 仍報 missing operand"
+else
+    test_fail "無操作對象時的結束狀態不對（-f=${noop_f_status}；-rf=${noop_rf_status}；裸=${noop_bare_status}；-fi=${noop_fi_status}；-if=${noop_if_status}；-f 的 stderr=${noop_f_err}）"
+fi
+
 test_item "組合參數 (-rf)"
 mkdir -p rftest/subdir
 echo "content" > rftest/file.txt
