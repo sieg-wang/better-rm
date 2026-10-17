@@ -4337,6 +4337,73 @@ else
     test_fail "保留鎖互斥失效：寫入了被保留的 base_target 或未產生 suffixed 項目（suffixed=$mutex_suffixed）"
 fi
 
+test_item "同裝置 mv 因目標被別人佔走而失敗時，改用 suffixed 目標重試，兩邊都保留"
+# 同一個檔案系統上的 mv 就是 rename(2)，不會留下半份目標；它失敗而來源與目標都在，
+# 目標只可能是別的行程放的。這正是 move_to_trash 在 mv 失敗後「改用 suffix 重試」那一支
+# 的唯一正當情境，跨裝置失敗不該走它（那裡的目標是 mv 自己複製出來的半成品）。真實的
+# macOS `mv -n -h` 在目標已存在時回傳 0（略過檔案、或把目錄搬進既有目錄裡），走不到
+# 這一支，所以用 shim 重現 GNU `mv -n -T` 回報略過、或 rename(2) ENOTEMPTY 的結果：第
+# 一次呼叫時在目的地放一個非空目錄、什麼都不搬、以 1 結束；之後的呼叫交給真的 mv。
+# 刪掉這一支，結果會變成「Failed to remove」。
+# A same-filesystem mv is rename(2), which never leaves a partial target, so a
+# failure with both the source and the target present can only mean someone else
+# put the target there. That is the one legitimate case for move_to_trash's
+# "retry with a suffix after a failed mv" branch; a cross-device failure must not
+# take it (there the target is mv's own partial copy). Real macOS `mv -n -h`
+# returns 0 when the target exists (it skips a file, or moves a directory INTO an
+# existing directory) and never reaches this branch, so a shim reproduces what GNU
+# `mv -n -T` reporting a skip, or rename(2) failing with ENOTEMPTY, leaves behind:
+# on its first call it puts a non-empty directory at the destination, moves
+# nothing and exits 1; later calls go to the real mv. With the branch deleted the
+# result is "Failed to remove".
+setup
+cd "$TEST_WORK_DIR" || exit 1
+collide_bin="$TEST_WORK_DIR/collide-mv-bin"
+collide_calls_log="$TEST_WORK_DIR/collide-mv.calls"
+collide_mark="$TEST_WORK_DIR/collide-mv.mark"
+mkdir -p "$collide_bin"
+cat > "$collide_bin/mv" <<'EOF'
+#!/bin/sh
+dst=""
+for arg in "$@"; do dst="$arg"; done
+printf '%s\n' "$dst" >> "$BETTER_RM_COLLIDE_CALLS"
+if [ ! -e "$BETTER_RM_COLLIDE_MARK" ]; then
+    : > "$BETTER_RM_COLLIDE_MARK"
+    mkdir -p "$dst" || exit 2
+    printf '%s\n' "OCCUPANT" > "$dst/occupant.txt"
+    exit 1
+fi
+exec "$BETTER_RM_REAL_MV" "$@"
+EOF
+chmod +x "$collide_bin/mv"
+printf '%s\n' "COLLIDE ORIGINAL" > collide.txt
+collide_status=0
+collide_output=$(BETTER_RM_COLLIDE_CALLS="$collide_calls_log" \
+    BETTER_RM_COLLIDE_MARK="$collide_mark" \
+    BETTER_RM_REAL_MV="$(command -v mv)" \
+    PATH="$collide_bin:$PATH" "$BETTER_RM" collide.txt 2>&1) || collide_status=$?
+collide_calls=$(wc -l < "$collide_calls_log" 2>/dev/null | tr -d ' ')
+collide_occupant=$(head -n 1 "$collide_calls_log" 2>/dev/null)
+collide_occupant_entries=$(find "$collide_occupant" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')
+collide_entry=$(find "$TEST_TRASH_DIR" -type f -name 'collide.txt__*__*__1_*' -print 2>/dev/null)
+collide_entry_count=$(find "$TEST_TRASH_DIR" -type f -name 'collide.txt__*__*__1_*' 2>/dev/null |
+    wc -l | tr -d ' ')
+collide_records=$(grep -v '^#' "$TEST_STATE_DIR/deletion.log" 2>/dev/null | grep -c 'collide\.txt')
+if [ "$collide_status" -eq 0 ] &&
+   [ ! -e collide.txt ] &&
+   [ "$collide_calls" = "2" ] &&
+   [ "$collide_entry_count" = "1" ] &&
+   [ "$(cat "$collide_entry" 2>/dev/null)" = "COLLIDE ORIGINAL" ] &&
+   [ "$collide_records" = "1" ] &&
+   grep -qF " | $collide_entry | " "$TEST_STATE_DIR/deletion.log" &&
+   [ -d "$collide_occupant" ] &&
+   [ "$collide_occupant_entries" = "1" ] &&
+   [ "$(cat "$collide_occupant/occupant.txt" 2>/dev/null)" = "OCCUPANT" ]; then
+    test_pass "目標被佔走時改用 __1_ suffix 重試成功並記錄一筆，別人的目錄原封不動"
+else
+    test_fail "目標被佔走時沒有正確重試（exit=${collide_status}；mv 呼叫=${collide_calls}；suffixed=${collide_entry_count}；日誌=${collide_records}；佔位項目=${collide_occupant_entries}；訊息=${collide_output}）"
+fi
+
 # ============================================================================
 # 測試 15: 受保護清單全覆蓋 (Test 15: every PROTECTED_DIRS entry)
 # ============================================================================
