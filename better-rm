@@ -1049,6 +1049,12 @@ move_to_trash() (
     local attempt=0
     local moved=0
     local current_source_identity
+    # mv 失敗後「目標與來源都在」唯一一次被當成名稱碰撞時，那個目標的路徑（見迴圈尾端）。
+    # The target left in place the one time a failed mv with both paths present was
+    # taken as a name collision (see the end of the loop).
+    local failed_move_target=""
+    local move_error=""
+    local move_status=0
     # 時間戳記/hash 組合不保證唯一；保留同層 lock 目錄，並以不覆寫模式移動。
     # The timestamp/hash pair is not unique; reserve a sibling lock directory
     # and move without clobbering. A late writer leaves the source in place.
@@ -1087,7 +1093,15 @@ move_to_trash() (
                 error_msg "Source '$source_label' changed before move; not moved"
                 return 1
             fi
-            if move_without_clobber "$source" "$target" 2>/dev/null; then
+            # mv 的 stderr 留下來：失敗時那是唯一說得出原因的東西（讀不到的檔案、唯讀
+            # 卷宗、空間不足），以前被丟進 /dev/null，使用者只看得到一句泛稱。
+            # Keep mv's stderr: on failure it is the only thing that can say why (an
+            # unreadable file, a read-only volume, no space), and it used to go to
+            # /dev/null, leaving the user a generic sentence.
+            move_status=0
+            move_error=$(move_without_clobber "$source" "$target" 2>&1 >/dev/null) ||
+                move_status=$?
+            if [ "$move_status" -eq 0 ]; then
                 if [ -e "$source" ] || [ -L "$source" ]; then
                     rmdir "$reservation" 2>/dev/null || true
                     reservation=""
@@ -1174,8 +1188,45 @@ move_to_trash() (
                 moved=1
                 break
             fi
-            if { [ -e "$target" ] || [ -L "$target" ]; } &&
+            # mv 失敗了。目標在、來源也在時，要先問那個目標是誰放的：
+            # - 同一個檔案系統上 mv 就是 rename(2)，不會留下半份目標，所以目標只可能是
+            #   別的行程放的——名稱碰撞，換個 suffix 重試。
+            # - 跨裝置時 mv 是「cp 再 rm」，目標是 mv 自己的（可能不完整的）複本。把它當成
+            #   碰撞，就會一份接一份地複製，最多 1000 份，直到磁碟滿（2026-10-17 在真實
+            #   的第二個檔案系統上量到：一個讀不到的檔案或一個唯讀的來源卷宗就足夠）。
+            # 裝置要比「落點目錄」的，不是垃圾桶根目錄的：根目錄底下可能掛著別的卷宗。
+            # 量不出裝置就當成跨裝置（不重試）。同一個 st_dev 也不保證 rename 可用（Linux
+            # bind mount 兩邊 st_dev 相同、rename 卻回 EXDEV），所以這種碰撞最多只認一次。
+            # mv failed. With the target AND the source present, ask who put the
+            # target there first:
+            # - On one filesystem mv is rename(2), which never leaves a partial target,
+            #   so it can only be another process's object: a name collision, retried
+            #   under a suffix.
+            # - Across devices mv is cp-then-rm and the target is mv's OWN, possibly
+            #   incomplete, copy. Taking that for a collision copies again and again, up
+            #   to 1000 copies or a full disk (measured 2026-10-17 on a real second
+            #   filesystem: one unreadable file, or a read-only source volume, is
+            #   enough).
+            # The device compared is the landing directory's, not the trash root's:
+            # another volume can be mounted below the root. An unmeasurable device counts
+            # as cross-device (no retry). The same st_dev does not guarantee a usable
+            # rename either (both sides of a Linux bind mount share st_dev while rename
+            # returns EXDEV), so this collision is accepted at most once.
+            local landing_identity=""
+            local same_device=0
+            local target_present=0
+            landing_identity=$(path_identity "$trash_path/.")
+            if [ -n "$landing_identity" ] &&
+               [ "${landing_identity%%:*}" = "${source_identity%%:*}" ]; then
+                same_device=1
+            fi
+            if [ -e "$target" ] || [ -L "$target" ]; then
+                target_present=1
+            fi
+            if [ "$same_device" -eq 1 ] && [ "$target_present" -eq 1 ] &&
+               [ -z "$failed_move_target" ] &&
                { [ -e "$source" ] || [ -L "$source" ]; }; then
+                failed_move_target="$target"
                 rmdir "$reservation" 2>/dev/null || true
                 reservation=""
                 attempt=$((attempt + 1))
@@ -1184,6 +1235,44 @@ move_to_trash() (
             rmdir "$reservation" 2>/dev/null || true
             error_msg "無法移除 '$source'"
             error_msg "Failed to remove '$source'"
+            if [ -n "$move_error" ]; then
+                # mv 自己的話原樣印出（不經過 echo -e，反斜線不會被解讀）。
+                # mv's own words, verbatim (not through echo -e, so backslashes stay).
+                printf '%s\n' "$move_error" >&2
+            fi
+            if [ "$target_present" -eq 1 ] && [ "$same_device" -eq 0 ]; then
+                # 跨裝置複製已經在垃圾桶留下一份。絕不刪它：來源被刪掉一部分時，它就是
+                # 唯一的完整複本。記進刪除日誌，--restore 才找得到它。
+                # The cross-device copy already left something in the trash. Never
+                # delete it: with the source partly removed it is the only complete
+                # copy. Log it so --restore can find it.
+                local partial_logged=0
+                log_deletion "$abs_path" "$target" "$file_hash" "$timestamp" "$file_type" ||
+                    partial_logged=$?
+                error_msg "跨檔案系統的搬移在途中失敗，垃圾桶裡留下一份可能不完整的複本: '$target'"
+                error_msg "The cross-filesystem move failed part way; a copy, possibly incomplete, is in the trash: '$target'"
+                if [ -e "$source" ] || [ -L "$source" ]; then
+                    error_msg "原本的 '$source_label' 仍在原處，但可能已被移除一部分"
+                    error_msg "The original '$source_label' is still in place but may have been partly removed"
+                else
+                    error_msg "原本的 '$source_label' 已不在原處；垃圾桶裡那一份就是剩下的全部"
+                    error_msg "The original '$source_label' is gone; the copy in the trash is all that is left"
+                fi
+                if [ "$partial_logged" -eq 0 ]; then
+                    error_msg "那一份已記入刪除日誌，rm --restore 找得到它"
+                    error_msg "That copy is recorded in the deletion log, so rm --restore can find it"
+                else
+                    error_msg "那一份沒能記入刪除日誌，rm --restore 找不到它；請直接從上面的路徑取回"
+                    error_msg "That copy could not be recorded in the deletion log, so rm --restore cannot find it; recover it from the path above"
+                fi
+            elif [ "$target_present" -eq 1 ]; then
+                error_msg "垃圾桶路徑上留有東西（別的行程放的，或 mv 跨越掛載點時自己複製的），未記入日誌: '$target'"
+                error_msg "Something is left at the trash path (another process's object, or a copy mv made across a mount boundary); it was not logged: '$target'"
+                if [ -n "$failed_move_target" ]; then
+                    error_msg "前一次失敗的 mv 也在這裡留下東西: '$failed_move_target'"
+                    error_msg "The previous failed mv also left something here: '$failed_move_target'"
+                fi
+            fi
             return 1
         fi
         reservation=""

@@ -4404,6 +4404,193 @@ else
     test_fail "目標被佔走時沒有正確重試（exit=${collide_status}；mv 呼叫=${collide_calls}；suffixed=${collide_entry_count}；日誌=${collide_records}；佔位項目=${collide_occupant_entries}；訊息=${collide_output}）"
 fi
 
+# 跨裝置時 mv 是「cp 再 rm」，失敗時垃圾桶裡留下的是 mv 自己的（可能不完整的）複本。
+# 把那種「目標在、來源也在」讀成名稱碰撞，就會換個 suffix 再複製一次，最多 1000 次：
+# 2026-10-17 的審查在真實的第二個檔案系統上量到，一個目錄裡只要有一個讀不到的檔案、
+# 或來源卷宗是唯讀的，就是 1000 次 mv、1000 份複本、沒有任何日誌，而 mv 自己說了什麼
+# 被丟掉，只剩「Failed to reserve a unique trash path」。來源被刪掉一部分時，唯一完整的
+# 那一份就在第一份沒記錄的複本裡，--restore 找不到它。
+# 這三列用 make_xdev_stat_shim（垃圾桶子樹回報 device 99）加一支 mv shim 重現。
+# Across devices mv is cp-then-rm, and what a failure leaves in the trash is
+# mv's OWN, possibly incomplete, copy. Reading that "target present, source
+# present" state as a name collision copies again under a new suffix, up to 1000
+# times: the 2026-10-17 review measured on a real second filesystem that one
+# unreadable file in a directory, or a read-only source volume, means 1000 mv
+# calls, 1000 copies and no log record, while mv's own words were discarded and
+# only "Failed to reserve a unique trash path" was printed. With the source
+# partly removed, the only complete copy sat in the first, unlogged entry, where
+# --restore could not find it.
+# These rows reproduce it with make_xdev_stat_shim (the trash subtree reports
+# device 99) and an mv shim.
+make_xdev_fail_mv_shim() {
+    local shim_bin="$1"
+    cat > "$shim_bin/mv" <<'EOF'
+#!/bin/sh
+count=$#
+i=0
+src=""
+dst=""
+for a in "$@"; do
+    i=$((i + 1))
+    if [ "$i" -eq $((count - 1)) ]; then src="$a"; fi
+    if [ "$i" -eq "$count" ]; then dst="$a"; fi
+done
+case "$src" in
+  "$BETTER_RM_XDEV_TRASH"/*) exec "$BETTER_RM_REAL_MV" "$@" ;;
+esac
+case "$dst" in
+  "$BETTER_RM_XDEV_TRASH"/*) ;;
+  *) exec "$BETTER_RM_REAL_MV" "$@" ;;
+esac
+printf '%s\n' "$dst" >> "$BETTER_RM_XDEV_CALLS"
+cp -R "$src" "$dst" || exit 2
+case "$BETTER_RM_XDEV_MODE" in
+  unreadable)
+    # 讀不到的那個檔案沒被複製過去，來源原封不動。
+    # The unreadable file never reached the copy; the source is untouched.
+    "$BETTER_RM_REAL_RM" -f "$dst/secret.txt"
+    printf '%s\n' "SHIM-XDEV: cp: secret.txt: Permission denied" >&2
+    ;;
+  partial)
+    # 複製完整，但 mv 的 rm 階段只刪掉了來源的一部分。
+    # The copy is complete, but mv's rm stage removed only part of the source.
+    "$BETTER_RM_REAL_RM" -f "$src/a.txt"
+    printf '%s\n' "SHIM-XDEV: rm: kept.txt: Permission denied" >&2
+    ;;
+esac
+exit 1
+EOF
+    chmod +x "$shim_bin/mv"
+}
+
+test_item "跨裝置 mv 複製途中失敗：只呼叫一次、只留一份並記錄、印出 mv 的錯誤，不當成名稱碰撞"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+xdevdel_bin="$TEST_WORK_DIR/xdevdel-bin"
+xdevdel_calls="$TEST_WORK_DIR/xdevdel.calls"
+make_xdev_stat_shim "$xdevdel_bin"
+make_xdev_fail_mv_shim "$xdevdel_bin"
+mkdir -p xdevdel_dir
+printf '%s\n' "A" > xdevdel_dir/a.txt
+printf '%s\n' "B" > xdevdel_dir/b.txt
+printf '%s\n' "SECRET" > xdevdel_dir/secret.txt
+xdevdel_status=0
+xdevdel_output=$(BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+    BETTER_RM_XDEV_CALLS="$xdevdel_calls" \
+    BETTER_RM_XDEV_MODE=unreadable \
+    BETTER_RM_REAL_STAT="$(command -v stat)" \
+    BETTER_RM_REAL_MV="$(command -v mv)" \
+    BETTER_RM_REAL_RM="$(command -v rm)" \
+    PATH="$xdevdel_bin:$PATH" \
+    "$BETTER_RM" -rf xdevdel_dir 2>&1) || xdevdel_status=$?
+xdevdel_call_count=$(wc -l < "$xdevdel_calls" 2>/dev/null | tr -d ' ')
+xdevdel_entry_count=$(find "$TEST_TRASH_DIR" -type d -name 'xdevdel_dir__*' -prune -print 2>/dev/null |
+    wc -l | tr -d ' ')
+xdevdel_entry=$(find "$TEST_TRASH_DIR" -type d -name 'xdevdel_dir__*' -prune -print 2>/dev/null | head -n 1)
+xdevdel_records=$(grep -v '^#' "$TEST_STATE_DIR/deletion.log" 2>/dev/null | grep -c 'xdevdel_dir')
+if [ "$xdevdel_status" -ne 0 ] &&
+   [ "$xdevdel_call_count" = "1" ] &&
+   [ "$xdevdel_entry_count" = "1" ] &&
+   [[ "$xdevdel_output" == *"SHIM-XDEV: cp: secret.txt: Permission denied"* ]] &&
+   [[ "$xdevdel_output" == *"$xdevdel_entry"* ]] &&
+   [ "$xdevdel_records" = "1" ] &&
+   grep -qF " | $xdevdel_entry | " "$TEST_STATE_DIR/deletion.log" &&
+   [ "$(cat xdevdel_dir/a.txt 2>/dev/null)" = "A" ] &&
+   [ "$(cat xdevdel_dir/b.txt 2>/dev/null)" = "B" ] &&
+   [ "$(cat xdevdel_dir/secret.txt 2>/dev/null)" = "SECRET" ]; then
+    test_pass "跨裝置失敗只複製一次，那一份有日誌且被指名，mv 的錯誤照實印出，來源完好"
+else
+    test_fail "跨裝置失敗被當成碰撞或沒交代清楚（exit=${xdevdel_status}；mv 呼叫=${xdevdel_call_count}；垃圾桶項目=${xdevdel_entry_count}；日誌=${xdevdel_records}；訊息=$(printf '%s' "$xdevdel_output" | head -c 400)）"
+fi
+
+test_item "跨裝置 mv 已刪掉部分來源才失敗：唯一完整的複本有日誌，--restore 找得回被刪的檔案"
+setup
+cd "$TEST_WORK_DIR" || exit 1
+xdevpart_bin="$TEST_WORK_DIR/xdevpart-bin"
+xdevpart_calls="$TEST_WORK_DIR/xdevpart.calls"
+make_xdev_stat_shim "$xdevpart_bin"
+make_xdev_fail_mv_shim "$xdevpart_bin"
+mkdir -p xdevpart_dir
+printf '%s\n' "PART A" > xdevpart_dir/a.txt
+printf '%s\n' "PART KEPT" > xdevpart_dir/kept.txt
+xdevpart_status=0
+xdevpart_output=$(BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+    BETTER_RM_XDEV_CALLS="$xdevpart_calls" \
+    BETTER_RM_XDEV_MODE=partial \
+    BETTER_RM_REAL_STAT="$(command -v stat)" \
+    BETTER_RM_REAL_MV="$(command -v mv)" \
+    BETTER_RM_REAL_RM="$(command -v rm)" \
+    PATH="$xdevpart_bin:$PATH" \
+    "$BETTER_RM" -rf xdevpart_dir 2>&1) || xdevpart_status=$?
+xdevpart_call_count=$(wc -l < "$xdevpart_calls" 2>/dev/null | tr -d ' ')
+xdevpart_entry_count=$(find "$TEST_TRASH_DIR" -type d -name 'xdevpart_dir__*' -prune -print 2>/dev/null |
+    wc -l | tr -d ' ')
+xdevpart_entry=$(find "$TEST_TRASH_DIR" -type d -name 'xdevpart_dir__*' -prune -print 2>/dev/null | head -n 1)
+# 還原到另一個目錄，不需要覆蓋任何東西；不經過 shim，垃圾桶項目本來就在同一個裝置上。
+# Restore into another directory so nothing has to be overwritten; no shims, the
+# trash entry really is on this device.
+mkdir -p xdevpart_restore_here
+xdevpart_restore_status=0
+(cd xdevpart_restore_here && "$BETTER_RM" --restore xdevpart_dir >/dev/null 2>&1) ||
+    xdevpart_restore_status=$?
+if [ "$xdevpart_status" -ne 0 ] &&
+   [ "$xdevpart_call_count" = "1" ] &&
+   [ "$xdevpart_entry_count" = "1" ] &&
+   [[ "$xdevpart_output" == *"SHIM-XDEV: rm: kept.txt: Permission denied"* ]] &&
+   [[ "$xdevpart_output" == *"$xdevpart_entry"* ]] &&
+   [ ! -e xdevpart_dir/a.txt ] &&
+   [ "$xdevpart_restore_status" -eq 0 ] &&
+   [ "$(cat xdevpart_restore_here/xdevpart_dir/a.txt 2>/dev/null)" = "PART A" ] &&
+   [ "$(cat xdevpart_restore_here/xdevpart_dir/kept.txt 2>/dev/null)" = "PART KEPT" ]; then
+    test_pass "部分來源已被刪時只有一份複本、它被指名且記錄，--restore 取回了被刪的檔案"
+else
+    test_fail "部分來源已被刪時資料找不回來（exit=${xdevpart_status}；mv 呼叫=${xdevpart_call_count}；垃圾桶項目=${xdevpart_entry_count}；還原=${xdevpart_restore_status}；訊息=$(printf '%s' "$xdevpart_output" | head -c 400)）"
+fi
+
+test_item "同一個 device 上 mv 一再失敗並留下複本時（例如跨 bind mount 的 EXDEV），不會無止盡重試"
+# 同一個 st_dev 不保證 rename 可用：Linux 的 bind mount 兩邊 st_dev 相同，rename 卻回
+# EXDEV，mv 於是改用複製，失敗時一樣留下自己的複本。這種形狀裝置比對看不出來，所以「失敗
+# 後目標與來源都在」最多只當一次名稱碰撞；再發生一次就照實報錯、指出兩個路徑，不再複製。
+# The same st_dev does not guarantee a usable rename: both sides of a Linux bind
+# mount share st_dev while rename returns EXDEV, so mv falls back to copying and
+# a failure again leaves its own copy behind. A device comparison cannot see that
+# shape, so "target and source both present after a failed mv" counts as a name
+# collision at most once; the second time it is reported, naming both paths,
+# and nothing is copied again.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+samedev_bin="$TEST_WORK_DIR/samedev-fail-bin"
+samedev_calls="$TEST_WORK_DIR/samedev.calls"
+mkdir -p "$samedev_bin"
+make_xdev_fail_mv_shim "$samedev_bin"
+mkdir -p samedev_dir
+printf '%s\n' "SAME A" > samedev_dir/a.txt
+printf '%s\n' "SECRET" > samedev_dir/secret.txt
+samedev_status=0
+samedev_output=$(BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+    BETTER_RM_XDEV_CALLS="$samedev_calls" \
+    BETTER_RM_XDEV_MODE=unreadable \
+    BETTER_RM_REAL_MV="$(command -v mv)" \
+    BETTER_RM_REAL_RM="$(command -v rm)" \
+    PATH="$samedev_bin:$PATH" \
+    "$BETTER_RM" -rf samedev_dir 2>&1) || samedev_status=$?
+samedev_call_count=$(wc -l < "$samedev_calls" 2>/dev/null | tr -d ' ')
+samedev_entry_count=$(find "$TEST_TRASH_DIR" -type d -name 'samedev_dir__*' -prune -print 2>/dev/null |
+    wc -l | tr -d ' ')
+samedev_last_entry=$(tail -n 1 "$samedev_calls" 2>/dev/null)
+if [ "$samedev_status" -ne 0 ] &&
+   [ "$samedev_call_count" = "2" ] &&
+   [ "$samedev_entry_count" = "2" ] &&
+   [[ "$samedev_output" == *"SHIM-XDEV: cp: secret.txt: Permission denied"* ]] &&
+   [ -n "$samedev_last_entry" ] &&
+   [[ "$samedev_output" == *"$samedev_last_entry"* ]] &&
+   [ "$(cat samedev_dir/a.txt 2>/dev/null)" = "SAME A" ] &&
+   [ "$(cat samedev_dir/secret.txt 2>/dev/null)" = "SECRET" ]; then
+    test_pass "同 device 的反覆失敗只重試一次就停，留下的路徑被指名，來源完好"
+else
+    test_fail "同 device 的反覆失敗沒有停下來（exit=${samedev_status}；mv 呼叫=${samedev_call_count}；垃圾桶項目=${samedev_entry_count}；訊息=$(printf '%s' "$samedev_output" | head -c 400)）"
+fi
+
 # ============================================================================
 # 測試 15: 受保護清單全覆蓋 (Test 15: every PROTECTED_DIRS entry)
 # ============================================================================
