@@ -276,6 +276,29 @@ for agent in claude codex cursor copilot antigravity qoder pi grok; do
                 "$(hook_descriptor_field "$AGENT_SETTINGS" "$agent" timeout)" ;;
     esac
 
+    # BR1-N-3（2026-10-17）：Claude Code 的 hook 描述有 onFailure 欄位，預設 'continue'——hook
+    # 起不來（node 不在 PATH、hook 檔被移走）、逾時，或以 0／2 以外的碼結束時，工具呼叫照樣執行。
+    # 這支安裝程式其他地方都是 fail-closed（驗不過就寫拒絕一切的替代 hook），所以 Claude 那一筆
+    # 要寫 onFailure: 'block'。同一份描述原本也交給 codex 與 pi，而它們的 hooks.json 是否認得這
+    # 個欄位沒有驗證過，所以這兩個必須「沒有」這個欄位——只改共用物件的修法會在這裡紅。
+    # BR1-N-3 (2026-10-17): Claude Code's hook descriptor has an onFailure field,
+    # 'continue' by default -- a hook that cannot start (node not on PATH, the
+    # hook file moved), times out, or exits with a code other than 0 or 2 lets the
+    # tool call run. Everywhere else this installer fails closed (a hook that does
+    # not verify is replaced by a deny-everything stub), so the Claude entry is
+    # written with onFailure: 'block'. The same descriptor object used to be handed
+    # to codex and pi, whose hooks.json support for the key is unverified, so
+    # those two must NOT carry it -- a fix that edits the shared object goes red
+    # here.
+    case "$agent" in
+        claude)
+            assert_equal "matrix claude hook blocks the tool call when the hook fails" "block" \
+                "$(hook_descriptor_field "$AGENT_SETTINGS" claude onFailure)" ;;
+        codex|pi)
+            assert_equal "matrix ${agent} hook carries no onFailure key" "(absent)" \
+                "$(hook_descriptor_field "$AGENT_SETTINGS" "$agent" onFailure)" ;;
+    esac
+
     # claude 以外的 agent 必須「自己」拒絕 --global（exit 2，訊息指名這個旗標）。這一列原本
     # 在 $TMP_ROOT 跑，那裡不是 repository，所以不管有沒有那個拒絕，resolve_project_root 都會
     # exit 1，這一列兩種情況都通過（審查的 X-codex-global 拿掉 codex 的拒絕：仍綠）。改在該
@@ -293,6 +316,30 @@ for agent in claude codex cursor copilot antigravity qoder pi grok; do
         assert_contains "matrix ${agent} refusal names --global" "$GLOBAL_OUTPUT" "does not support --global"
     fi
 done
+
+# BR1-N-3: an existing Claude entry written before onFailure existed is upgraded
+# IN PLACE by a re-install -- one entry, now blocking -- not left as it was and
+# not duplicated. Covers the users who already ran the installer.
+# BR1-N-3：加上 onFailure 之前寫的既有 Claude 項目，重新安裝時「原地」升級——仍是一筆，現在會擋——
+# 不是維持原樣、也不是多出一筆。這是已經跑過安裝程式的使用者會走的路。
+UPGRADE_PROJECT="$TMP_ROOT/matrix-claude-project"
+UPGRADE_SETTINGS="$UPGRADE_PROJECT/.claude/settings.json"
+node - "$UPGRADE_SETTINGS" <<'NODE'
+const fs = require('fs');
+const file = process.argv[2];
+const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
+for (const entry of settings.hooks.PreToolUse) {
+  for (const hook of entry.hooks) delete hook.onFailure;
+}
+fs.writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
+NODE
+assert_equal "a pre-onFailure claude entry starts without the key" "(absent)" \
+    "$(hook_descriptor_field "$UPGRADE_SETTINGS" claude onFailure)"
+(cd "$UPGRADE_PROJECT" && "$INSTALLER" -a claude >/dev/null)
+assert_equal "re-install upgrades the existing claude entry to onFailure block" "block" \
+    "$(hook_descriptor_field "$UPGRADE_SETTINGS" claude onFailure)"
+assert_equal "re-install keeps exactly one claude hook entry" "1" \
+    "$(hook_count "$UPGRADE_SETTINGS" claude)"
 
 # OpenCode has dedicated runtime + plugin install path checks.
 OPENCODE_PROJECT="$TMP_ROOT/opencode-project"

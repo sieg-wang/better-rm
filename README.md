@@ -917,7 +917,8 @@ Agent 設定。變更設定後，可能需要重新啟動相應 Agent 或開啟�
               "type": "command",
               "command": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\"",
               "timeout": 5,
-              "statusMessage": "Checking protected directories..."
+              "statusMessage": "Checking protected directories...",
+              "onFailure": "block"
             }
           ]
         }
@@ -925,11 +926,11 @@ Agent 設定。變更設定後，可能需要重新啟動相應 Agent 或開啟�
     }
   }
   ```
-* **說明**：Claude Code 在執行 `Bash` 工具前，會先呼叫此 hook 檢查指令是否包含刪除受保護目錄的指令。
+* **說明**：Claude Code 在執行 `Bash` 工具前，會先呼叫此 hook 檢查指令是否包含刪除受保護目錄的指令。`"onFailure": "block"` 讓 hook 本身失敗時（啟動不了、逾時、以 0／2 以外的碼結束）擋下該次呼叫；Claude Code 的預設值是 `continue`，也就是照樣執行。`install-hooks.sh -a claude` 會寫入這一行，並在重新安裝時替既有的項目補上。
 
 #### 2. Codex
 * **設定檔位置**：`.codex/hooks.json`
-* **設定內容**：結構與 Claude Code 相同。
+* **設定內容**：結構與 Claude Code 相同，但不含 `onFailure` 那一行（Codex 是否支援這個欄位尚未驗證，`install-hooks.sh -a codex` 也不寫入）。
 * **說明**：載入設定檔後，請在 Codex 介面中執行 `/hooks` 來審閱並信任此專案 hook，以使防護生效。
 
 #### 3. GitHub Copilot CLI / Cloud Agent

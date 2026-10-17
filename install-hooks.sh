@@ -1343,11 +1343,36 @@ const cursorDesiredHook = {
   matcher: '.*'
 };
 
-const claudeDesiredHook = {
+// The descriptor codex and pi get, and the shape every target got before BR1-N-3.
+// codex 與 pi 拿到的描述，也是 BR1-N-3 之前每個目標拿到的形狀。
+const sharedPreToolHook = {
   type: 'command',
   command: nodeCommand,
   timeout: 5,
   statusMessage
+};
+
+// Claude Code's own descriptor (BR1-N-3, 2026-10-17). Its hook schema has an
+// `onFailure` field whose default, 'continue', lets the tool call run when the
+// hook could not start (node missing from PATH, the hook file moved), timed out,
+// or exited with a code other than 0 or 2; 'block' counts such a failure as exit
+// 2 and blocks the call. Everything else in this installer fails closed -- a
+// hook that does not verify is replaced by a deny-everything stub -- so the
+// Claude entry says 'block' too. Codex and pi keep the shared descriptor: their
+// support for the key is unverified, and a key a host rejects would be a new
+// failure of its own. An existing Claude entry without the key differs from this
+// shape, so a re-install replaces it in place (the sameJson check below).
+// Claude Code 自己的描述（BR1-N-3）。它的 hook 結構有 onFailure 欄位，預設 'continue'：hook 起
+// 不來、逾時、或以 0／2 以外的碼結束時，工具呼叫照樣執行；'block' 則把這種失敗當成 exit 2、擋下
+// 呼叫。這支安裝程式其他地方都 fail-closed，所以 Claude 那一筆也寫 'block'。codex 與 pi 維持共用
+// 描述：它們是否支援這個欄位沒有驗證過。既有、沒有這個欄位的 Claude 項目和這個形狀不同，重新安裝
+// 時會原地取代（下面的 sameJson 比對）。
+const claudeDesiredHook = {
+  type: 'command',
+  command: nodeCommand,
+  timeout: 5,
+  statusMessage,
+  onFailure: 'block'
 };
 
 const copilotDesiredHook = {
@@ -1377,16 +1402,17 @@ const antigravityDesiredHook = {
 
 function desiredPreToolHook(target) {
   switch (target) {
-    case 'codex':
-    case 'pi':
     case 'claude':
       return claudeDesiredHook;
+    case 'codex':
+    case 'pi':
+      return sharedPreToolHook;
     case 'qoder':
       return qoderDesiredHook;
     case 'grok':
       return grokDesiredHook;
     default:
-      return claudeDesiredHook;
+      return sharedPreToolHook;
   }
 }
 
