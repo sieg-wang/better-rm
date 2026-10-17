@@ -746,7 +746,11 @@ A safer alternative to the rm command
   -r, -R, --recursive    遞迴刪除目錄及其內容
   -f, --force            強制刪除，忽略不存在的檔案，不提示
   -i                     每次刪除前提示確認
-  -I                     刪除超過三個檔案或遞迴刪除前提示一次
+  -I                     指定超過三個操作對象時先提示一次，回答以 y 或 Y
+                         開頭才繼續（-r 本身不觸發）
+                         Prompt once when more than three operands are
+                         given; only an answer starting with y or Y
+                         proceeds. Unlike GNU rm -I, -r alone does not prompt
   -v, --verbose          顯示詳細操作過程
   --                     選項終止符，其後一律視為檔名（含破折號開頭的名稱）
                          刪除接受多個；--restore 只接受一個，多的會被拒絕
