@@ -954,6 +954,73 @@ else
     test_fail "無操作對象時的結束狀態不對（-f=${noop_f_status}；-rf=${noop_rf_status}；裸=${noop_bare_status}；-fi=${noop_fi_status}；-if=${noop_if_status}；-f 的 stderr=${noop_f_err}）"
 fi
 
+test_item "沒有 -f 時刪除不存在的檔案以非 0 結束，並說 No such file or directory"
+# BR2-G1（2026-10-17）：打錯字的 rm 不可以回報成功。上面那一列釘的是 -f 的相反情形；把這裡的
+# 回傳改成 0，原本整套仍是 142/142 綠。
+# BR2-G1 (2026-10-17): a mistyped rm must not report success. The -f row above
+# pins the opposite; with this path's return turned into 0 the suite used to
+# stay 142/142 green.
+missing_status=0
+missing_err=$("$BETTER_RM" no-such-file.txt 2>&1 >/dev/null) || missing_status=$?
+if [ "$missing_status" -ne 0 ] && [[ "$missing_err" == *"No such file or directory"* ]]; then
+    test_pass "不存在的檔案以 ${missing_status} 結束並說明原因"
+else
+    test_fail "不存在的檔案被當成成功（exit=${missing_status}；stderr=${missing_err}）"
+fi
+
+test_item "多個操作對象時一個失敗不會讓其餘的停下來，結束碼是 1"
+# BR2-G2（2026-10-17）：一個操作對象失敗（不存在、或沒有 -r 的目錄）之後，其餘的照樣移入垃圾桶
+# 並記錄，結束碼是 1。「遇到第一個失敗就停」的改法原本整套仍綠。
+# BR2-G2 (2026-10-17): after one operand fails (missing, or a directory without
+# -r) the others are still trashed and logged, and the exit status is 1. A
+# "stop at the first failure" change used to leave the suite green.
+printf '%s\n' "MULTI A" > multi_a.txt
+printf '%s\n' "MULTI B" > multi_b.txt
+multi_missing_status=0
+"$BETTER_RM" multi_a.txt multi-missing.txt multi_b.txt >/dev/null 2>&1 || multi_missing_status=$?
+printf '%s\n' "MULTI C" > multi_c.txt
+mkdir -p multi_dir
+printf '%s\n' "MULTI D" > multi_d.txt
+multi_dir_status=0
+"$BETTER_RM" multi_c.txt multi_dir multi_d.txt >/dev/null 2>&1 || multi_dir_status=$?
+if [ "$multi_missing_status" -eq 1 ] &&
+   [ ! -e multi_a.txt ] && [ ! -e multi_b.txt ] &&
+   verify_in_trash "multi_a.txt" && verify_in_trash "multi_b.txt" &&
+   verify_log_entry "multi_a.txt" && verify_log_entry "multi_b.txt" &&
+   [ "$multi_dir_status" -eq 1 ] &&
+   [ ! -e multi_c.txt ] && [ ! -e multi_d.txt ] && [ -d multi_dir ] &&
+   verify_in_trash "multi_c.txt" && verify_in_trash "multi_d.txt" &&
+   verify_log_entry "multi_c.txt" && verify_log_entry "multi_d.txt"; then
+    test_pass "失敗的操作對象之後的檔案照樣移入垃圾桶並記錄，結束碼 1"
+else
+    test_fail "一個失敗讓其餘操作對象停下或結束碼不對（不存在=${multi_missing_status}；目錄=${multi_dir_status}）"
+fi
+
+test_item "-i：回答 n 保留、回答 y 移入垃圾桶；目錄回答 n 就不進入"
+# BR2-G4（2026-10-17）：把「回答 n 就跳過」的那一行換成 no-op，原本整套仍綠，而 rm 在這台機器上
+# 是 better-rm 的 alias——回答 n 的檔案會被刪掉。
+# BR2-G4 (2026-10-17): with the "answer n skips" line turned into a no-op the
+# suite used to stay green, and rm is aliased to better-rm on this machine -- a
+# file answered n would be removed.
+printf '%s\n' "INTERACTIVE" > inter.txt
+inter_n_status=0
+printf 'n\n' | "$BETTER_RM" -i inter.txt >/dev/null 2>&1 || inter_n_status=$?
+inter_n_kept=no
+[ -f inter.txt ] && inter_n_kept=yes
+inter_y_status=0
+printf 'y\n' | "$BETTER_RM" -i inter.txt >/dev/null 2>&1 || inter_y_status=$?
+mkdir -p inter_dir
+printf '%s\n' "INSIDE" > inter_dir/inside.txt
+inter_dir_status=0
+printf 'n\n' | "$BETTER_RM" -ri inter_dir >/dev/null 2>&1 || inter_dir_status=$?
+if [ "$inter_n_status" -eq 0 ] && [ "$inter_n_kept" = yes ] &&
+   [ "$inter_y_status" -eq 0 ] && [ ! -e inter.txt ] && verify_in_trash "inter.txt" &&
+   [ "$inter_dir_status" -eq 0 ] && [ -f inter_dir/inside.txt ]; then
+    test_pass "-i 的 n 保留檔案與目錄、y 移入垃圾桶"
+else
+    test_fail "-i 的回答沒有照做（n=${inter_n_status}/保留=${inter_n_kept}；y=${inter_y_status}；目錄 n=${inter_dir_status}）"
+fi
+
 test_item "組合參數 (-rf)"
 mkdir -p rftest/subdir
 echo "content" > rftest/file.txt
@@ -2011,6 +2078,34 @@ if "$BETTER_RM" --restore test_restore.txt 2>/dev/null; then
     test_fail "不應成功還原已不在垃圾桶的檔案"
 else
     test_pass "再次還原正確地回傳失敗"
+fi
+
+test_item "--restore a.txt 只比對最後一段，絕不把 data.txt 當成 a.txt 還原"
+# BR2-G3（2026-10-17）：比對規則是「原始路徑以 /a.txt 結尾」。把那個斜線拿掉，`--restore a.txt`
+# 就會把 data.txt 還原回來，原本整套仍綠。正向的雙胞胎：sub/a.txt 照樣找得到。
+# BR2-G3 (2026-10-17): the rule is "the original path ends in /a.txt". With that
+# slash dropped, `--restore a.txt` restored data.txt and the suite stayed green.
+# The positive twin: sub/a.txt is still found.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+printf '%s\n' "DATA CONTENT" > data.txt
+"$BETTER_RM" data.txt
+suffix_status=0
+suffix_output=$("$BETTER_RM" --restore a.txt 2>&1) || suffix_status=$?
+suffix_entry=$(find "$TEST_TRASH_DIR" -type f -name 'data.txt__*' | head -n 1)
+mkdir -p sub
+printf '%s\n' "A CONTENT" > sub/a.txt
+"$BETTER_RM" sub/a.txt
+suffix_twin_status=0
+"$BETTER_RM" --restore a.txt >/dev/null 2>&1 || suffix_twin_status=$?
+if [ "$suffix_status" -eq 1 ] &&
+   [[ "$suffix_output" == *"No matching deletion record"* ]] &&
+   [ ! -e data.txt ] &&
+   [ -n "$suffix_entry" ] && [ "$(cat "$suffix_entry")" = "DATA CONTENT" ] &&
+   [ "$suffix_twin_status" -eq 0 ] && [ "$(cat a.txt 2>/dev/null)" = "A CONTENT" ]; then
+    test_pass "a.txt 不會比對到 data.txt，sub/a.txt 照樣還原"
+else
+    test_fail "--restore 的最後一段比對不對（a.txt=${suffix_status}；twin=${suffix_twin_status}；訊息=${suffix_output}）"
 fi
 
 test_item "同名檔案存在時的覆蓋確認 - 選擇否 (n)"
