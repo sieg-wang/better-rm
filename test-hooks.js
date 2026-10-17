@@ -106,6 +106,45 @@ function hostFactor() {
   return Math.max(1, Math.min(LOAD_FACTOR_CAP, queued / cores));
 }
 
+// A missed wall-clock budget is RECORDED here, not thrown. A thrown assert ends
+// the file at that row, so every assertion after it goes unrun, and a run that
+// stops cannot say what it did not reach: on 2026-10-17 the 120,000-symlink row
+// missed by 374 ms (3,874 against 3,500 at load 11.5 on 14 cores, with an
+// 81-character TMPDIR) and the rest of the file, including the run-to-completion
+// counters at the end, never ran. Every wall-clock row reports through
+// timingBudget, the run goes on, and the end of the file names each miss and
+// exits 1 -- after the pass count, so what DID run is still visible. Only the
+// millisecond claim is deferred; verdicts, counts and wording stay ordinary
+// asserts. BETTER_RM_HOOK_TEST_FORCE_TIMING_MISS=1 makes every timing row miss,
+// which is how to check that a miss neither stops the file nor exits 0.
+// 牆鐘預算沒達到時「記下來」，不丟例外。assert 一丟，檔案就停在那一列，後面的斷言一個都
+// 沒跑，而停下來的執行說不出自己沒跑到哪裡：2026-10-17 那一列 120,000 個 symlink 慢了
+// 374 ms（3,874 對 3,500，14 核負載 11.5，TMPDIR 81 個字元），檔案其餘部分（含最後的
+// 跑到底計數）都沒跑。現在每個牆鐘列都經過 timingBudget，執行照跑，檔案最後逐一指名沒達到
+// 的列並以 1 結束——放在通過數之後，跑了哪些照樣看得到。延後的只有毫秒那一句；判定、數目
+// 與措辭仍是一般的 assert。BETTER_RM_HOOK_TEST_FORCE_TIMING_MISS=1 讓每個計時列都算沒達
+// 到，用來確認「沒達到」既不會讓檔案停下、也不會以 0 結束。
+const TIMING_MISSES = [];
+const FORCE_TIMING_MISS = process.env.BETTER_RM_HOOK_TEST_FORCE_TIMING_MISS === '1';
+function timingBudget(withinBudget, message, misses = TIMING_MISSES) {
+  if (!withinBudget || FORCE_TIMING_MISS) {
+    misses.push(FORCE_TIMING_MISS ? `${message} [forced]` : message);
+  }
+}
+// The recorder has to record: a miss and a pass, into a private list. A recorder
+// that swallowed misses would leave every timing row green whatever it measured.
+// 記錄器必須真的記下來：一次沒達到、一次達到，記進私有清單。吞掉未達的記錄器會讓每個計時
+// 列不論量到什麼都是綠的。
+{
+  const recorderProbe = [];
+  [false, true].forEach((ok) => timingBudget(ok, `recorder self-check (${ok})`, recorderProbe));
+  assert.deepStrictEqual(recorderProbe.map((miss) => miss.replace(' [forced]', '')),
+    FORCE_TIMING_MISS
+      ? ['recorder self-check (false)', 'recorder self-check (true)']
+      : ['recorder self-check (false)'],
+    'timingBudget must record a missed budget and nothing else');
+}
+
 function claude(command, cwd = '/workspace/project') {
   return { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd };
 }
@@ -5737,11 +5776,11 @@ let globTimingChecks = 0;
   const globBudgetMs = 500 * hostFactor();
   const matching = time(`rm -rf .${stars}git`);
   assert.equal(matching.verdict, 'deny', 'a heavy pattern that can select .git is still refused');
-  assert.ok(matching.ms < globBudgetMs,
+  timingBudget(matching.ms < globBudgetMs,
     `a matching heavy pattern took ${matching.ms}ms against a ${globBudgetMs.toFixed(0)}ms budget`);
   const failing = time(`rm -rf .${stars}gitx`);
   assert.notEqual(failing.verdict, 'deny', 'a heavy pattern that cannot select .git is ordinary');
-  assert.ok(failing.ms < globBudgetMs,
+  timingBudget(failing.ms < globBudgetMs,
     `a NON-matching heavy pattern took ${failing.ms}ms against a `
     + `${globBudgetMs.toFixed(0)}ms budget`);
   globTimingChecks += 4;
@@ -6404,7 +6443,7 @@ let findClauseTimingChecks = 0;
       padded.verdict, 'deny',
       `an rm -rf /etc padded with 6000 -exec ${wrapper} clauses is still refused`,
     );
-    assert.ok(
+    timingBudget(
       padded.ms < budgetMs * hostFactor(),
       `6000 -exec ${wrapper} clauses took ${padded.ms}ms against a `
       + `${(budgetMs * hostFactor()).toFixed(0)}ms budget`,
@@ -6475,7 +6514,7 @@ let findClauseTimingChecks = 0;
   // 12 而不是 8，而這個數字是量出來的：這個比值正是本檔案自稱與負載無關的那個寫法，而在本機
   // 負載下實測它在掃描仍是線性時就以 8.3 與 9.1 倍翻紅——兩半是在不同時刻計時的，短的那半噪
   // 音更大。平方級是 16 倍，所以 12 仍然分得開這一列要分開的兩件事。
-  assert.ok(
+  timingBudget(
     clauseGrowth < 12,
     `4x the -exec clauses cost ${clauseGrowth.toFixed(1)}x the time `
     + `(${CLAUSE_STEP} -> ${oneStep.ms.toFixed(1)}ms, ${CLAUSE_STEP * 4} -> `
@@ -6487,7 +6526,7 @@ let findClauseTimingChecks = 0;
   // scan that is uniformly slow, and a constant alone fails for a busy host.
   // 同一個主張的絕對值那一半（經校準縮放）：只看比值會放過「整體都慢」的掃描。
   const clauseAbsoluteBudgetMs = 1500 * hostFactor();
-  assert.ok(
+  timingBudget(
     fourSteps.ms < clauseAbsoluteBudgetMs,
     `${CLAUSE_STEP * 4} unclosed -exec rm clauses took ${fourSteps.ms.toFixed(1)}ms against a `
     + `${clauseAbsoluteBudgetMs.toFixed(0)}ms budget`,
@@ -6542,7 +6581,7 @@ let findClauseTimingChecks = 0;
   ]) {
     const run = time(command);
     assert.equal(run.verdict, verdict, `${label}: the verdict moved`);
-    assert.ok(
+    timingBudget(
       run.ms < projectionBudgetMs,
       `${label} took ${run.ms.toFixed(1)}ms against a ${projectionBudgetMs.toFixed(0)}ms budget: `
       + 'a per-clause or per-segment walk is re-reading the rest of the command',
@@ -6589,7 +6628,7 @@ let findClauseTimingChecks = 0;
   ]) {
     const run = time(command);
     assert.equal(run.verdict, 'deny', `${label}: the verdict moved`);
-    assert.ok(
+    timingBudget(
       run.ms < unbalancedLeadBudgetMs,
       `${label} took ${run.ms.toFixed(1)}ms against a ${unbalancedLeadBudgetMs.toFixed(0)}ms budget: `
       + 'an extglob lead is being matched by rescanning the rest of the input',
@@ -6629,7 +6668,7 @@ let findClauseTimingChecks = 0;
   for (const [label, command, rowBudgetMs] of braceWordRows) {
     const run = time(command);
     assert.equal(run.verdict, undefined, `${label}: a command that removes nothing was refused`);
-    assert.ok(
+    timingBudget(
       run.ms < rowBudgetMs,
       `${label} took ${run.ms.toFixed(1)}ms against a ${rowBudgetMs.toFixed(0)}ms budget: `
       + 'a brace word is being expanded to ask whether it names the dot command',
@@ -7305,7 +7344,18 @@ withScratchDir('better-rm-hook-limit-', (scratchDir) => {
   // 對的目標。沒有這個界限時實測：d3aed08 的相對拼法 6,215 ms，超過 live 的 5,000 ms 逾時，
   // 而逾時的 hook 不會擋下命令。斷言的上限刻意放寬——這一列量的不是快慢，是「閘門到底有沒有
   // 回答」。
-  const symlinkFlood = time(`rm -rf ${operands(120000, `${box}/link`)} /etc`);
+  // The operands are RELATIVE to a cwd inside the box -- the relative spelling is
+  // the one measured at 6,215 ms above -- so the command's length does not depend
+  // on where TMPDIR is. Spelled as `${box}/link` it grew with the TMPDIR path, and
+  // only the host's work before the budget grew with it: measured 2026-10-17 with
+  // an 81-character TMPDIR, 3,396 and 3,459 ms for 12.7 MB of absolute operands
+  // against 2,113 and 2,104 ms for 0.6 MB of relative ones, the refusal judging 76
+  // to 79 targets inside the same 2,000 ms either way.
+  // 操作元相對於 box 裡的 cwd（上面量到 6,215 ms 的正是相對拼法），命令長度就不再取決於
+  // TMPDIR 在哪裡。寫成 `${box}/link` 時它隨 TMPDIR 路徑變長，而變長的只有預算之前主機要做的
+  // 工：2026-10-17 以 81 字元的 TMPDIR 實測，12.7 MB 的絕對操作元 3,396 與 3,459 ms，0.6 MB
+  // 的相對操作元 2,113 與 2,104 ms，兩種都在同樣的 2,000 ms 內判了 76〜79 個目標後拒絕。
+  const symlinkFlood = time(`rm -rf ${operands(120000, 'link')} /etc`, box);
   assert.equal(symlinkFlood.verdict, 'deny', '120,000 symlink targets followed by /etc is refused');
   // This ceiling is deliberately left ABSOLUTE where the two rows above were made
   // load-independent, and here is the measurement that says it may be: the answer
@@ -7335,7 +7385,7 @@ withScratchDir('better-rm-hook-limit-', (scratchDir) => {
   // 校準倍率。實測：本機 1 分鐘負載 17〜34 時是 4,159〜4,801 ms，24 個忙迴圈時 5,610 ms，
   // 而閘門每一次都答對了。判定、訊息裡的目標數、預算字樣都是無條件斷言的。
   const floodBudgetMs = 3500 * hostFactor();
-  assert.ok(
+  timingBudget(
     symlinkFlood.ms < floodBudgetMs,
     `120,000 symlink targets answered in ${symlinkFlood.ms}ms against a `
     + `${floodBudgetMs.toFixed(0)}ms budget (the live hook timeout is 5,000ms on a quiet host)`,
@@ -7913,7 +7963,22 @@ for (const [name] of PINNED_TIMING_COUNTERS) {
   assert.ok(new RegExp(`\\['${name}',`).test(ownSource),
     `${name} is not in PINNED_TIMING_COUNTERS, so nothing verifies that its block ran`);
 }
-let timingInventoryChecks = PINNED_TIMING_COUNTERS.length * 2 + 3;
+// Every wall-clock row -- the 8 ceilings and the 1 ratio counted above -- reports
+// through the recorder defined next to hostFactor(), because an assert that
+// throws on a missed budget ends the file there and leaves the rest unread
+// (2026-10-17: the 120,000-symlink row did that). A row put back on an ordinary
+// assert lowers this count; a new row raises the counts above first.
+// 上面數到的每一個牆鐘列（8 個上限、1 個比值）都必須經過 hostFactor() 旁邊那個記錄器：預算
+// 一沒達到就丟例外的 assert 會讓檔案停在那裡、其餘不讀（2026-10-17 那一列 120,000 個
+// symlink 就是這樣）。改回一般 assert 的列會讓這個數字變小。
+const deferredTimingRows = ownSource.match(/^\s*timingBudget\(/gm) || [];
+assert.equal(deferredTimingRows.length, wallClockRows.length + ratioRows.length,
+  `${deferredTimingRows.length} wall-clock rows report through timingBudget, not all `
+  + `${wallClockRows.length + ratioRows.length}: a row that throws on a missed budget stops `
+  + 'the file and leaves every later assertion unrun');
+// + 5: the three source sweeps above, the deferred-row count, and the recorder
+// self-check next to hostFactor().
+let timingInventoryChecks = PINNED_TIMING_COUNTERS.length * 2 + 5;
 
 // The plugin handler and the stdin stream-error check are async, so they cannot
 // run before the summary is printed the way the synchronous checks above do.
@@ -7926,6 +7991,17 @@ runOpenCodePluginChecks().then(async (pluginChecks) => {
   const ompChecks = await runOmpHookChecks();
   const stdinStreamChecks = await runStdinStreamErrorChecks();
   console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + ompChecks + stdinStreamChecks}`);
+  // A missed wall-clock budget fails the run, named, after everything else ran.
+  // 牆鐘預算沒達到時，整次執行在其餘全部跑完之後指名失敗。
+  if (TIMING_MISSES.length > 0) {
+    for (const miss of TIMING_MISSES) {
+      console.error(`計時預算未達 / TIMING BUDGET MISSED: ${miss}`);
+    }
+    console.error(`${TIMING_MISSES.length} wall-clock budget(s) missed; every other `
+      + 'assertion in this file ran (the count above), so this is the only failure');
+    process.exitCode = 1;
+    return;
+  }
   process.exitCode = 0;
 }).catch((error) => {
   console.error(error && error.stack ? error.stack : error);
