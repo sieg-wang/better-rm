@@ -369,7 +369,22 @@ function heredocDelimiter(input, start, readsLeft = Infinity) {
 // 一段 heredoc 內文在哪裡結束：從 start 起逐行讀到結束行為止（`<<-` 先去掉開頭的 tab 再比）。
 // end 是結束行之後的位置；輸入先用完時 terminated 為 false。tokenizer 與 readParenthesized 都在這
 // 裡決定內文結尾，用的是上面那個共用的標記 reader 讀出的標記，所以兩邊不會各自走鐘（BR2-2）。
-function heredocBodyEnd(input, start, delimiter, stripTabs) {
+// `parenClose` (BR2-2-REG2, 2026-10-17): inside "$( )" and "<( )" bash 5.3 also
+// ends the body at a line that STARTS with the delimiter and has a `)` after it,
+// and reads the rest of that line -- everything after the delimiter -- as shell:
+// `EOF)` closes the body and the substitution in one line, and in
+// `EOF rm -rf /etc)` the rm is a command inside the substitution (declare -f on
+// never-called functions under bash 5.3.20; a delimiter line WITHOUT a `)` does
+// not end the body, a leading blank does not count, and outside a substitution
+// -- top level, a plain "( )" subshell -- `EOF)` is ordinary body text). Such a
+// line returns `resumeAt`, the index just past the delimiter on it, so the
+// caller reads the remainder again instead of dropping it. An empty delimiter
+// never closes this way.
+// `parenClose`（BR2-2-REG2）：在 "$( )" 與 "<( )" 裡，bash 5.3 也在「以結束標記開頭、後面有 `)`」的那一行結束內文，
+// 並把那一行在標記之後的部分當成 shell 讀：`EOF)` 一行同時關掉內文與替換，`EOF rm -rf /etc)` 裡的 rm 是替換裡的
+// 命令。沒有 `)` 的標記行不算、前面有空白不算，替換之外（頂層、普通的 "( )"）`EOF)` 只是內文。這種行回傳
+// resumeAt（那一行標記之後的位置），呼叫端從那裡再讀，而不是把剩下的丟掉。空的標記不會這樣結束。
+function heredocBodyEnd(input, start, delimiter, stripTabs, parenClose = false) {
   const lines = [];
   let position = start;
   while (position <= input.length) {
@@ -377,9 +392,18 @@ function heredocBodyEnd(input, start, delimiter, stripTabs) {
     const atEnd = lineEnd === -1;
     if (atEnd) lineEnd = input.length;
     const line = input.slice(position, lineEnd);
+    const lineStart = position;
     position = lineEnd + 1;
-    if ((stripTabs ? line.replace(/^\t+/, '') : line) === delimiter) {
+    const compared = stripTabs ? line.replace(/^\t+/, '') : line;
+    if (compared === delimiter) {
       return { lines, end: position, terminated: true };
+    }
+    if (
+      parenClose && delimiter !== '' && compared.startsWith(delimiter)
+      && compared.slice(delimiter.length).includes(')')
+    ) {
+      const resumeAt = lineStart + (line.length - compared.length) + delimiter.length;
+      return { lines, end: position, terminated: true, resumeAt };
     }
     lines.push(line);
     if (atEnd) break;
@@ -435,6 +459,13 @@ function shellWords(command) {
   // 雙引號裡找不到收尾 `)` 的 `$(` 個數（BR2-2），與上面的清單一樣掛在 words 上。
   let unreadableQuotedSubstitutions = 0;
   const pendingHeredocs = [];
+  // The '(' operators still open, by kind: 'substitution' for the opener of a
+  // "<( )"/">( )" and of a "$(" read character by character, 'group' for any
+  // other. A heredoc opened inside a substitution may end on a `DELIM)` line
+  // (BR2-2-REG2); one at top level or in a plain subshell may not.
+  // 還沒關的 '(' 運算子與種類：'substitution' 是 "<( )"／">( )" 與逐字讀的 "$(" 的開頭，其餘是 'group'。在替換裡
+  // 開的 heredoc 可以在 `DELIM)` 行結束；頂層或普通 subshell 裡的不行。
+  const openParens = [];
   const input = String(command || '');
   let word = '';
   let wordHasDynamicExpansion = false;
@@ -761,6 +792,7 @@ function shellWords(command) {
       pushWord(parsed.delimiter);
       pendingHeredocs.push({
         operatorIndex, delimiter: parsed.delimiter, stripTabs, quoted: parsed.quoted,
+        inSubstitution: openParens.includes('substitution'),
       });
       index = parsed.end - 1;
       atWordStart = true;
@@ -769,7 +801,8 @@ function shellWords(command) {
       // 內文從下一行開始，順序與運算子出現的順序相同。
       if (word) pushWord(word), word = '';
       let position = index + 1;
-      for (const pending of pendingHeredocs) {
+      for (let p = 0; p < pendingHeredocs.length; p += 1) {
+        const pending = pendingHeredocs[p];
         // Clamped, and this is not cosmetic. A body that runs to the end of the
         // input leaves `position` one PAST the end, so a SECOND heredoc in the
         // same command started after the end while its end was clamped to it --
@@ -786,8 +819,17 @@ function shellWords(command) {
         const bodyStart = Math.min(position, input.length);
         // An unterminated heredoc runs to the end of the input, exactly as a
         // shell reading a script that stops mid-heredoc would see it.
-        const read = heredocBodyEnd(input, position, pending.delimiter, pending.stripTabs);
-        position = read.end;
+        // Inside a substitution this tokenizer reads character by character --
+        // "<( )", or a "$(" whose read failed -- the last pending body may also
+        // end on a `DELIM)` line (BR2-2-REG2, see heredocBodyEnd). The rest of
+        // that line is tokenised again, so the body span stops before it.
+        // 在這個 tokenizer 逐字讀的替換裡（"<( )"，或讀取失敗的 "$("），最後一段內文也可以在 `DELIM)` 行結束
+        // （見 heredocBodyEnd）。那一行剩下的部分會再斷詞一次，所以內文的區間停在它前面。
+        const read = heredocBodyEnd(
+          input, position, pending.delimiter, pending.stripTabs,
+          pending.inSubstitution && p === pendingHeredocs.length - 1,
+        );
+        position = read.resumeAt !== undefined ? read.resumeAt : read.end;
         heredocs.push({
           operatorIndex: pending.operatorIndex,
           body: read.lines.join('\n'),
@@ -831,6 +873,7 @@ function shellWords(command) {
       pushWord(word, false);
       word = '';
       pushWord(char, true);
+      openParens.push('group');
       atWordStart = true;
     } else if (char === '(' && word !== '' && word !== '!' && /[!?*+@]$/.test(word)) {
       // `word !== '!'` IS THE RESERVED-WORD EXCLUSION, and it is the whole of it.
@@ -952,6 +995,10 @@ function shellWords(command) {
       index = close;
     } else if (';&|()<>\n'.includes(char)) {
       if (word) pushWord(word), word = '';
+      if (char === '(') {
+        const opener = input[index - 1];
+        openParens.push(opener === '<' || opener === '>' || opener === '$' ? 'substitution' : 'group');
+      } else if (char === ')') openParens.pop();
       pushWord(char, true);
       atWordStart = true;
     } else if (/\s/.test(char)) {
@@ -1095,6 +1142,13 @@ function readParenthesized(input, openIndex) {
   // `$(` 算進深度、卻仍把內文當引號文字讀，就永遠看不到它的 `)`：`$(echo "$(date)")` 讀不出來——
   // 6a3edb1 時無聲，765c6bb 讓雙引號裡讀取失敗改成拒絕之後，就變成擋掉普通命令。
   const quotedFrom = [];
+  // Where a heredoc body ended on a `DELIM)` line (BR2-2-REG2): the returned
+  // command text gets a newline at each, just after the delimiter, so whoever
+  // scans it sees an exact delimiter line and the rest of that line as shell --
+  // the shape bash 5.3 prints back for such a substitution.
+  // heredoc 內文在 `DELIM)` 行結束的位置（BR2-2-REG2）：回傳的命令文字在每一處標記後面補一個換行，掃描它的人就會
+  // 看到剛好等於標記的一行、以及當成 shell 的那一行剩下部分——正是 bash 5.3 把這種替換印回來的樣子。
+  const splitPoints = [];
   // BR-NEW-1 (2026-10-17): case statements opened inside this read, innermost
   // last: { depth, state, patternDepth }. A case PATTERN ends at its own `)`,
   // which is not the end of the substitution. Without this model
@@ -1265,10 +1319,23 @@ function readParenthesized(input, openIndex) {
       i = close;
     } else if (char === '\n' && pendingHeredocs.length > 0) {
       let position = i + 1;
-      for (const pending of pendingHeredocs) {
-        const read = heredocBodyEnd(input, position, pending.delimiter, pending.stripTabs);
+      for (let p = 0; p < pendingHeredocs.length; p += 1) {
+        const pending = pendingHeredocs[p];
+        // The `DELIM)` close is bash's for the last pending body only here: a
+        // `)` there ends the substitution, so an earlier body closed that way
+        // would leave the later ones unread -- those keep the exact line.
+        // 這裡只讓最後一段內文用 `DELIM)` 結束：那個 `)` 會結束替換，較早的內文那樣結束會讓後面的內文沒被讀。
+        const read = heredocBodyEnd(
+          input, position, pending.delimiter, pending.stripTabs, p === pendingHeredocs.length - 1,
+        );
         if (!read.terminated) return null;
-        position = read.end;
+        if (read.resumeAt !== undefined) {
+          // Read the rest of the line again, and give the caller a newline there
+          // so its own scan of this text ends the body on the delimiter too.
+          // 從那一行剩下的部分接著讀，並在那裡給呼叫端一個換行，讓它自己的掃描也在標記處結束內文。
+          splitPoints.push(read.resumeAt);
+          position = read.resumeAt;
+        } else position = read.end;
       }
       pendingHeredocs.length = 0;
       i = position - 1;
@@ -1309,7 +1376,12 @@ function readParenthesized(input, openIndex) {
         innerQuote = '"';
       }
       if (depth === 0) {
-        return { command: input.slice(openIndex + 1, i), end: i };
+        let command = input.slice(openIndex + 1, i);
+        for (let s = splitPoints.length - 1; s >= 0; s -= 1) {
+          const at = splitPoints[s] - (openIndex + 1);
+          command = `${command.slice(0, at)}\n${command.slice(at)}`;
+        }
+        return { command, end: i };
       }
     }
     if (!innerQuote && !innerEscaped && /[\s;&|()<>]/.test(char)) atWordStart = true;
@@ -1856,18 +1928,28 @@ const UNREADABLE_HEREDOC_DELIMITER = '\u0000heredoc-delimiter:';
 // where a plain word is never scanned. Before this sentinel that was an ALLOW for
 // text nobody read: `echo "$(echo $'\''; rm -rf /etc)"` and the quoted-heredoc
 // shape readParenthesized now models both ran the `rm` in bash 5.3 (parsed with
-// declare -f, never executed) while this gate allowed them. bash rejects an
-// unterminated substitution, so refusing one costs no ordinary command; what is
-// refused is "this gate could not read it", never "it deletes something". The
-// value carried is the count of unreadable openers. A spent budget is NOT counted
-// here: past MAX_FAILED_SUBSTITUTION_READS no read is attempted, and
+// declare -f, never executed) while this gate allowed them. What reaches this
+// refusal, measured with `bash -n` (2026-10-17): an unterminated quote or
+// backquote inside the substitution (bash 5.3.20 and 3.2.57 both reject it), a
+// heredoc with no delimiter line (5.3 rejects it, 3.2 accepts it), and the
+// deliberate fail-closed class readParenthesized documents -- a `case WORD in`
+// shape at a position it does not count as command position, such as case words
+// used as arguments or a case inside a function body defined in the
+// substitution, which BOTH bashes parse. So it does refuse some commands bash
+// would run; what is refused is "this gate could not read it", never "it
+// deletes something". (765c6bb said bash rejects every such command; a heredoc
+// closed by `DELIM)` disproved that until BR2-2-REG2 taught the reader that
+// close.) The value carried is the count of unreadable openers. A spent budget is
+// NOT counted here: past MAX_FAILED_SUBSTITUTION_READS no read is attempted, and
 // SUBSTITUTION_BUDGET_EXHAUSTED already refuses that state.
 // 雙引號裡一個找不到收尾 `)` 的 `$(`（BR2-2）。與上面幾個 sentinel 同一套規矩，也有自己的訊息：讀
 // 不到的是命令替換的內文。它必須存在，是因為這種讀取失敗之後 tokenizer 會把替換剩下的部分當成外層
 // 雙引號字串的文字走過去，裡面的一般字永遠不會被掃——在這個 sentinel 之前，那就是對沒人讀過的文字
-// 回答「放行」。bash 本來就拒絕沒收尾的替換，所以拒絕它不會擋掉任何正常命令；拒絕的理由是「沒讀
-// 到」，不是「它會刪東西」。預算用完的情形不算在這裡：那時根本不會嘗試讀取，已由
-// SUBSTITUTION_BUDGET_EXHAUSTED 拒絕。
+// 回答「放行」。會走到這個拒絕的（2026-10-17 以 bash -n 實測）：替換裡沒收尾的引號或反引號（bash 5.3 與 3.2 都拒）、
+// 沒有結束行的 heredoc（5.3 拒、3.2 接受），以及 readParenthesized 記載的刻意 fail-closed 類別——不在命令位置的
+// `case WORD in` 形狀（當成引數的 case 字、替換裡定義的函式內文裡的 case），兩個 bash 都解析得了。所以它確實會擋掉
+// 一些 bash 會執行的命令；拒絕的理由是「沒讀到」，不是「它會刪東西」。預算用完的情形不算在這裡：那時根本不會
+// 嘗試讀取，已由 SUBSTITUTION_BUDGET_EXHAUSTED 拒絕。
 const UNREADABLE_QUOTED_SUBSTITUTION = '\u0000quoted-substitution:';
 
 // A scan that ran out of failed-read budget (R5-13, r5-fix-better-rm-8). Same

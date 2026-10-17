@@ -593,18 +593,29 @@ x86_64 上（CI 跑的架構，node 22.17.0）128KB 修復前是 38,557ms、修�
 `gh pr create --body "$(cat <<'EOF' … EOF)"` 卻因為訊息裡反引號包住的 rm 範例被拒。現在 reader 用
 tokenizer 同一套規則讀結束標記、整段跳過內文（`<<<` here-string 與 `$(( ))`／`(( ))` 裡的位移
 `<<` 除外），也認得 `$'…'` 與反引號。
-**新的拒絕一種**：雙引號裡的 `$(` 仍然找不到收尾 `)` 時（裡面的引號、反引號或 heredoc 沒有收尾——
-bash 自己也是語法錯誤；或是下一段說的 `case` 標頭形狀），整條命令以 `unreadable command substitution`
-拒絕，而不是把替換當文字放過去。出路：讓替換裡的引號與反引號成對、heredoc 寫上結束行、把 case 敘述
-寫在命令開頭，或把訊息放進檔案改用 `git commit -F <檔案>`。
+**新的拒絕一種**：雙引號裡的 `$(` 仍然找不到收尾 `)` 時，整條命令以 `unreadable command substitution`
+拒絕，而不是把替換當文字放過去。以 `bash -n` 實測會走到這裡的：替換裡沒收尾的引號或反引號（bash 5.3 與
+3.2 都是語法錯誤）、沒有結束行的 heredoc（5.3 是語法錯誤，3.2 接受），以及下一段說的 `case` 標頭形狀
+（兩個 bash 都解析得了，這道閘門刻意拒絕）。所以它確實會擋掉一些 bash 會執行的命令。出路：讓替換裡的引號
+與反引號成對、heredoc 寫上結束行、把 case 敘述寫在命令開頭，或把訊息放進檔案改用 `git commit -F <檔案>`。
+
+**同日：`$( … )` 與 `<( … )` 裡以 `EOF)` 收尾的 heredoc（BR2-2-REG2）。** 在命令替換與 process substitution
+裡，bash 5.3 也在「以結束標記開頭、後面有 `)`」的那一行結束 heredoc 內文，並把那一行剩下的部分當成 shell 讀：
+`EOF)` 一行同時關掉內文與替換。上面那次修改的 reader 只認得剛好等於標記的那一行，結果
+`x=$(cat <<'EOF'` + `body` + `EOF)` 後面那一行的 `rm -rf /etc` 被藏進內文而放行（6a3edb1 會拒絕），雙引號裡
+用 `EOF)` 收尾的 commit／PR 範本則被以讀不到為由拒絕（6a3edb1 放行）。現在這條規則寫在 heredocBodyEnd 一處，
+`$( … )` 與 `<( … )` 都照它讀，標記之後的部分一定再讀一次、不會被丟掉；頂層與普通的 `( … )` subshell 裡，
+`EOF)` 照 bash 的規矩仍只是內文。
 
 **同日：`$( … )` 裡的 case 敘述與巢狀在引號裡的 `$( … )`（BR-NEW-1）。** case「樣式」結尾的 `)` 原本被
 當成替換的結尾，所以 `echo "$(case x in a) :;; esac; rm -rf /etc)"` 這種寫法裡、bash 會執行的刪除被
 放行。現在 reader 在命令位置（命令開頭、`;`／`&`／`|`／`(`／換行之後，以及 `then`、`do` 等關鍵字之後）
 認得 `case WORD in`，樣式的 `)`、`;;`／`;&`／`;;&` 與 `esac` 都照 bash 的方式讀。`case WORD in` 出現在
 它不認為是命令位置的地方時，它分不出那是不是 case 敘述，於是 fail closed：在雙引號裡就以
-`unreadable command substitution` 拒絕（例如 `echo "$(echo case x in y)"`，bash 其實把它當成 echo 的
-引數）。同一輪也修好一個本輪自己造成的誤擋：雙引號字串裡巢狀的 `"$( … )"`（例如
+`unreadable command substitution` 拒絕。兩種 bash 解析得了的命令會這樣被拒（`bash -n` 實測）：當成引數的
+case 字（例如 `echo "$(echo case x in y)"`），以及替換裡定義的函式內文中的 case（例如
+`x="$(f() { case "$1" in a) echo A;; esac; }; f a)"`——函式定義的 `{` 接在 `f()` 的 `)` 後面，這裡的 `)`
+結束了命令位置）。同一輪也修好一個本輪自己造成的誤擋：雙引號字串裡巢狀的 `"$( … )"`（例如
 `x="$(basename "$(pwd)")"`）一度被以讀不到為由拒絕，現在照常放行。
 
 **2026-10-17：`case` 的主詞不再被當成命令字（BR-OBS-1）。** 這道閘門把 `case` 當成控制字跳過之後，

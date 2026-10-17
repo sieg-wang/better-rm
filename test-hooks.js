@@ -957,6 +957,29 @@ const blocked = [
   // expanded, so the substitution inside it runs.
   // 修之前就拒絕、之後也必須拒絕：未加引號的標記，內文會展開，裡面的替換會執行。
   "git commit -m \"$(cat <<EOF\nfix: $(rm -rf /etc)\nEOF\n)\"",
+  // BR2-2-REG2 (2026-10-17): inside "$( )" and "<( )", bash 5.3 also ends a
+  // heredoc body at a line that STARTS with the delimiter and has a `)` after
+  // it -- `EOF)` closes the body and the substitution in one line -- and reads
+  // the rest of that line as shell (declare -f on never-called functions; bash
+  // 3.2 agrees for `EOF)`). 765c6bb's reader knew only the exact delimiter line,
+  // so the first seven rows -- DENIED at 6a3edb1 -- were ALLOWED at d88780f:
+  // the read failed, the tokenizer took the inner heredoc for a top-level one,
+  // and its body ran to end of input over the deletion. The last four were
+  // ALLOWED at both: the deletion between `EOF` and `)`, and two "<( )" forms.
+  // BR2-2-REG2：在 "$( )" 與 "<( )" 裡，bash 5.3 也在「以結束標記開頭、後面有 `)`」的那一行結束 heredoc 內文——
+  // `EOF)` 一行同時關掉內文與替換——並把那一行剩下的部分當成 shell 再讀一次。765c6bb 的 reader 只認得剛好等於
+  // 標記的那一行，所以前七列（6a3edb1 拒絕）在 d88780f 被放行；後四列在兩者都放行。
+  "x=$(cat <<'EOF'\nbody\nEOF)\nrm -rf /etc",
+  "x=$(cat <<'EOF'\nbody\nEOF) && rm -rf ~",
+  "x=$(cat <<'EOF'\nbody\nEOF); rm -rf ~/.git",
+  "VERSION=$(cat <<'EOF'\n1.2.3\nEOF)\necho \"$VERSION\"\nrm -rf ~/.git",
+  "x=$(cat <<EOF\nbody\nEOF)\nrm -rf ~",
+  "x=$(cat <<-'EOF'\n\tbody\n\tEOF)\nrm -rf /etc",
+  "x=$(echo $(cat <<'EOF'\nbody\nEOF))\nrm -rf /etc",
+  "x=$(cat <<'EOF'\nbody\nEOF rm -rf /etc)",
+  "x=\"$(cat <<'EOF'\nbody\nEOF rm -rf /etc)\"",
+  "diff <(cat <<'EOF'\na\nEOF) b.txt\nrm -rf /etc",
+  "diff <(cat <<'EOF'\na\nEOF rm -rf /etc) b.txt",
   // BR-OBS-1 (2026-10-17): a `case` statement is not a command whose subject is
   // the command word. These were refused before the fix too, but some for the
   // wrong target (`*x*` instead of `/etc`); the stdin block below pins the
@@ -1765,6 +1788,26 @@ const allowed = [
   "x=\"$(basename \"$(pwd)\")\"; echo \"$x\"",
   "echo \"$(dirname \"$(dirname \"$PWD\")\")\"",
   "echo \"a $(echo \"b $(echo c) d\") e\"",
+  // BR2-2-REG2 (2026-10-17): the commit/PR template with the delimiter and `)`
+  // on one line, which bash runs (5.3 with a warning, 3.2 silently where it has
+  // no apostrophe). The first five were ALLOWED at 6a3edb1 and DENIED at
+  // d88780f as "unreadable command substitution"; the rest are allowed at
+  // both and pin what the rule must NOT do: a top-level heredoc and a plain
+  // "( )" subshell end only at the exact delimiter line (bash: `EOF)` is body
+  // text there), and `EOF)x` is a word after the substitution.
+  // BR2-2-REG2：結束標記與 `)` 寫在同一行的 commit／PR 範本，bash 會執行。前五列在 6a3edb1 放行、在 d88780f 以
+  // 「unreadable command substitution」被拒；其餘修前修後都放行，釘住這條規則「不可以」做的事：頂層 heredoc 與
+  // 普通的 "( )" subshell 只在剛好等於標記的那一行結束（在那裡 `EOF)` 是內文）。
+  "git commit -m \"$(cat <<'EOF'\nfix: tidy the parser\nEOF)\"",
+  "git commit -m \"$(cat <<'EOF'\nfix: tidy the parser\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nEOF)\"",
+  "gh pr create --body \"$(cat <<'EOF'\n## Summary\n- it's fine\nEOF)\"",
+  "git commit -m \"$(cat <<-'EOF'\n\tfix: tab form\n\tEOF)\"",
+  "x=\"$(cat <<'EOF'\nfoo\nEOF)\" && echo \"$x\"",
+  "x=$(cat <<'EOF'\nfoo\nEOF)",
+  "diff <(cat <<'EOF'\na\nEOF) b.txt",
+  "cat <<'EOF'\nEOF)\nrm -rf /etc\nEOF",
+  "( cat <<'EOF'\nEOF)\nrm -rf /etc\nEOF\n)",
+  "x=$(cat <<'EOF'\nbody\nEOF)x",
   // BR-OBS-1 (2026-10-17): the SUBJECT of a `case` was read as a command word
   // after the control word `case` was skipped; an unresolvable subject was then
   // assumed to be rm, so `in` and the first pattern became its operands. Rows
@@ -4152,6 +4195,47 @@ for (const command of NESTED_QUOTED_SUBSTITUTION_ALLOWED) {
   assert.equal(stdout, '', `a "$( )" nested in a quoted string within "$( )" is ordinary, but this was denied: ${command}`);
   stdinChecks += 1;
 }
+
+// BR2-2-REG2 (2026-10-17), through the real stdin contract: a heredoc closed by
+// `DELIM)` inside "$( )" or "<( )". A deletion after that line, or between the
+// delimiter and the `)`, is read and refused FOR ITS OWN TARGET; the ordinary
+// commit/PR/assignment forms are allowed.
+// BR2-2-REG2，走真正的 stdin 契約：在 "$( )" 或 "<( )" 裡以 `DELIM)` 關掉的 heredoc。那一行之後、或標記與 `)`
+// 之間的刪除要被讀到，並因為它自己的目標被拒；普通的 commit／PR／指派寫法放行。
+const PAREN_CLOSED_HEREDOC_BLOCKED = [
+  ["x=$(cat <<'EOF'\nbody\nEOF)\nrm -rf /etc", /Refused to remove protected directory: \/etc$/],
+  ["x=$(cat <<'EOF'\nbody\nEOF) && rm -rf ~", /Refused to remove protected directory: \/home\/tester$/],
+  ["x=$(cat <<'EOF'\nbody\nEOF); rm -rf ~/.git", /Refused to remove protected directory: \/home\/tester\/\.git$/],
+  ["x=$(cat <<EOF\nbody\nEOF)\nrm -rf ~", /Refused to remove protected directory: \/home\/tester$/],
+  ["x=$(cat <<'EOF'\nbody\nEOF rm -rf /etc)", /Refused to remove protected directory: \/etc$/],
+  ["x=\"$(cat <<'EOF'\nbody\nEOF rm -rf /etc)\"", /Refused to remove protected directory: \/etc$/],
+  ["diff <(cat <<'EOF'\na\nEOF) b.txt\nrm -rf /etc", /Refused to remove protected directory: \/etc$/],
+  ["diff <(cat <<'EOF'\na\nEOF rm -rf /etc) b.txt", /Refused to remove protected directory: \/etc$/],
+];
+const PAREN_CLOSED_HEREDOC_ALLOWED = [
+  "git commit -m \"$(cat <<'EOF'\nfix: tidy the parser\nEOF)\"",
+  "gh pr create --body \"$(cat <<'EOF'\n## Summary\n- it's fine\nEOF)\"",
+  "x=\"$(cat <<'EOF'\nfoo\nEOF)\" && echo \"$x\"",
+  "diff <(cat <<'EOF'\na\nEOF) b.txt",
+  "cat <<'EOF'\nEOF)\nrm -rf /etc\nEOF",
+];
+for (const [command, wording] of PAREN_CLOSED_HEREDOC_BLOCKED) {
+  const { status, stdout } = runHookOverStdin(claude(command));
+  assert.equal(status, 0, `${command} (exit)`);
+  let parsed = null;
+  try { parsed = JSON.parse(stdout); } catch (_) { parsed = null; }
+  const reason = parsed?.hookSpecificOutput?.permissionDecisionReason || '';
+  assert.equal(parsed?.hookSpecificOutput?.permissionDecision, 'deny',
+    `a deletion after or inside a DELIM) line must be read and refused: ${JSON.stringify(command)} (stdout: ${JSON.stringify(stdout)})`);
+  assert.match(reason, wording, `refused, but not for the target this row pins: ${JSON.stringify(command)} (${reason.slice(0, 120)})`);
+  stdinChecks += 1;
+}
+for (const command of PAREN_CLOSED_HEREDOC_ALLOWED) {
+  const { status, stdout } = runHookOverStdin(claude(command));
+  assert.equal(status, 0, `${command} (exit)`);
+  assert.equal(stdout, '', `a heredoc closed by DELIM) is ordinary, but this was denied: ${JSON.stringify(command)}`);
+  stdinChecks += 1;
+}
 for (const command of HEREDOC_IN_SUBSTITUTION_ALLOWED) {
   const { status, stdout } = runHookOverStdin(claude(command));
   assert.equal(status, 0, `${command} (exit)`);
@@ -4227,6 +4311,12 @@ const CASE_STATEMENT_BLOCKED = [
   // 刻意釘住的 fail-closed 那一側：在 reader 不算命令位置的地方出現 `case WORD in` 標頭形狀。這裡 bash
   // 把它當 echo 的引數，但 reader 分不出它與沒建模的命令位置，所以讀取失敗、以沒讀到拒絕。
   ['echo "$(echo case x in y)"', '/workspace/project', /Rule: unreadable command substitution/],
+  // The same fail-closed side for a case inside a function body defined in the
+  // substitution: the `{` follows the `)` of `f()`, which ends command position
+  // in the reader. bash 5.3 and 3.2 parse it (bash -n rc 0).
+  // 替換裡定義的函式內文中的 case，同一個 fail-closed 那一側：`{` 接在 `f()` 的 `)` 後面，reader 在那裡結束了命令位置。
+  ['x="$(f() { case "$1" in a) echo A;; esac; }; f a)"', '/workspace/project',
+    /Rule: unreadable command substitution/],
 ];
 for (const [command, cwd] of CASE_STATEMENT_ALLOWED) {
   const { status, stdout } = runHookOverStdin(claude(command, cwd));
