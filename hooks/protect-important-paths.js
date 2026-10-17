@@ -5735,6 +5735,58 @@ function commandTargetsScanOneReading(
     return k;
   };
 
+  // BR-OBS-1 (2026-10-17): where a `case` HEADER ends -- `case WORD in`, newlines
+  // allowed before `in` and after it, then the first pattern list: an optional
+  // `(`, pattern words joined by `|`, and its `)`. Returns the index just past
+  // that `)`, the index of an `esac` that follows `in` directly, or -1 when the
+  // words do not have that shape. `case` used to be skipped as a control word
+  // and nothing more, so the SUBJECT was read as the command word; an
+  // unresolvable subject is assumed to be rm (the rule below), which made `in`
+  // and the first pattern its operands. `case "$p" in /*) …` was refused as
+  // "protected directory: /*", `case "$a" in /etc) echo hit;; esac` as /etc, and
+  // with the cwd at HOME `case "$a" in *x*)` as `*x*` -- in the live guard, for
+  // ordinary idioms. The header is not a command in bash, so it is not read as
+  // one here; the arm bodies after it are scanned exactly as before. Nothing in
+  // the header escapes the scan: a substitution in the subject or in a pattern
+  // (which bash runs while matching) is found by commandSubstitutions() over the
+  // raw text, as every substitution is. Later pattern lists need no model: each
+  // sits at command position directly before its `)`, which ends the operand
+  // list before anything is collected. A header of any other shape falls back to
+  // the old reading, the fail-closed side.
+  // BR-OBS-1：`case` 標頭在哪裡結束——`case WORD in`（`in` 前後可以有換行），接著第一個樣式清單：
+  // 可有可無的 `(`、以 `|` 相連的樣式字、它的 `)`。回傳那個 `)` 之後的位置、緊接在 `in` 後面的
+  // `esac` 的位置，或形狀不符時的 -1。`case` 原本只被當成控制字跳過，於是「主詞」被當成命令字讀；
+  // 解不開的主詞假設是 rm（下面那條規則），`in` 與第一個樣式就成了它的操作元——在 live 守衛裡擋掉了
+  // 普通的寫法。標頭在 bash 裡不是命令，這裡也不再當成命令讀；之後的 arm 內文照舊掃。標頭裡的東西
+  // 沒有漏掉：主詞或樣式裡的替換（bash 比對時會執行）由 commandSubstitutions() 對原文找到，與每一個
+  // 替換相同。之後的樣式清單不需要模型：每一個都在命令位置、緊接著自己的 `)`，操作元清單在收集任何
+  // 東西之前就結束了。其他形狀的標頭退回原本的讀法，也就是 fail-closed 的那一側。
+  const caseHeaderEnd = (at) => {
+    const plainWord = (k) => k < words.length && !operatorTokens[k];
+    const skipNewlines = (k) => {
+      let j = k;
+      while (j < words.length && operatorTokens[j] && words[j] === '\n') j += 1;
+      return j;
+    };
+    let k = at + 1;
+    if (!plainWord(k)) return -1;
+    k = skipNewlines(k + 1);
+    if (!plainWord(k) || words[k] !== 'in') return -1;
+    k = skipNewlines(k + 1);
+    if (plainWord(k) && words[k] === 'esac') return k;
+    if (k < words.length && operatorTokens[k] && words[k] === '(') k += 1;
+    for (;;) {
+      if (!plainWord(k)) return -1;
+      k += 1;
+      if (k < words.length && operatorTokens[k] && words[k] === ')') return k + 1;
+      if (k < words.length && operatorTokens[k] && words[k] === '|') {
+        k += 1;
+        continue;
+      }
+      return -1;
+    }
+  };
+
   let i = 0;
 
   while (i < words.length) {
@@ -5747,6 +5799,13 @@ function commandTargetsScanOneReading(
     // 這裡讀。
     while (i < words.length && (operatorAt(i, terminators) || substitutionEnd(i) !== -1)) i += 1;
     if (i >= words.length) break;
+    if (words[i] === 'case' && !operatorTokens[i]) {
+      const headerEnd = caseHeaderEnd(i);
+      if (headerEnd !== -1) {
+        i = headerEnd;
+        continue;
+      }
+    }
     if (controlWords.has(words[i])) {
       i += 1;
       continue;

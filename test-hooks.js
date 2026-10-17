@@ -957,6 +957,24 @@ const blocked = [
   // expanded, so the substitution inside it runs.
   // 修之前就拒絕、之後也必須拒絕：未加引號的標記，內文會展開，裡面的替換會執行。
   "git commit -m \"$(cat <<EOF\nfix: $(rm -rf /etc)\nEOF\n)\"",
+  // BR-OBS-1 (2026-10-17): a `case` statement is not a command whose subject is
+  // the command word. These were refused before the fix too, but some for the
+  // wrong target (`*x*` instead of `/etc`); the stdin block below pins the
+  // target. A deletion in an arm body, in the subject's substitution or in a
+  // pattern's substitution still runs in bash and must stay refused.
+  // BR-OBS-1：`case` 敘述不是「主詞就是命令字」的命令。這幾列修前也拒絕，但有的拒絕理由是錯的
+  // 目標（`*x*` 而不是 `/etc`）；下面的 stdin 區塊釘住目標。arm 內文、主詞的替換、樣式的替換裡的刪除
+  // 在 bash 裡都會執行，必須照舊拒絕。
+  'case x in *) rm -rf ~/.git;; esac',
+  'case "$a" in *x*) rm -rf /etc;; esac',
+  'case "$a" in *x*) echo hit;; esac; rm -rf /etc',
+  'case "$a" in\n  *x*)\n    rm -rf ~/.ssh\n    ;;\nesac',
+  'case "$(rm -rf /etc)" in x) :;; esac',
+  'case x in $(rm -rf /etc)) :;; esac',
+  // A command word that only exists after expansion is still assumed to be rm
+  // when no `case` stands in front of it.
+  // 前面沒有 `case` 時，展開後才知道的命令字仍然假設是 rm。
+  '"$a" in /etc',
   // Two heredocs, and it is the SECOND that feeds the shell: a body must go back
   // to the operator it belongs to, not to whichever came first.
   "cat <<'A' ; bash <<'B'\njust data\nA\nrm -rf /etc\nB",
@@ -1713,6 +1731,26 @@ const allowed = [
   "echo \"$(cat <<< 'here string'; echo done)\"",
   "printf '%s\\n' \"$(cat <<-'EOF'\n\tit's tab-indented\n\tEOF\n)\"",
   "echo \"$(echo $'it\\'s')\"",
+  // BR-OBS-1 (2026-10-17): the SUBJECT of a `case` was read as a command word
+  // after the control word `case` was skipped; an unresolvable subject was then
+  // assumed to be rm, so `in` and the first pattern became its operands. Rows
+  // 3-5 were DENIED at 6a3edb1 in this file's env -- the absolute-path test `/*`
+  // as "Refused to remove protected directory: /*", which names no path the
+  // command removes. Rows 1-2 were denied there only with the tool call's cwd
+  // at HOME, where their globs select a protected directory's contents; the
+  // stdin block below pins that cwd. The last two are allowed before and after:
+  // a `(pat)` arm (the `(` ended that operand list) and `case` as a plain word.
+  // BR-OBS-1：跳過控制字 `case` 之後，`case` 的「主詞」被當成命令字讀；主詞解不開就假設是 rm，`in`
+  // 與第一個樣式就成了它的操作元。第 3〜5 列在 6a3edb1、本檔的 env 下被拒——連判斷絕對路徑的 `/*` 都
+  // 被說成「拒絕刪除受保護的目錄：/*」。第 1〜2 列只有在工具呼叫的 cwd 是 HOME 時被拒（下面 stdin 區塊
+  // 釘住那個 cwd）。最後兩列修前修後都放行：`(pat)` 形式的 arm，以及當成普通字的 `case`。
+  'case "$a" in *x*) echo hit;; esac',
+  'case "$f" in *.json) echo j;; esac',
+  'case "$p" in /*) echo abs;; *) echo rel;; esac',
+  'case "$a" in /etc) echo hit;; esac',
+  'case " $seen " in *" $f "*) continue;; esac',
+  'case $1 in (-h|--help) echo usage;; *) echo run;; esac',
+  'echo case "$a" in x',
   // find that does not delete is a reader, and the overwhelming majority of find
   // invocations are readers. Only -delete and the -exec family reaching rm make
   // it a deleter.
@@ -4068,6 +4106,54 @@ for (const [command, wording] of HEREDOC_IN_SUBSTITUTION_BLOCKED) {
   assert.equal(parsed?.hookSpecificOutput?.permissionDecision, 'deny',
     `the command inside "$( )" must be read and refused: ${command} (stdout: ${JSON.stringify(stdout)})`);
   assert.match(reason, wording, `refused, but not for the reason this row pins: ${command}`);
+  stdinChecks += 1;
+}
+
+// BR-OBS-1 (2026-10-17), through the real stdin contract: a `case` header is
+// not a command, and a deletion inside a case statement is refused FOR ITS OWN
+// TARGET. With the tool call's cwd at HOME -- where a glob selects the
+// contents of a protected directory -- `case "$a" in *x*) echo hit;; esac` was
+// refused at 6a3edb1 as "protected directory: *x*", and the same header with
+// `rm -rf /etc` in its arm was refused for `*x*` too: the first pattern, read as
+// an operand of the subject. That names no path the command removes, the false
+// claim the unresolved-variable wording fix was made to stop.
+// BR-OBS-1，走真正的 stdin 契約：`case` 的標頭不是命令，case 裡的刪除要因為它自己的目標被拒。
+// 工具呼叫的 cwd 在 HOME 時（那裡的 glob 選的是受保護目錄的內容），修之前上面那條被說成「受保護的
+// 目錄：*x*」，arm 裡寫著 `rm -rf /etc` 的同一個標頭也被說成 `*x*`——那是被當成主詞操作元的第一個樣式。
+const CASE_STATEMENT_ALLOWED = [
+  ['case "$p" in /*) echo abs;; *) echo rel;; esac', '/workspace/project'],
+  ['case " $seen " in *" $f "*) continue;; esac', '/workspace/project'],
+  ['case "$a" in *x*) echo hit;; esac', '/home/tester'],
+  ['case "$f" in *.json) echo j;; esac', '/home/tester'],
+];
+const CASE_STATEMENT_BLOCKED = [
+  ['case "$a" in *x*) rm -rf /etc;; esac', '/home/tester', /Refused to remove protected directory: \/etc$/],
+  ['case x in *) rm -rf ~/.git;; esac', '/workspace/project',
+    /Refused to remove protected directory: \/home\/tester\/\.git$/],
+  ['case "$a" in\n  *x*)\n    rm -rf ~/.ssh\n    ;;\nesac', '/workspace/project',
+    /Refused to remove protected directory: \/home\/tester\/\.ssh$/],
+  ['case "$(rm -rf /etc)" in x) :;; esac', '/workspace/project', /Refused to remove protected directory: \/etc$/],
+  ['case x in $(rm -rf /etc)) :;; esac', '/workspace/project', /Refused to remove protected directory: \/etc$/],
+  // Without `case` in front, the expansion IS the command word: still assumed
+  // to be rm, so the glob at HOME is still refused.
+  // 前面沒有 `case` 時，展開本身就是命令字：照舊假設是 rm，HOME 底下的 glob 照舊拒絕。
+  ['"$a" in *x*', '/home/tester', /Refused to remove protected directory: \*x\*$/],
+];
+for (const [command, cwd] of CASE_STATEMENT_ALLOWED) {
+  const { status, stdout } = runHookOverStdin(claude(command, cwd));
+  assert.equal(status, 0, `${command} (exit)`);
+  assert.equal(stdout, '', `a case header is not a deletion, but this was denied (cwd ${cwd}): ${command}`);
+  stdinChecks += 1;
+}
+for (const [command, cwd, wording] of CASE_STATEMENT_BLOCKED) {
+  const { status, stdout } = runHookOverStdin(claude(command, cwd));
+  assert.equal(status, 0, `${command} (exit)`);
+  let parsed = null;
+  try { parsed = JSON.parse(stdout); } catch (_) { parsed = null; }
+  const reason = parsed?.hookSpecificOutput?.permissionDecisionReason || '';
+  assert.equal(parsed?.hookSpecificOutput?.permissionDecision, 'deny',
+    `a deletion inside a case statement must be refused: ${command} (stdout: ${JSON.stringify(stdout)})`);
+  assert.match(reason, wording, `refused, but not for the target this row pins: ${command} (${reason.slice(0, 120)})`);
   stdinChecks += 1;
 }
 
