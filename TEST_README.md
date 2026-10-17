@@ -66,7 +66,8 @@ podman run -v $(pwd):/app:z ubuntu:latest bash /app/test-better-rm.sh
 - 組合參數 (-rf)
 
 ### 測試 9: 受保護目錄
-- 柵欄自我檢查：find、xargs、md5sum、sha256sum、mv 在 PATH 最前面換成只記錄、從不執行真工具的 shim，先對沙箱目錄跑一次 better-rm，證明五個都攔得住
+- 柵欄自我檢查：先對沙箱目錄跑一次 better-rm，PATH 只剩一個目錄，裡面是預設 PATH 上每一個執行檔名的 symlink，全部指向一支記錄名字的 dispatcher。find、xargs、md5sum、sha256sum、mv 這五個柵欄名字一律記錄後以 97 結束、從不執行真工具，而且五個都必須出現；允許清單裡的唯讀小工具（以及只碰得到沙箱 TRASH_DIR／STATE_DIR 的 mkdir、rmdir）照常執行；其餘任何名字一被叫到，自我檢查就失敗。刪除路徑多用一個新工具（例如量空間的 du/df、明確跨裝置複製的 cp/rm），得先把它加進柵欄或允許清單
+- Fence self-check: one better-rm run on a sandbox directory with PATH set to a single directory of symlinks, one for every executable name on the default PATH, all pointing at a dispatcher that records the name. The five fenced names (find, xargs, md5sum, sha256sum, mv) are recorded and exit 97 without running the real tool, and all five must appear; allowlisted read-only helpers (plus mkdir and rmdir, which only reach the sandboxed TRASH_DIR/STATE_DIR) run normally; any other name that is invoked fails the self-check. A new tool on the delete path (du/df for a space check, cp/rm for an explicit cross-device copy) has to be fenced or allowlisted first
 - 拒絕刪除根目錄 (/)
 - 拒絕刪除 /home
 - 拒絕刪除 /mnt 與第一層掛載根
