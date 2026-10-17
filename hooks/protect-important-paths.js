@@ -357,6 +357,36 @@ function heredocDelimiter(input, start, readsLeft = Infinity) {
   return { delimiter, end: index, quoted, failedReads };
 }
 
+// Where ONE heredoc body ends: its lines from `start` (the index just after the
+// newline that opens it, or just after the previous body on the same line) up
+// to the delimiter line, compared after stripping leading tabs for `<<-`.
+// `end` is the index just past the delimiter line; `terminated` is false when
+// the input ran out first -- an unterminated heredoc runs to the end of the
+// input, exactly as a shell reading a script that stops mid-heredoc would see
+// it. The tokenizer and readParenthesized both decide body ends HERE, with the
+// delimiter the shared delimiter reader above returned, so the two cannot drift
+// apart (BR2-2).
+// 一段 heredoc 內文在哪裡結束：從 start 起逐行讀到結束行為止（`<<-` 先去掉開頭的 tab 再比）。
+// end 是結束行之後的位置；輸入先用完時 terminated 為 false。tokenizer 與 readParenthesized 都在這
+// 裡決定內文結尾，用的是上面那個共用的標記 reader 讀出的標記，所以兩邊不會各自走鐘（BR2-2）。
+function heredocBodyEnd(input, start, delimiter, stripTabs) {
+  const lines = [];
+  let position = start;
+  while (position <= input.length) {
+    let lineEnd = input.indexOf('\n', position);
+    const atEnd = lineEnd === -1;
+    if (atEnd) lineEnd = input.length;
+    const line = input.slice(position, lineEnd);
+    position = lineEnd + 1;
+    if ((stripTabs ? line.replace(/^\t+/, '') : line) === delimiter) {
+      return { lines, end: position, terminated: true };
+    }
+    lines.push(line);
+    if (atEnd) break;
+  }
+  return { lines, end: position, terminated: false };
+}
+
 // How many substitution reads inside a double quote may FAIL before the three
 // readers below stop being called at all. A read that fails scans to end of input
 // and the caller then advances ONE character, so N unbalanced openers cost
@@ -400,6 +430,10 @@ function shellWords(command) {
   // failedSubstitutionReads 掛在 words 上的理由相同：讀不到只能決定「成本」，不能決定
   // 「答案」。
   const unreadableHeredocDelimiters = [];
+  // `$(` openers inside double quotes whose `)` could not be found (BR2-2); see
+  // UNREADABLE_QUOTED_SUBSTITUTION. Exposed on `words` like the list above.
+  // 雙引號裡找不到收尾 `)` 的 `$(` 個數（BR2-2），與上面的清單一樣掛在 words 上。
+  let unreadableQuotedSubstitutions = 0;
   const pendingHeredocs = [];
   const input = String(command || '');
   let word = '';
@@ -558,8 +592,13 @@ function shellWords(command) {
           index = substitution.end;
         } else {
           // Unbalanced '(': keep the old character-by-character behaviour, the
-          // same fallback the top-level branch takes.
+          // same fallback the top-level branch takes -- but that walk reads the
+          // substitution as STRING text, so it is also counted as unread and
+          // commandTargetsScan refuses it (UNREADABLE_QUOTED_SUBSTITUTION).
+          // 沒收尾的 '('：維持原本逐字元的處理，但那樣走過去是把替換當「字串」讀，所以同時記成
+          // 「沒讀到」，由 commandTargetsScan 拒絕。
           failedSubstitutionReads += 1;
+          unreadableQuotedSubstitutions += 1;
           word += char;
         }
       }
@@ -731,7 +770,6 @@ function shellWords(command) {
       if (word) pushWord(word), word = '';
       let position = index + 1;
       for (const pending of pendingHeredocs) {
-        const bodyLines = [];
         // Clamped, and this is not cosmetic. A body that runs to the end of the
         // input leaves `position` one PAST the end, so a SECOND heredoc in the
         // same command started after the end while its end was clamped to it --
@@ -746,21 +784,13 @@ function shellWords(command) {
         // 字面內文抹白的 ' '.repeat() 就丟出 Invalid count value: -1。PreToolUse 丟例外
         // 等於 exit 2，會擋掉那次工具呼叫。
         const bodyStart = Math.min(position, input.length);
-        while (position <= input.length) {
-          let lineEnd = input.indexOf('\n', position);
-          const atEnd = lineEnd === -1;
-          if (atEnd) lineEnd = input.length;
-          const line = input.slice(position, lineEnd);
-          position = lineEnd + 1;
-          // An unterminated heredoc runs to the end of the input, exactly as a
-          // shell reading a script that stops mid-heredoc would see it.
-          if ((pending.stripTabs ? line.replace(/^\t+/, '') : line) === pending.delimiter) break;
-          bodyLines.push(line);
-          if (atEnd) break;
-        }
+        // An unterminated heredoc runs to the end of the input, exactly as a
+        // shell reading a script that stops mid-heredoc would see it.
+        const read = heredocBodyEnd(input, position, pending.delimiter, pending.stripTabs);
+        position = read.end;
         heredocs.push({
           operatorIndex: pending.operatorIndex,
-          body: bodyLines.join('\n'),
+          body: read.lines.join('\n'),
           // Where the body sits in the ORIGINAL text, so the substitution scan
           // can be told to leave a literal body alone.
           quoted: pending.quoted,
@@ -946,6 +976,9 @@ function shellWords(command) {
   Object.defineProperty(
     words, 'unreadableHeredocDelimiters', { value: unreadableHeredocDelimiters },
   );
+  Object.defineProperty(
+    words, 'unreadableQuotedSubstitutions', { value: unreadableQuotedSubstitutions },
+  );
   return words;
 }
 
@@ -996,6 +1029,43 @@ function readBackquoted(input, openIndex) {
   return null;
 }
 
+// BR2-2 (2026-10-17): this reader decides where a `$( … )` ENDS, and bash parses
+// the inside of one as a full command list -- heredocs, ANSI-C quotes and
+// backquotes included. Without a model of those three it put the `)` in the
+// wrong place, and whatever it left outside was walked by its caller as text:
+// inside double quotes that text is never scanned. So
+// `echo "$(cat <<'EOF'` + `it's fine` + `EOF` + `rm -rf /etc` + `)"` was ALLOWED
+// (the apostrophe opened a quote that never closed), and so was its `1) note`
+// twin (the `)` closed the substitution early), while the commit template
+// `git commit -m "$(cat <<'EOF' … EOF)"` was DENIED for a backticked rm example
+// in its body. bash 5.3 and zsh place the trailing command INSIDE the
+// substitution (parsed with declare -f / functions on a never-called function).
+// - A heredoc opened inside (`<<` or `<<-`, never the `<<<` here-string, and
+//   never inside `$(( ))` or `(( ))`, where `<<` is a shift) has its delimiter
+//   read by heredocDelimiter -- the tokenizer's own rules (R5-15) -- and its body
+//   skipped line by line up to the delimiter line, read once. A quoted body is
+//   text and an unquoted one is data until expanded; either way no quote or
+//   paren in it belongs to the substitution. The caller still scans the text
+//   this returns, heredoc and all, with the tokenizer, which masks a quoted body
+//   and scans an unquoted one.
+// - `$'…'` is ANSI-C: a backslash escapes, `\'` included. `$'\''` used to open a
+//   plain quote here that never closed.
+// - A backquote opens a nested substitution that ends at the next unescaped
+//   backquote, so a `)` inside it is not this substitution's end.
+// - A body whose delimiter line never comes, an unreadable delimiter, or an
+//   unterminated backquote means the end is unknown: null, the caller's
+//   existing failure path (inside double quotes that path now refuses -- see
+//   UNREADABLE_QUOTED_SUBSTITUTION).
+// The delimiter is read with readsLeft = 0, so a delimiter word holding `$(`,
+// `${` or a backquote is not read through: it fails to match any line and the
+// read fails closed instead of spending a budget this reader does not own.
+// BR2-2：這個 reader 決定 `$( … )` 在哪裡「結束」，而 bash 把裡面當成完整的命令列解析——包括
+// heredoc、ANSI-C 引號與反引號。三者都沒有建模，`)` 就放錯地方，留在外面的部分被呼叫端當文字走
+// 過去：在雙引號裡，那段文字永遠不會被掃。所以上面那條在 heredoc 之後刪 /etc 的命令被放行，而
+// commit 範本卻因為內文裡反引號包住的 rm 範例被拒。現在：在裡面開的 heredoc 用 heredocDelimiter
+// （tokenizer 自己的規則）讀標記、整段內文逐行跳過；`$'…'` 照 ANSI-C 處理反斜線；反引號是到下一個
+// 未跳脫反引號為止的巢狀替換。結束行永遠不來、標記讀不出來、反引號沒收尾，都代表結尾未知：回傳
+// null，走呼叫端原本的失敗路徑（在雙引號裡，那條路徑現在會拒絕）。
 function readParenthesized(input, openIndex) {
   let depth = 1;
   let innerQuote = '';
@@ -1005,6 +1075,14 @@ function readParenthesized(input, openIndex) {
   // '#' opens a comment only unquoted and only at the start of a word.
   // 找 ')' 的掃描同時也要認得註解——註解會同時遮蔽引號與括號。規則與 tokenizer 相同。
   let atWordStart = true;
+  // Heredocs opened inside this substitution whose bodies start at the next
+  // unquoted newline, in the order their operators appeared.
+  // 在這個替換裡開的 heredoc，內文從下一個未加引號的換行開始，順序與運算子出現的順序相同。
+  const pendingHeredocs = [];
+  // The depth an arithmetic region (`$(( … ))`, `(( … ))`) began at, 0 outside
+  // one: there `<<` is a left shift, not a heredoc.
+  // 算術區段（`$(( … ))`、`(( … ))`）開始時的深度，不在其中時為 0：那裡的 `<<` 是左移。
+  let arithmeticFrom = input[openIndex + 1] === '(' ? 1 : 0;
   for (let i = openIndex + 1; i < input.length; i += 1) {
     const char = input[i];
     const wasAtWordStart = atWordStart;
@@ -1028,23 +1106,65 @@ function readParenthesized(input, openIndex) {
       // and a syntax error. Returning null keeps the caller's existing fallback.
       // 沒有換行的註解會把收尾的 ')' 一起吃掉，這正是 bash 的行為（該式子是語法錯誤）。
       if (lineEnd === -1) return null;
-      i = lineEnd;
-      atWordStart = true;
+      // Stop BEFORE the newline, as the tokenizer's comment arm does: a heredoc
+      // opened on this line starts its body there.
+      // 停在換行之前（tokenizer 的註解分支也這樣做）：這一行開的 heredoc 從那裡開始內文。
+      i = lineEnd - 1;
+    } else if (innerQuote === 'ansi-c') {
+      if (char === "'") innerQuote = '';
     } else if (innerQuote) {
       if (char === innerQuote) innerQuote = '';
       else if (innerQuote === '"' && char === '$' && input[i + 1] === '(') {
         depth += 1;
         i += 1;
+      } else if (innerQuote === '"' && char === '`') {
+        const close = readBackquoted(input, i);
+        if (close === null) return null;
+        i = close;
       }
+    } else if (char === '$' && input[i + 1] === "'") {
+      innerQuote = 'ansi-c';
+      i += 1;
     } else if (char === '"' || char === "'") {
       innerQuote = char;
+    } else if (char === '`') {
+      const close = readBackquoted(input, i);
+      if (close === null) return null;
+      i = close;
+    } else if (char === '\n' && pendingHeredocs.length > 0) {
+      let position = i + 1;
+      for (const pending of pendingHeredocs) {
+        const read = heredocBodyEnd(input, position, pending.delimiter, pending.stripTabs);
+        if (!read.terminated) return null;
+        position = read.end;
+      }
+      pendingHeredocs.length = 0;
+      i = position - 1;
+    } else if (char === '<' && input[i + 1] === '<' && arithmeticFrom === 0) {
+      if (input[i + 2] === '<') {
+        // A here-string: no body. All three characters, or the second '<' would
+        // be read as a heredoc operator.
+        // here-string 沒有內文。三個字元一起吃掉，否則第二個 '<' 會被讀成 heredoc。
+        i += 2;
+      } else {
+        const stripTabs = input[i + 2] === '-';
+        const parsed = heredocDelimiter(input, i + (stripTabs ? 3 : 2), 0);
+        if (parsed.unreadable !== undefined || (parsed.delimiter === '' && !parsed.quoted)) {
+          return null;
+        }
+        pendingHeredocs.push({ delimiter: parsed.delimiter, stripTabs });
+        i = parsed.end - 1;
+      }
     } else if (char === '$' && input[i + 1] === '(') {
       depth += 1;
       i += 1;
+      if (input[i + 1] === '(' && arithmeticFrom === 0) arithmeticFrom = depth;
     } else if (char === '(') {
       depth += 1;
+      if (wasAtWordStart && input[i + 1] === '(' && arithmeticFrom === 0) arithmeticFrom = depth;
     } else if (char === ')') {
       depth -= 1;
+      if (arithmeticFrom !== 0 && depth < arithmeticFrom) arithmeticFrom = 0;
       if (depth === 0) {
         return { command: input.slice(openIndex + 1, i), end: i };
       }
@@ -1573,6 +1693,30 @@ const UNREADABLE_TRAP_ACTION = '\u0000trap-action:';
 // 此吃到輸入結尾，本檔所有掃描從那裡開始什麼都看不到。對沒人看過的文字回答「放行」，與
 // SUBSTITUTION_BUDGET_EXHAUSTED 要關掉的是同一個缺陷，只差在換了一個 reader。
 const UNREADABLE_HEREDOC_DELIMITER = '\u0000heredoc-delimiter:';
+
+// A `$(` INSIDE DOUBLE QUOTES whose `)` this gate could not find (BR2-2,
+// 2026-10-17). Same discipline as the sentinels above, written as an ESCAPE for
+// the install-hooks.sh reason at UNRESOLVED_TARGET, and its own message for the
+// reason each of them has one: what went unread is the body of a command
+// substitution -- not a path, not a piped script, not a heredoc delimiter.
+// It has to exist because of what the tokenizer does after such a read fails: it
+// walks the rest of the substitution as text of the OUTER double-quoted string,
+// where a plain word is never scanned. Before this sentinel that was an ALLOW for
+// text nobody read: `echo "$(echo $'\''; rm -rf /etc)"` and the quoted-heredoc
+// shape readParenthesized now models both ran the `rm` in bash 5.3 (parsed with
+// declare -f, never executed) while this gate allowed them. bash rejects an
+// unterminated substitution, so refusing one costs no ordinary command; what is
+// refused is "this gate could not read it", never "it deletes something". The
+// value carried is the count of unreadable openers. A spent budget is NOT counted
+// here: past MAX_FAILED_SUBSTITUTION_READS no read is attempted, and
+// SUBSTITUTION_BUDGET_EXHAUSTED already refuses that state.
+// 雙引號裡一個找不到收尾 `)` 的 `$(`（BR2-2）。與上面幾個 sentinel 同一套規矩，也有自己的訊息：讀
+// 不到的是命令替換的內文。它必須存在，是因為這種讀取失敗之後 tokenizer 會把替換剩下的部分當成外層
+// 雙引號字串的文字走過去，裡面的一般字永遠不會被掃——在這個 sentinel 之前，那就是對沒人讀過的文字
+// 回答「放行」。bash 本來就拒絕沒收尾的替換，所以拒絕它不會擋掉任何正常命令；拒絕的理由是「沒讀
+// 到」，不是「它會刪東西」。預算用完的情形不算在這裡：那時根本不會嘗試讀取，已由
+// SUBSTITUTION_BUDGET_EXHAUSTED 拒絕。
+const UNREADABLE_QUOTED_SUBSTITUTION = '\u0000quoted-substitution:';
 
 // A scan that ran out of failed-read budget (R5-13, r5-fix-better-rm-8). Same
 // discipline as the sentinels above, and it needs to be its own for the same
@@ -3337,6 +3481,18 @@ function commandTargetsScanOneReading(
     return scanned;
   };
   noteHeredocDelimiters(words);
+  // BR2-2, the same rule again: a `$(` inside double quotes whose end this file
+  // could not find was walked as string text, so its body was never read. Both
+  // shellWords call sites, like the delimiter helper above.
+  // BR2-2，同一條規則：雙引號裡找不到結尾的 `$(` 被當字串走過去，內文從沒讀過。兩個 shellWords
+  // 呼叫端都套，與上面的標記 helper 一樣。
+  const noteQuotedSubstitutions = (scanned) => {
+    if (scanned.unreadableQuotedSubstitutions > 0) {
+      targets.push(UNREADABLE_QUOTED_SUBSTITUTION + scanned.unreadableQuotedSubstitutions);
+    }
+    return scanned;
+  };
+  noteQuotedSubstitutions(words);
   const separators = new Set([';', '&', '|', '(', ')', '<', '>', '\n']);
   // Redirections (`<`, `>`) stay within a simple command; they are not command
   // terminators. The rm/rmdir argument scan must skip a redirection and its
@@ -4734,7 +4890,9 @@ function commandTargetsScanOneReading(
     // 之一的預算也花完，所以單獨刪掉這一行在今天是等價突變，沒有測試殺得掉——記在這裡，而不
     // 是假裝有。留著它，是因為「漏斗一定也會觸發」是今天呼叫圖的性質、不是保證，而 R5-13 的
     // 由來正是本檔案曾經相信過一次「不可能發生」的論證。
-    const contextWords = noteHeredocDelimiters(noteSubstitutionBudget(shellWords(text)));
+    const contextWords = noteQuotedSubstitutions(
+      noteHeredocDelimiters(noteSubstitutionBudget(shellWords(text))),
+    );
     const contextOperators = contextWords.operatorTokens || [];
     const contextClosing = new Map();
     const contextOpen = [];
@@ -6324,6 +6482,32 @@ function unreadableHeredocDelimiterDenial(spelling, isCopilot, isAntigravity, is
   return denialShape(`${zh} / ${en}`, isCopilot, isAntigravity, isCursor, isGrok);
 }
 
+// The refusal for a `$(` inside double quotes whose `)` this gate could not find
+// (BR2-2). Its own wording for the reason recorded at
+// UNREADABLE_QUOTED_SUBSTITUTION: what went unread is the body of a command
+// substitution. The way out is about the substitution, not about a deletion --
+// this gate is not claiming to have found one -- and it names the file route
+// that commit messages can always take.
+// 「雙引號裡找不到收尾 `)` 的 `$(`」的拒絕（BR2-2）。自成一種訊息的理由記在
+// UNREADABLE_QUOTED_SUBSTITUTION：讀不到的是命令替換的內文。出路講的是替換而不是刪除，並指出
+// commit 訊息一定走得通的檔案寫法。
+function unreadableQuotedSubstitutionDenial(count, isCopilot, isAntigravity, isCursor, isGrok) {
+  const zh = '拒絕執行：這條命令在雙引號裡有 ' + count + ' 個 `$(`，這道閘門找不到它的收尾 `)`'
+    + '（引號、反引號或 heredoc 沒有收尾），所以替換裡的命令這道閘門一條都沒有讀到——包括可能'
+    + '寫在那裡的刪除（這不是說一定有，是說這道閘門沒有讀到）。規則：unreadable command substitution。'
+    + '繞法：讓替換裡的引號、反引號成對、heredoc 寫上結束行，或把文字放進檔案再讓命令去讀'
+    + '（例如 git commit -F <檔案>）。';
+  const en = 'Refused to run: this command has ' + count + ' `$(` inside double quotes whose closing'
+    + ' `)` this gate could not find (a quote, a backquote or a heredoc inside it never closes),'
+    + ' so none of the commands inside the substitution were read -- including any deletion'
+    + ' written there (this does not say one is there; it says this gate did not read it).'
+    + ' Rule: unreadable command substitution.'
+    + ' Workaround: balance the quotes and backquotes inside the substitution and end every'
+    + ' heredoc with its delimiter line, or put the text in a file and have the command read it'
+    + ' (git commit -F <file>).';
+  return denialShape(zh + ' / ' + en, isCopilot, isAntigravity, isCursor, isGrok);
+}
+
 // The refusal for a scan that ran out of failed-read budget (R5-13). Its own
 // wording for the reason recorded at SUBSTITUTION_BUDGET_EXHAUSTED: the other
 // three "could not read" messages each name the THING they could not read -- a
@@ -6494,6 +6678,7 @@ function evaluate(payload, env = process.env) {
       || target.startsWith(UNREADABLE_TRAP_ACTION)
       || target.startsWith(SUBSTITUTION_BUDGET_EXHAUSTED)
       || target.startsWith(UNREADABLE_HEREDOC_DELIMITER)
+      || target.startsWith(UNREADABLE_QUOTED_SUBSTITUTION)
     ) continue;
     const reason = protectedReason(target, cwd, home, extraDirs);
     if (reason) return denial(reason, isCopilot, isAntigravity, isCursor, isGrok);
@@ -6550,6 +6735,16 @@ function evaluate(payload, env = process.env) {
     if (!target.startsWith(UNREADABLE_HEREDOC_DELIMITER)) continue;
     return unreadableHeredocDelimiterDenial(
       target.slice(UNREADABLE_HEREDOC_DELIMITER.length), isCopilot, isAntigravity, isCursor,
+      isGrok,
+    );
+  }
+  // Beside the delimiter refusal and for its reason: a stretch of the command --
+  // here the body of a substitution -- was never read at all (BR2-2).
+  // 與標記那一個並列、理由相同：命令裡有一段（這裡是替換的內文）根本沒讀到（BR2-2）。
+  for (const target of targets) {
+    if (!target.startsWith(UNREADABLE_QUOTED_SUBSTITUTION)) continue;
+    return unreadableQuotedSubstitutionDenial(
+      target.slice(UNREADABLE_QUOTED_SUBSTITUTION.length), isCopilot, isAntigravity, isCursor,
       isGrok,
     );
   }

@@ -933,6 +933,30 @@ const blocked = [
   // 執行內文的 shell 在命令替換「外面」：heredoc 屬於 cat（不是 carrier），eval 在上一層。
   "eval \"$(cat <<'EOF'\nrm -rf /etc\nEOF\n)\"",
   "bash -c \"$(cat <<'EOF'\nrm -rf /usr\nEOF\n)\"",
+  // BR2-2 (2026-10-17): A COMMAND AFTER A QUOTED HEREDOC INSIDE "$( )". The `)`
+  // reader had no heredoc model, so it read the body as shell: an odd apostrophe
+  // opened a quote that never closed and a `1)` line closed the substitution
+  // early, and after that the rest of the substitution was walked as text of the
+  // OUTER double-quoted string, where a plain word is never scanned. bash 5.3 and
+  // zsh run the `rm` (parsed with declare -f / functions, never executed), and
+  // every row here was ALLOWED at 6a3edb1. The ANSI-C and backtick rows are the
+  // same reader misplacing the `)` for another reason: `$'\''` opened a quote it
+  // never closed, and a `)` inside backticks closed the substitution.
+  // BR2-2：`"$( )"` 裡的引號 heredoc 之後的命令。找 `)` 的 reader 沒有 heredoc 模型，把內文當
+  // shell 讀：落單的撇號開了收不了尾的引號、`1)` 那一行把替換提早關掉，之後替換剩下的部分被當成
+  // 外層雙引號字串的文字，裡面的一般字永遠不會被掃。bash 5.3 與 zsh 都會執行那個 rm，這裡每一列
+  // 在 6a3edb1 都放行。ANSI-C 與反引號兩列是同一個 reader 因為別的理由放錯 `)`。
+  "echo \"$(cat <<'EOF'\nit's fine\nEOF\nrm -rf /etc\n)\"",
+  "echo \"$(cat <<'EOF'\n1) note\nEOF\nrm -rf /etc\n)\"",
+  "echo \"$(cat <<'EOF'\nit's fine\nEOF\nrm -rf ~/.ssh\n)\"",
+  "echo \"$(cat <<-'EOF'\n\tit's fine\n\tEOF\nrm -rf /etc\n)\"",
+  "gh pr create --title \"x\" --body \"$(cat <<'EOF'\nit's done\nEOF\nrm -rf /etc\n)\"",
+  "echo \"$(echo $'\\''; rm -rf /etc)\"",
+  "echo \"$(echo `echo )`; rm -rf /etc)\"",
+  // Denied before the fix and must stay so: an UNQUOTED delimiter's body is
+  // expanded, so the substitution inside it runs.
+  // 修之前就拒絕、之後也必須拒絕：未加引號的標記，內文會展開，裡面的替換會執行。
+  "git commit -m \"$(cat <<EOF\nfix: $(rm -rf /etc)\nEOF\n)\"",
   // Two heredocs, and it is the SECOND that feeds the shell: a body must go back
   // to the operator it belongs to, not to whichever came first.
   "cat <<'A' ; bash <<'B'\njust data\nA\nrm -rf /etc\nB",
@@ -1666,6 +1690,29 @@ const allowed = [
   // The message this guard refused on 2026-08-13: prose that QUOTES the very
   // example the fail-closed rule exists for.
   "git commit -F - <<'MSG'\nAssuming an unknowable executable is rm must stay -- `CMD=rm; $CMD -rf /` really is rm.\nMSG",
+  // BR2-2 (2026-10-17): the commit/PR template agents write, a quoted heredoc
+  // INSIDE "$( )". Its body is data exactly like the `-F -` rows above, but the
+  // `)` reader read it as shell: an apostrophe or a `1)` item made it lose the
+  // end of the substitution, the body's backticks then became live commands,
+  // and the first three rows were DENIED at 6a3edb1 for the rm example they
+  // quote. The next two were allowed there only because their apostrophes
+  // happened to pair up. The last four are allowed before and after and pin what
+  // the heredoc model must NOT do: read a `<<` shift in `$(( ))` or a `<<<`
+  // here-string as a heredoc, mis-end a `<<-` body, or refuse an ANSI-C quote it
+  // can read.
+  // BR2-2：agent 寫的 commit／PR 範本，是「`"$( )"` 裡的引號 heredoc」。內文與上面 `-F -` 那幾列
+  // 一樣是資料，但找 `)` 的 reader 把它當 shell 讀：撇號或 `1)` 讓它找不到替換的結尾，內文的反引號
+  // 於是變成真的命令，前三列在 6a3edb1 因為引用的 rm 範例被拒。接下來兩列當時放行，只是因為撇號
+  // 剛好成對。後四列修前修後都放行，釘住 heredoc 模型「不可以」做的事。
+  "git commit -m \"$(cat <<'EOF'\nfix: `rm -rf /etc` (it's refused now)\nEOF\n)\"",
+  "gh pr create --title \"fix\" --body \"$(cat <<'EOF'\n## Summary\n- removed the `rm -rf /` example (it's dangerous)\nEOF\n)\"",
+  "git commit -m \"$(cat <<'EOF'\nfix: two cases\n\n1) do not run `rm -rf /`\nEOF\n)\"",
+  "git commit -m \"$(cat <<'EOF'\nfix: it's done\n\n1) a\n2) b\nEOF\n)\"",
+  "git commit -m \"$(cat <<'EOF'\nfix(hook): don't read a quoted heredoc as shell\n\n1) the body's `rm -rf ~/.ssh` example is text\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nEOF\n)\"",
+  "echo \"$(echo $((1 << 2)); cat <<'EOF'\nit's x\nEOF\n)\"",
+  "echo \"$(cat <<< 'here string'; echo done)\"",
+  "printf '%s\\n' \"$(cat <<-'EOF'\n\tit's tab-indented\n\tEOF\n)\"",
+  "echo \"$(echo $'it\\'s')\"",
   // find that does not delete is a reader, and the overwhelming majority of find
   // invocations are readers. Only -delete and the -exec family reaching rm make
   // it a deleter.
@@ -3978,6 +4025,52 @@ for (const command of documentedAllowances) {
   stdinChecks += 1;
 }
 
+// BR2-2 (2026-10-17), through the real stdin contract: a quoted heredoc inside
+// "$( )". The templates must be allowed, and a command AFTER the heredoc must be
+// refused FOR ITS OWN TARGET -- not by a generic sentinel -- which is what shows
+// the trailing command was really read once the body was skipped. The last row
+// is the fail-closed half: a body whose terminator line never comes leaves the
+// `)` unknown, and the substitution is refused as unread instead of being walked
+// as text (it was ALLOWED at 6a3edb1; bash rejects it, so nothing ordinary is
+// lost).
+// BR2-2，走真正的 stdin 契約：`"$( )"` 裡的引號 heredoc。範本要放行；heredoc「之後」的命令要因為
+// 它自己的目標被拒，而不是被泛用的 sentinel 擋下——這才證明跳過內文之後真的讀到了那條命令。最後
+// 一列是 fail-closed 那一半：結束行永遠沒出現的內文讓 `)` 在哪裡變成未知，替換以「沒讀到」拒絕，
+// 不再被當成文字走過去（6a3edb1 放行；bash 本來就拒絕它，所以不會損失任何正常用法）。
+const HEREDOC_IN_SUBSTITUTION_ALLOWED = [
+  "git commit -m \"$(cat <<'EOF'\nfix: `rm -rf /etc` (it's refused now)\nEOF\n)\"",
+  "gh pr create --title \"fix\" --body \"$(cat <<'EOF'\n## Summary\n- removed the `rm -rf /` example (it's dangerous)\nEOF\n)\"",
+  "git commit -m \"$(cat <<'EOF'\nfix: two cases\n\n1) do not run `rm -rf /`\nEOF\n)\"",
+  "git commit -m \"$(cat <<'EOF'\nfix(hook): don't read a quoted heredoc as shell\n\n1) the body's `rm -rf ~/.ssh` example is text\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nEOF\n)\"",
+];
+const HEREDOC_IN_SUBSTITUTION_BLOCKED = [
+  ["echo \"$(cat <<'EOF'\nit's fine\nEOF\nrm -rf /etc\n)\"", /Refused to remove protected directory: \/etc$/],
+  ["echo \"$(cat <<'EOF'\n1) note\nEOF\nrm -rf /etc\n)\"", /Refused to remove protected directory: \/etc$/],
+  ["echo \"$(cat <<'EOF'\nit's fine\nEOF\nrm -rf ~/.ssh\n)\"",
+    /Refused to remove protected directory: \/home\/tester\/\.ssh$/],
+  ["echo \"$(echo $'\\''; rm -rf /etc)\"", /Refused to remove protected directory: \/etc$/],
+  ["echo \"$(echo `echo )`; rm -rf /etc)\"", /Refused to remove protected directory: \/etc$/],
+  ["git commit -m \"$(cat <<EOF\nfix: $(rm -rf /etc)\nEOF\n)\"", /Refused to remove protected directory: \/etc$/],
+  ["echo \"$(cat <<'EOF'\nit's fine\nrm -rf /etc\n)\"", /Rule: unreadable command substitution/],
+];
+for (const command of HEREDOC_IN_SUBSTITUTION_ALLOWED) {
+  const { status, stdout } = runHookOverStdin(claude(command));
+  assert.equal(status, 0, `${command} (exit)`);
+  assert.equal(stdout, '', `a quoted heredoc inside "$( )" is data, but this was denied: ${command}`);
+  stdinChecks += 1;
+}
+for (const [command, wording] of HEREDOC_IN_SUBSTITUTION_BLOCKED) {
+  const { status, stdout } = runHookOverStdin(claude(command));
+  assert.equal(status, 0, `${command} (exit)`);
+  let parsed = null;
+  try { parsed = JSON.parse(stdout); } catch (_) { parsed = null; }
+  const reason = parsed?.hookSpecificOutput?.permissionDecisionReason || '';
+  assert.equal(parsed?.hookSpecificOutput?.permissionDecision, 'deny',
+    `the command inside "$( )" must be read and refused: ${command} (stdout: ${JSON.stringify(stdout)})`);
+  assert.match(reason, wording, `refused, but not for the reason this row pins: ${command}`);
+  stdinChecks += 1;
+}
+
 // BRM-cd-02: A COMMAND THAT IS NOT A STRING. extractInput() took `command` as it
 // came and the tokenizer did String(command), so the argv array
 // ["rm","-rf","/etc"] became the one word `rm,-rf,/etc` -- no rm anywhere -- and
@@ -4842,22 +4935,32 @@ for (const command of heredocDelimiterUnreadable) {
   assert.doesNotMatch(reason, REFUSAL_WORDING, `this refusal names no protected directory: ${command}`);
   stdinChecks += 1;
 }
-// The delimiter reader is the ONLY place this file decides where a heredoc body
-// ends: `heredocDelimiter()` has exactly one caller (the `<<` arm of the
-// tokenizer), and the body loop keyed on the newline uses that one answer for
-// every pending heredoc on the line. Counted with `grep -n 'heredocDelimiter\|<<'`
+// The delimiter reader and the body-end function are the ONLY places this file
+// decides where a heredoc body ends. Counted with `grep -n 'heredocDelimiter\|<<'`
 // over the hook at 6f6a962: 1 definition, 1 call, 1 body loop -- no sibling site
-// reads a delimiter of its own. This assertion pins the count, so a second reader
-// added later cannot drift away from this one in silence.
-// 這個檔案裡「決定 heredoc 內文在哪裡結束」的地方只有這一處。斷言把「只有一個 caller」釘
-// 住，將來若有人另外寫一個讀法，這裡會紅。
+// read a delimiter of its own. BR2-2 (2026-10-17) added the one other reader that
+// has to know: readParenthesized, which must skip a heredoc body to find the `)`
+// of `$( … )`. It does not get a reader of its own -- it calls the SAME two
+// functions as the tokenizer's `<<` arm and newline arm: heredocDelimiter (1
+// definition + 2 calls) and heredocBodyEnd (1 definition + 2 calls). This
+// assertion pins both counts, so a third reader, or a copy of the body loop,
+// cannot drift away from these in silence.
+// 這個檔案裡「決定 heredoc 內文在哪裡結束」的只有標記 reader 與內文結尾函式。BR2-2 加了唯一另一個
+// 必須知道的地方：readParenthesized（要跳過內文才找得到 `$( … )` 的 `)`）。它不另寫讀法，而是
+// 呼叫與 tokenizer 相同的兩個函式。斷言把兩者的次數都釘住。
 {
   const hookSource = require('fs').readFileSync(require('path').join(__dirname, 'hooks', 'protect-important-paths.js'), 'utf8');
   const readerCalls = hookSource.match(/heredocDelimiter\(/g) || [];
   assert.equal(
     readerCalls.length,
-    2,
-    `heredocDelimiter must have exactly one definition and one caller (found ${readerCalls.length} occurrences of 'heredocDelimiter('); a second place that decides where a heredoc body ends is a sibling that will drift`,
+    3,
+    `heredocDelimiter must have exactly one definition and two callers, the tokenizer and readParenthesized (found ${readerCalls.length} occurrences of 'heredocDelimiter('); another place that decides where a heredoc body ends is a sibling that will drift`,
+  );
+  const bodyEndCalls = hookSource.match(/heredocBodyEnd\(/g) || [];
+  assert.equal(
+    bodyEndCalls.length,
+    3,
+    `heredocBodyEnd must have exactly one definition and two callers, the tokenizer and readParenthesized (found ${bodyEndCalls.length} occurrences of 'heredocBodyEnd('); a copy of the body loop is a sibling that will drift`,
   );
 }
 
