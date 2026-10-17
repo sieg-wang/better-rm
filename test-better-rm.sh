@@ -1125,6 +1125,76 @@ EOF
     chmod +x "$protected_fence_bin/$fenced_tool"
 done
 
+# 柵欄只擋得住它認識的名字。只要刪除路徑多叫一個新工具（例如為了量空間的 du/df、
+# 為了明確跨裝置複製的 cp/rm），refusal 一退化，那個工具就會對真實的 / 執行，而原本的
+# 自我檢查只要求「五個名字都出現過」，多出來的名字照樣綠。所以自我檢查改成允許清單：
+# PATH 只剩一個目錄，裡面是「預設 PATH 上每一個執行檔名」的 symlink，全都指向同一支
+# 記錄名字的 dispatcher。允許清單內的唯讀小工具（以及只動得到沙箱 TRASH_DIR/STATE_DIR
+# 的 mkdir/rmdir）照樣交給真的工具執行；其餘每個名字記下來後以 97 結束、不執行。叫到
+# 的名字必須全部落在「五個柵欄名字＋允許清單」內，否則自我檢查失敗、真實路徑列不跑。
+# awk 與 sed 刻意不在清單內：awk 有 system()、sed 有 w（GNU 還有 e），並非唯讀，而
+# 刪除路徑今天也用不到它們（2026-10-17 以 dispatcher 實測：basename cut date dirname
+# find md5sum mkdir mv readlink rmdir sort stat uname xargs）。
+# The fence only stops the names it knows. A new tool on the delete path (du/df
+# for a space check, cp/rm for an explicit cross-device copy) would run against
+# the real / the moment the refusal regressed, and the old self-check only
+# required each of the five names to appear, so a superset stayed green. The
+# self-check is therefore an allowlist: PATH is one directory holding a symlink
+# for every executable name on the default PATH, all pointing at one dispatcher
+# that records the name. Allowlisted read-only helpers (and mkdir/rmdir, which
+# only reach the sandboxed TRASH_DIR/STATE_DIR) still run the real tool; every
+# other name is recorded and exits 97 without running. Every name invoked must be
+# one of the five fenced names or on the allowlist, or the self-check fails and
+# the real-path rows do not run. awk and sed are deliberately not on the list:
+# awk has system() and sed has w (and GNU's e), so neither is read-only, and the
+# delete path does not use them today (measured with the dispatcher on
+# 2026-10-17: basename cut date dirname find md5sum mkdir mv readlink rmdir sort
+# stat uname xargs).
+protected_fence_allow="basename cut date dirname id mkdir printf readlink realpath rmdir sort stat uname wc"
+protected_fence_allbin="$TEST_WORK_DIR/protected-fence-allbin"
+protected_fence_dispatch="$TEST_WORK_DIR/protected-fence-dispatch"
+protected_fence_names="$TEST_WORK_DIR/protected-fence.names"
+cat > "$protected_fence_dispatch" <<'EOF'
+#!/bin/sh
+name=${0##*/}
+printf '%s\n' "$name" >> "$BETTER_RM_FENCE_NAMES"
+printf '%s cwd=%s argv=%s\n' "$name" "$PWD" "$*" >> "$BETTER_RM_FENCE_LOG"
+case " $BETTER_RM_FENCE_ALLOW " in
+  *" $name "*) ;;
+  *) exit 97 ;;
+esac
+IFS=:
+for real_dir in $BETTER_RM_FENCE_REAL_PATH; do
+  if [ -x "$real_dir/$name" ] && [ ! -d "$real_dir/$name" ]; then
+    exec "$real_dir/$name" "$@"
+  fi
+done
+exit 127
+EOF
+chmod +x "$protected_fence_dispatch"
+mkdir -p "$protected_fence_allbin"
+# 五個柵欄名字不論系統上有沒有都要有（macOS 原生沒有 md5sum/sha256sum）。
+# The five fenced names must exist whether or not the system has them (stock
+# macOS has neither md5sum nor sha256sum).
+for fenced_tool in $protected_fence_tools; do
+    ln -s "$protected_fence_dispatch" "$protected_fence_allbin/$fenced_tool"
+done
+protected_fence_saved_ifs="$IFS"
+IFS=:
+for path_dir in $PATH; do
+    case "$path_dir" in /*) ;; *) continue ;; esac
+    [ -d "$path_dir" ] || continue
+    for path_entry in "$path_dir"/*; do
+        { [ -x "$path_entry" ] && [ ! -d "$path_entry" ]; } || continue
+        path_entry_name="${path_entry##*/}"
+        if [ ! -e "$protected_fence_allbin/$path_entry_name" ] &&
+           [ ! -L "$protected_fence_allbin/$path_entry_name" ]; then
+            ln -s "$protected_fence_dispatch" "$protected_fence_allbin/$path_entry_name"
+        fi
+    done
+done
+IFS="$protected_fence_saved_ifs"
+
 # fenced_run <better-rm 引數...>：在柵欄後面、有上限地跑一次；結束回傳 0、逾時回傳 1。
 # fenced_run <better-rm arguments...>: one bounded run behind the fence; 0 when it
 # finished, 1 when it timed out.
@@ -1155,25 +1225,47 @@ protected_root_refused() {
     return 0
 }
 
-test_item "柵欄先在沙箱目錄上證明攔得住 better-rm 的 hash 與 mv"
+test_item "柵欄先在沙箱目錄上證明攔得住 better-rm 的 hash 與 mv，且刪除路徑不叫柵欄外的工具"
 mkdir -p fence-probe/inner
 printf '%s\n' "fence probe" > fence-probe/inner/item.txt
 protected_fence_proven=false
 protected_fence_missing=""
-if fenced_run -rf fence-probe; then
+protected_fence_unexpected=""
+: > "$protected_fence_log"
+: > "$protected_fence_names"
+if run_bounded 15 env BETTER_RM_FENCE_LOG="$protected_fence_log" \
+    BETTER_RM_FENCE_NAMES="$protected_fence_names" \
+    BETTER_RM_FENCE_ALLOW="$protected_fence_allow" \
+    BETTER_RM_FENCE_REAL_PATH="$PATH" \
+    PATH="$protected_fence_allbin" "$BETTER_RM" -rf fence-probe \
+    > "$protected_fence_out" 2>&1; then
     for fenced_tool in $protected_fence_tools; do
         if ! grep -q "^$fenced_tool " "$protected_fence_log"; then
             protected_fence_missing="$protected_fence_missing $fenced_tool"
         fi
     done
-    if [ -z "$protected_fence_missing" ] && [ -f fence-probe/inner/item.txt ]; then
+    while IFS= read -r invoked_tool; do
+        case " $protected_fence_tools $protected_fence_allow " in
+          *" $invoked_tool "*) ;;
+          *)
+            case " $protected_fence_unexpected " in
+              *" $invoked_tool "*) ;;
+              *) protected_fence_unexpected="$protected_fence_unexpected $invoked_tool" ;;
+            esac
+            ;;
+        esac
+    done < "$protected_fence_names"
+    if [ -z "$protected_fence_missing" ] && [ -z "$protected_fence_unexpected" ] &&
+       [ -f fence-probe/inner/item.txt ]; then
         protected_fence_proven=true
     fi
 else
     protected_fence_missing=" (逾時 / timed out)"
 fi
 if [ "$protected_fence_proven" = true ]; then
-    test_pass "柵欄攔下了 ${protected_fence_tools}，沙箱目錄原封不動"
+    test_pass "柵欄攔下了 ${protected_fence_tools}，其餘只叫到允許清單內的工具，沙箱目錄原封不動"
+elif [ -n "$protected_fence_unexpected" ]; then
+    test_fail "刪除路徑叫了柵欄與允許清單外的工具:${protected_fence_unexpected}（先把它加進柵欄或允許清單）；下面的真實路徑列不會執行"
 else
     test_fail "柵欄沒攔到:${protected_fence_missing:- 沙箱目錄不見了}；下面的真實路徑列不會執行"
 fi
