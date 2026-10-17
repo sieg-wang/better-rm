@@ -15,6 +15,15 @@ for git_local_var in $git_local_vars; do
 done
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/better-rm-install.XXXXXX") || exit 1
+# Git discovery in the real-Git fixtures stops here (BR1-1): a TMPDIR inside an
+# enclosing work tree must not turn "not a repository" into "parent repository".
+# The physical path, because macOS /var is a symlink to /private/var and Git
+# compares against the directory it is really in. Fixtures that ARE meant to sit
+# inside a repository (parent-home) live below this, so they still do.
+# real-Git fixture 的 Git 探索停在這裡（BR1-1）：TMPDIR 在某個工作樹裡時，「不是 repository」不能
+# 變成「上層 repository」。用實體路徑，因為 macOS 的 /var 是指向 /private/var 的 symlink。刻意放在
+# repository 裡的 fixture（parent-home）都在這底下，照樣測得到。
+TMP_ROOT_PHYSICAL=$(cd "$TMP_ROOT" && pwd -P) || exit 1
 TMP_PATH_ROOT=''
 
 cleanup() {
@@ -315,6 +324,7 @@ make_real_repo() {
 run_real_installer() {
     local home="$1" scenario="${2:-trusted}"
     env PATH="$REAL_BIN:$PATH" HOME="$home" SHELL=/bin/bash \
+        GIT_CEILING_DIRECTORIES="$TMP_ROOT_PHYSICAL" \
         BETTER_RM_TEST_GIT_LOG="$home/git.log" \
         BETTER_RM_TEST_WRITE_LOG="$home/write.log" \
         BETTER_RM_TEST_REAL_GIT="$REAL_GIT" \
@@ -418,6 +428,32 @@ for scenario in root-fails root-missing not-a-repo bare; do
     EXPECTED_ERROR="cannot verify the existing installation's Git root"
     assert_real_refusal "$FAILURE_HOME" "$scenario" "$EXPECTED_ERROR" "$scenario"
 done
+
+# BR1-1 (2026-10-17): these fixtures must not depend on where TMPDIR is. With
+# TMPDIR inside any Git work tree, real `git rev-parse --show-toplevel` in the
+# not-a-repo fixture walked up into that enclosing repository, the installer
+# correctly refused it as a parent repository, and the row expecting "cannot
+# verify ..." went red (measured 67/1 in the review; 68/0 elsewhere): a loud
+# false red that says nothing about install.sh. So this file runs itself once
+# more with TMPDIR inside a fresh repository and requires a clean pass. The
+# nested run sets BETTER_RM_TEST_INSTALL_NESTED and does not recurse.
+# BR1-1：這些 fixture 不能取決於 TMPDIR 在哪裡。TMPDIR 在任何 Git 工作樹裡時，not-a-repo fixture
+# 的 `git rev-parse --show-toplevel` 會往上走進那個 repository，安裝程式正確地以「上層
+# repository」拒絕，期待「cannot verify ...」的那一列就紅了——一個跟 install.sh 無關的假紅。所以這
+# 個檔案在一個全新 repository 裡的 TMPDIR 下再跑自己一次，要求全部通過；內層執行不會再遞迴。
+if [ -z "${BETTER_RM_TEST_INSTALL_NESTED:-}" ]; then
+    ENCLOSING_REPO="$TMP_ROOT/enclosing-repo"
+    "$REAL_GIT" init --quiet --template= "$ENCLOSING_REPO" || exit 1
+    mkdir -p "$ENCLOSING_REPO/tmp"
+    NESTED_STATUS=0
+    BETTER_RM_TEST_INSTALL_NESTED=1 TMPDIR="$ENCLOSING_REPO/tmp" \
+        "$SCRIPT_DIR/test-install.sh" > "$TMP_ROOT/nested-in-repo.out" 2>&1 || NESTED_STATUS=$?
+    if [ "$NESTED_STATUS" -eq 0 ] && grep -q '^Failed: 0$' "$TMP_ROOT/nested-in-repo.out"; then
+        pass 'the suite passes with TMPDIR inside an enclosing Git repository'
+    else
+        fail "the suite passes with TMPDIR inside an enclosing Git repository (status $NESTED_STATUS: $(grep '^✗' "$TMP_ROOT/nested-in-repo.out" | head -n 3 | tr '\n' ';'))"
+    fi
+fi
 
 printf 'Passed: %s\nFailed: %s\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ]
