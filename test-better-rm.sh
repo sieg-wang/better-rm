@@ -4778,6 +4778,55 @@ else
     test_fail "同 device 的反覆失敗沒有停下來（exit=${samedev_status}；mv 呼叫=${samedev_call_count}；垃圾桶項目=${samedev_entry_count}；訊息=$(printf '%s' "$samedev_output" | head -c 400)）"
 fi
 
+test_item "--restore 的讓位跨裝置失敗時也只複製一次，之後照舊就地讓位並完成還原"
+# --restore 把佔著目的地的舊東西移入垃圾桶時走的是同一個 move_to_trash 迴圈。跨裝置讓位在複製途中
+# 失敗時，修之前同樣是一份接一份、最多 1000 份，才退回就地讓位。現在只複製一次（那一份有日誌），
+# 舊目的地仍是那個驗證過的物件，所以就地讓位、還原完成、結束碼 2。
+# --restore sets an occupied destination aside through the same move_to_trash
+# loop. A cross-device set-aside that failed part way used to copy again and
+# again, up to 1000 times, before falling back to the in-place set-aside. Now it
+# copies once (that copy is logged), the old destination is still the verified
+# object, so it is set aside in place, the restore completes and exits 2.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+xdevaside_bin="$TEST_WORK_DIR/xdevaside-bin"
+xdevaside_calls="$TEST_WORK_DIR/xdevaside.calls"
+make_xdev_stat_shim "$xdevaside_bin"
+make_xdev_fail_mv_shim "$xdevaside_bin"
+printf '%s\n' "TRASHED VERSION" > xdevaside_target
+"$BETTER_RM" xdevaside_target
+mkdir -p xdevaside_target
+printf '%s\n' "OLD A" > xdevaside_target/a.txt
+printf '%s\n' "OLD SECRET" > xdevaside_target/secret.txt
+xdevaside_status=0
+xdevaside_output=$(BETTER_RM_XDEV_TRASH="$TEST_TRASH_DIR" \
+    BETTER_RM_XDEV_CALLS="$xdevaside_calls" \
+    BETTER_RM_XDEV_MODE=unreadable \
+    BETTER_RM_REAL_STAT="$(command -v stat)" \
+    BETTER_RM_REAL_MV="$(command -v mv)" \
+    BETTER_RM_REAL_RM="$(command -v rm)" \
+    PATH="$xdevaside_bin:$PATH" \
+    "$BETTER_RM" -f --restore xdevaside_target 2>&1) || xdevaside_status=$?
+xdevaside_call_count=$(wc -l < "$xdevaside_calls" 2>/dev/null | tr -d ' ')
+xdevaside_displaced=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'xdevaside_target.better-rm-displaced-*' -print 2>/dev/null | head -n 1)
+xdevaside_copies=$(find "$TEST_TRASH_DIR" -type d -name 'xdevaside_target__*' -prune -print 2>/dev/null |
+    wc -l | tr -d ' ')
+xdevaside_copy=$(find "$TEST_TRASH_DIR" -type d -name 'xdevaside_target__*' -prune -print 2>/dev/null | head -n 1)
+xdevaside_copy_records=$(grep -v '^#' "$TEST_STATE_DIR/deletion.log" 2>/dev/null | grep -cF " | $xdevaside_copy | ")
+if [ "$xdevaside_status" -eq 2 ] &&
+   [ "$xdevaside_call_count" = "1" ] &&
+   [ "$xdevaside_copies" = "1" ] &&
+   [ -n "$xdevaside_copy" ] &&
+   [ "$xdevaside_copy_records" = "1" ] &&
+   [ -f xdevaside_target ] && [ "$(cat xdevaside_target)" = "TRASHED VERSION" ] &&
+   [ -n "$xdevaside_displaced" ] &&
+   [ "$(cat "$xdevaside_displaced/xdevaside_target/a.txt" 2>/dev/null)" = "OLD A" ] &&
+   [ "$(cat "$xdevaside_displaced/xdevaside_target/secret.txt" 2>/dev/null)" = "OLD SECRET" ]; then
+    test_pass "讓位跨裝置失敗只複製一次、那一份有日誌，就地讓位後還原完成，舊目的地完整"
+else
+    test_fail "讓位跨裝置失敗時重複複製或還原沒完成（exit=${xdevaside_status}；mv 呼叫=${xdevaside_call_count}；垃圾桶複本=${xdevaside_copies}；那一份的日誌=${xdevaside_copy_records}；讓位='${xdevaside_displaced}'；訊息=$(printf '%s' "$xdevaside_output" | head -c 300)）"
+fi
+
 # mv 成功之後，「BSD -n 略過了」原本是從「來源的名字還在」推論出來的。別的行程在 mv 之後
 # 立刻用同一個名字建出新東西（lock/pid/log 檔、編輯器的 swap 檔、watcher），下一輪的身分
 # 檢查就會失敗、回報「未移動」，而原本的項目已經在垃圾桶裡、沒有任何日誌。判斷要看身分：
