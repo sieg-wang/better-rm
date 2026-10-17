@@ -964,11 +964,17 @@ const blocked = [
   // 3.2 agrees for `EOF)`). 765c6bb's reader knew only the exact delimiter line,
   // so the first seven rows -- DENIED at 6a3edb1 -- were ALLOWED at d88780f:
   // the read failed, the tokenizer took the inner heredoc for a top-level one,
-  // and its body ran to end of input over the deletion. The last four were
-  // ALLOWED at both: the deletion between `EOF` and `)`, and two "<( )" forms.
+  // and its body ran to end of input over the deletion. The last four were all
+  // ALLOWED at 6a3edb1; three stayed allowed at d88780f (the deletion between
+  // `EOF` and `)` unquoted, and the two "<( )" forms), while the double-quoted
+  // `EOF rm -rf /etc)` was DENIED at d88780f as `unreadable command
+  // substitution`. All eleven were already denied at 27d9a22, each for its own
+  // target: seven for /etc, two for /home/tester, two for /home/tester/.git.
   // BR2-2-REG2：在 "$( )" 與 "<( )" 裡，bash 5.3 也在「以結束標記開頭、後面有 `)`」的那一行結束 heredoc 內文——
   // `EOF)` 一行同時關掉內文與替換——並把那一行剩下的部分當成 shell 再讀一次。765c6bb 的 reader 只認得剛好等於
-  // 標記的那一行，所以前七列（6a3edb1 拒絕）在 d88780f 被放行；後四列在兩者都放行。
+  // 標記的那一行，所以前七列（6a3edb1 拒絕）在 d88780f 被放行；後四列在 6a3edb1 都放行，其中三列在 d88780f 仍放行、
+  // 雙引號的 `EOF rm -rf /etc)` 在 d88780f 以「unreadable command substitution」被拒。十一列在 27d9a22 就都被拒，各依自己的
+  // 目標：七列 /etc、兩列 /home/tester、兩列 /home/tester/.git。
   "x=$(cat <<'EOF'\nbody\nEOF)\nrm -rf /etc",
   "x=$(cat <<'EOF'\nbody\nEOF) && rm -rf ~",
   "x=$(cat <<'EOF'\nbody\nEOF); rm -rf ~/.git",
@@ -980,6 +986,12 @@ const blocked = [
   "x=\"$(cat <<'EOF'\nbody\nEOF rm -rf /etc)\"",
   "diff <(cat <<'EOF'\na\nEOF) b.txt\nrm -rf /etc",
   "diff <(cat <<'EOF'\na\nEOF rm -rf /etc) b.txt",
+  // BR2-2-REG3: the readParenthesized bail on a non-last `A)` (see the
+  // PAREN_CLOSED_HEREDOC_BLOCKED stdin rows, which pin the /etc target and say
+  // why bash 3.2 runs the removal). ALLOWED at f4c2982, DENIED at 6a3edb1.
+  // BR2-2-REG3：readParenthesized 遇到非最後一段 `A)` 時放棄的那一支（stdin 那一組釘住 /etc，並說明 bash 3.2 為何會跑）。
+  "x=$(cat <<A <<B\nA)\nrm -rf /etc\nA\nB\n)",
+  "x=$(cat <<'A' <<'B'\nA)\nrm -rf /etc\nA\nB\n)",
   // BR-OBS-1 (2026-10-17): a `case` statement is not a command whose subject is
   // the command word. These were refused before the fix too, but some for the
   // wrong target (`*x*` instead of `/etc`); the stdin block below pins the
@@ -4211,6 +4223,21 @@ const PAREN_CLOSED_HEREDOC_BLOCKED = [
   ["x=\"$(cat <<'EOF'\nbody\nEOF rm -rf /etc)\"", /Refused to remove protected directory: \/etc$/],
   ["diff <(cat <<'EOF'\na\nEOF) b.txt\nrm -rf /etc", /Refused to remove protected directory: \/etc$/],
   ["diff <(cat <<'EOF'\na\nEOF rm -rf /etc) b.txt", /Refused to remove protected directory: \/etc$/],
+  // BR2-2-REG3, the readParenthesized bail on a NON-last `DELIM)`: two
+  // heredocs on one line, the first closed by `A)`, then the removal, then a
+  // later exact `A` line and a `)`. A reader that does not stop at the
+  // non-last `A)` reads A's body on to that later `A` line, succeeds, and the
+  // removal lands inside A's body -- ALLOWED at f4c2982, DENIED at 6a3edb1.
+  // bash 3.2.57 runs that line: at top level `bash -n` with `;;` in its place
+  // fails at line 3 (command position), the stand-in form only at the final
+  // `)` on line 6, and top-level bash runs earlier commands before a later
+  // syntax error (echo-only check).
+  // BR2-2-REG3，readParenthesized 遇到「非最後一段」`DELIM)` 時放棄的那一支：一行兩個 heredoc、第一個以 `A)` 收尾，
+  // 接著是刪除，再後面才有一行剛好是 `A` 和一個 `)`。不在 `A)` 停下的 reader 會把 A 的內文一路讀到後面那行 `A`、讀取成功，
+  // 刪除就落在 A 的內文裡（f4c2982 放行、6a3edb1 拒絕）。bash 3.2.57 會跑那一行（頂層 `bash -n` 把它換成 `;;` 在第 3 行就錯，
+  // stand-in 版到第 6 行的 `)` 才錯，頂層 bash 會先跑完前面的命令）。
+  ["x=$(cat <<A <<B\nA)\nrm -rf /etc\nA\nB\n)", /Refused to remove protected directory: \/etc$/],
+  ["x=$(cat <<'A' <<'B'\nA)\nrm -rf /etc\nA\nB\n)", /Refused to remove protected directory: \/etc$/],
 ];
 const PAREN_CLOSED_HEREDOC_ALLOWED = [
   "git commit -m \"$(cat <<'EOF'\nfix: tidy the parser\nEOF)\"",
@@ -6152,6 +6179,87 @@ let globTimingChecks = 0;
     `a NON-matching heavy pattern took ${failing.ms}ms against a `
     + `${globBudgetMs.toFixed(0)}ms budget`);
   globTimingChecks += 4;
+}
+
+// A substitution body with many `DELIM)`-closed heredocs inside it must be read
+// in bounded time, for the same reason as the rows above: the live hook times
+// out at 5,000 ms and a gate that times out renders no decision -- and this one
+// is reachable by PADDING, which costs the writer nothing. readParenthesized
+// recorded a split point for every `DELIM)` close and used to rebuild the whole
+// substitution text once per split: O(splits x length). Measured at 27d9a22
+// (BR2-2-REG3) through the stdin entry point: `x=$(echo ` + 30,000 x
+// `$(cat <<A`/`A)` + `)` / `rm -rf /etc` (390 KB) took 6,108-6,393 ms, past the
+// timeout; the one-pass slice join answers it in ~220 ms here. The removal after
+// the construct is surfaced, so the verdict and the target in the refusal are
+// asserted UNCONDITIONALLY; only the millisecond budget is scaled by hostFactor.
+// 替換內文裡有很多以 `DELIM)` 收尾的 heredoc 時，也必須在有界時間內讀完：live hook 5,000 ms 逾時、逾時等於
+// 沒有回答，而這一種靠填充料就能觸發。readParenthesized 每個 `DELIM)` 記一個切點，修前每個切點都重建整串字
+// （O(切點 x 長度)）；30,000 個在 27d9a22 實測 6,108-6,393 ms，改成一趟切片後約 220 ms。
+let heredocSplitTimingChecks = 0;
+{
+  const subs = 30000;
+  const inner = '$(cat <<A\nA)';
+  const command = `x=$(echo ${Array(subs).fill(inner).join(' ')})\nrm -rf /etc`;
+  const started = process.hrtime.bigint();
+  const out = evaluate(claude(command), env)?.hookSpecificOutput;
+  const measured = { ms: Number(process.hrtime.bigint() - started) / 1e6 };
+  assert.equal(out?.permissionDecision, 'deny',
+    `${subs} DELIM)-closed heredocs inside one $( ) must not hide the rm after it`);
+  assert.match(out?.permissionDecisionReason || '', /\/etc/,
+    'the removal after the padded substitution is refused for its own target');
+  // Linear is ~220 ms here; the quadratic this replaced was ~6,100 ms. A 2,000 ms
+  // base (scaled up under load, never down) clears linear by an order of
+  // magnitude and still catches a return to the per-split rebuild.
+  // 線性約 220 ms，被取代的平方級約 6,100 ms。2,000 ms 的底（只隨負載放大、不縮小）讓線性有一個數量級的餘裕，
+  // 又仍然抓得到退回「每切點重建」。
+  const budgetMs = 2000 * hostFactor();
+  timingBudget(measured.ms < budgetMs,
+    `${subs} DELIM)-closed heredocs took ${measured.ms.toFixed(0)}ms against a ${budgetMs.toFixed(0)}ms budget`);
+  heredocSplitTimingChecks += 3;
+}
+
+// The differential-oracle corpus (BR2-2-REG3): heredoc-in-$()/<()/backquote
+// shapes generated combinatorially over heredoc count, delimiter style, which
+// heredocs close by `DELIM)`, stand-in placement and container. For each shape,
+// whether bash 5.3.20 and bash 3.2.57 would RUN the stand-in as a command was
+// measured with `bash -n` plus a `;;` command-position differential on a
+// never-called function (NEVER executed). The generator and the bash runs are
+// not in this repository (they live in the 2026-10-17 review campaign's
+// private directory); the runs53/runs32 labels below are that frozen
+// measurement. A shape either bash would run the removal on (runs53 OR runs32)
+// MUST be denied here -- this is the regression guard the 7,391-payload corpus
+// and the everyday list could not be (they hold no `DELIM)` shape). What it does
+// NOT cover: every heredoc body in it is a plain word (body0, body1, ebody), so
+// a later body holding a quote or a heredoc operator (KNOWN-RESIDUALS.md R7-a)
+// is outside it; and its 20 backquote rows (o-backtick, asserted below) all close
+// the substitution after an exact delimiter line, so a heredoc whose delimiter
+// line carries the closing backquote (`A` + backquote, R7-b) is outside it too.
+// Both are open and not asserted either way here. This loop fails if any
+// must-deny shape is allowed or if the corpus is silently shrunk.
+// 差分 oracle 語料（BR2-2-REG3）：heredoc 在 $()/<()/反引號 裡的形狀，依 heredoc 數、標記樣式、哪些以 `DELIM)`
+// 收尾、stand-in 位置、容器組合而成。每個形狀「bash 5.3 與 3.2 會不會把 stand-in 當命令跑」是用 bash -n 加 `;;`
+// 命令位置差分量出來的（never-called 函式，從不執行）；產生器與 bash 的執行不在本 repo（在 2026-10-17 審查活動的私有目錄），
+// 下面的 runs53/runs32 是那次凍結的量測。任一 bash 會跑刪除的形狀都必須在這裡被拒。它「沒有」涵蓋的：語料裡的內文都是單字
+// （body0、body1、ebody），所以含引號或 heredoc 運算子的後段內文（KNOWN-RESIDUALS.md R7-a）不在裡面；語料的 20 個反引號列
+// （o-backtick，下面有斷言）都在一行剛好是標記之後才關掉替換，所以標記行本身帶著結尾反引號的 heredoc（R7-b）也不在裡面。
+// 兩者都還沒修，這裡不對它們做任何斷言。
+let heredocOracleChecks = 0;
+{
+  const oracle = JSON.parse(fs.readFileSync(`${__dirname}/test-hooks-heredoc-corpus.json`, 'utf8'));
+  assert.ok(oracle.rows.length >= 475 && oracle.mustDeny >= 236,
+    `the heredoc oracle corpus was shrunk: ${oracle.rows.length} rows, ${oracle.mustDeny} must-deny`);
+  let mustDeny = 0;
+  for (const row of oracle.rows) {
+    if (!row.runs53 && !row.runs32) continue;
+    mustDeny += 1;
+    const out = evaluate(claude(row.cmd), env)?.hookSpecificOutput;
+    assert.equal(out?.permissionDecision, 'deny',
+      `heredoc oracle ${row.id} (bash 5.3 runs=${row.runs53}, 3.2 runs=${row.runs32}) must be denied: ${JSON.stringify(row.cmd)}`);
+    heredocOracleChecks += 1;
+  }
+  assert.equal(mustDeny, oracle.mustDeny,
+    `counted ${mustDeny} must-deny rows but the corpus header says ${oracle.mustDeny}`);
+  heredocOracleChecks += 1;
 }
 
 // A find with many -exec clauses must be answered in bounded time, for the same
@@ -8285,6 +8393,8 @@ async function runOmpHookChecks() {
 // 現在都會「指名」失敗，而不是留下一次更短、更安靜、看起來仍然是綠的執行。
 const PINNED_TIMING_COUNTERS = [
   ['globTimingChecks', globTimingChecks, 4],
+  ['heredocSplitTimingChecks', heredocSplitTimingChecks, 3],
+  ['heredocOracleChecks', heredocOracleChecks, 237],
   ['findClauseTimingChecks', findClauseTimingChecks, 48],
   ['targetLimitChecks', targetLimitChecks, 9],
 ];
@@ -8315,8 +8425,8 @@ for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {
 // 用 __filename 而不是用 __dirname 組出來的路徑：清查必須讀「它自己」這個檔案。
 const ownSource = require('fs').readFileSync(__filename, 'utf8');
 const wallClockRows = ownSource.match(/\.ms\s*[<>]=?\s*[A-Za-z0-9_.]+/g) || [];
-assert.equal(wallClockRows.length, 8,
-  `this file holds ${wallClockRows.length} wall-clock comparisons, not the 8 pinned here: `
+assert.equal(wallClockRows.length, 9,
+  `this file holds ${wallClockRows.length} wall-clock comparisons, not the 9 pinned here: `
   + `${wallClockRows.join(', ')}. A new one needs a scaled budget and a pinned counter, `
   + 'which is what this number is for');
 const constantBudgetRows = wallClockRows.filter((row) => /[<>]=?\s*[0-9]/.test(row));
@@ -8331,12 +8441,12 @@ for (const [name] of PINNED_TIMING_COUNTERS) {
   assert.ok(new RegExp(`\\['${name}',`).test(ownSource),
     `${name} is not in PINNED_TIMING_COUNTERS, so nothing verifies that its block ran`);
 }
-// Every wall-clock row -- the 8 ceilings and the 1 ratio counted above -- reports
+// Every wall-clock row -- the 9 ceilings and the 1 ratio counted above -- reports
 // through the recorder defined next to hostFactor(), because an assert that
 // throws on a missed budget ends the file there and leaves the rest unread
 // (2026-10-17: the 120,000-symlink row did that). A row put back on an ordinary
 // assert lowers this count; a new row raises the counts above first.
-// 上面數到的每一個牆鐘列（8 個上限、1 個比值）都必須經過 hostFactor() 旁邊那個記錄器：預算
+// 上面數到的每一個牆鐘列（9 個上限、1 個比值）都必須經過 hostFactor() 旁邊那個記錄器：預算
 // 一沒達到就丟例外的 assert 會讓檔案停在那裡、其餘不讀（2026-10-17 那一列 120,000 個
 // symlink 就是這樣）。改回一般 assert 的列會讓這個數字變小。
 const deferredTimingRows = ownSource.match(/^\s*timingBudget\(/gm) || [];
@@ -8358,7 +8468,7 @@ process.exitCode = 1;
 runOpenCodePluginChecks().then(async (pluginChecks) => {
   const ompChecks = await runOmpHookChecks();
   const stdinStreamChecks = await runStdinStreamErrorChecks();
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + ompChecks + stdinStreamChecks}`);
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + heredocSplitTimingChecks + heredocOracleChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + ompChecks + stdinStreamChecks}`);
   // A missed wall-clock budget fails the run, named, after everything else ran.
   // 牆鐘預算沒達到時，整次執行在其餘全部跑完之後指名失敗。
   if (TIMING_MISSES.length > 0) {

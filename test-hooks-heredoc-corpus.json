@@ -1,0 +1,2858 @@
+{
+ "purpose": "Differential-oracle corpus for heredoc-in-$()/<()/backquote shapes (BR2-2-REG3, 2026-10-17). Each cmd has rm -rf /etc as its stand-in. runs53/runs32 were measured with bash 5.3.20 and bash 3.2.57 by bash -n + a ;; command-position differential on a never-called function wrapping the shape with a harmless stand-in (NEVER executed). The generator and the bash runs are not in this repository (they live in the 2026-10-17 review campaign's private directory); the labels are that frozen measurement. A shape with runs53 OR runs32 true is one that at least one bash would run the removal on, so the guard must DENY it. Not covered: every heredoc body here is a plain word (body0, body1, ebody), so a later body holding a quote or a heredoc operator is outside this corpus (KNOWN-RESIDUALS.md R7-a); its 20 backquote rows (o-backtick) all close the substitution after an exact delimiter line, so a heredoc whose delimiter line carries the closing backquote is outside it too (R7-b). Both are open.",
+ "generated": "2026-10-17",
+ "shapes": 475,
+ "mustDeny": 236,
+ "rows": [
+  {
+   "id": "c-m1-dollar-2hd-Apar-next",
+   "cmd": "x=$(cat <<A <<B\nA)\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "c-m1q-dollar-2hd-Apar-next",
+   "cmd": "x=$(cat <<'A' <<'B'\nA)\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "c-m2-dollar-2hd-Apar-same",
+   "cmd": "x=$(cat <<A <<B\nA); rm -rf /etc\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "c-m3-version-2hd-Apar-next",
+   "cmd": "VERSION=$(cat <<A <<B\n1.2\nA)\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "c-m1-dq-2hd-Apar-next",
+   "cmd": "x=\"$(cat <<A <<B\nA)\nB\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "c-single-eofpar-next",
+   "cmd": "x=$(cat <<'EOF'\nbody\nEOF)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "c-p02-inside-afterdelim",
+   "cmd": "x=$(cat <<'EOF'\nbody\nEOF rm -rf /etc)",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "c-p09-emptydelim-paren",
+   "cmd": "x=$(cat <<''\nrm -rf /etc)",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "c-p10-procsub-eofpar-next",
+   "cmd": "diff <(cat <<A\na\nA) b.txt\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "c-procsub-2hd-Apar-next",
+   "cmd": "diff <(cat <<A <<B\nA) b.txt\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "c-p13-last-par-next",
+   "cmd": "x=$(cat <<A <<B\nA\nB)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "c-nested-2hd-Apar-next",
+   "cmd": "x=$(echo $(cat <<A <<B\nA)\nB\n))\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "c-dash-2hd-Apar-next",
+   "cmd": "x=$(cat <<-A <<-B\n\tA)\n\tB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "c-m1-threehd-Apar-next",
+   "cmd": "x=$(cat <<A <<B <<C\nA)\nB\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "c-m1-threehd-Bpar-next",
+   "cmd": "x=$(cat <<A <<B <<C\nA\nB)\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-plain-x-same",
+   "cmd": "x=$(cat <<A\nbody0\nA\n); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-plain-x-next",
+   "cmd": "x=$(cat <<A\nbody0\nA\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-plain-P-same",
+   "cmd": "x=$(cat <<A\nbody0\nA); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-plain-P-next",
+   "cmd": "x=$(cat <<A\nbody0\nA)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-plain-P-inside",
+   "cmd": "x=$(cat <<A\nbody0\nA) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-quoted-x-same",
+   "cmd": "x=$(cat <<'A'\nbody0\nA\n); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-quoted-x-next",
+   "cmd": "x=$(cat <<'A'\nbody0\nA\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-quoted-P-same",
+   "cmd": "x=$(cat <<'A'\nbody0\nA); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-quoted-P-next",
+   "cmd": "x=$(cat <<'A'\nbody0\nA)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-quoted-P-inside",
+   "cmd": "x=$(cat <<'A'\nbody0\nA) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-dash-x-same",
+   "cmd": "x=$(cat <<-A\n\tbody0\n\tA\n); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-dash-x-next",
+   "cmd": "x=$(cat <<-A\n\tbody0\n\tA\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-dash-P-same",
+   "cmd": "x=$(cat <<-A\n\tbody0\n\tA); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-dash-P-next",
+   "cmd": "x=$(cat <<-A\n\tbody0\n\tA)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-dash-P-inside",
+   "cmd": "x=$(cat <<-A\n\tbody0\n\tA) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-empty-x-same",
+   "cmd": "x=$(cat <<''\nebody\n\n); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-empty-x-next",
+   "cmd": "x=$(cat <<''\nebody\n\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-empty-P-same",
+   "cmd": "x=$(cat <<''\nebody\n); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-empty-P-next",
+   "cmd": "x=$(cat <<''\nebody\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n1-empty-P-inside",
+   "cmd": "x=$(cat <<''\nebody\n) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-plainplain-xx-same",
+   "cmd": "x=$(cat <<A <<B\nbody0\nA\nbody1\nB\n); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-plainplain-xx-next",
+   "cmd": "x=$(cat <<A <<B\nbody0\nA\nbody1\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-plainplain-Px-same",
+   "cmd": "x=$(cat <<A <<B\nbody0\nA)\nbody1\nB\n); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-plainplain-Px-next",
+   "cmd": "x=$(cat <<A <<B\nbody0\nA)\nbody1\nB\n)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-plainplain-Px-inside",
+   "cmd": "x=$(cat <<A <<B\nbody0\nA) rm -rf /etc\nbody1\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-plainplain-xP-same",
+   "cmd": "x=$(cat <<A <<B\nbody0\nA\nbody1\nB); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-plainplain-xP-next",
+   "cmd": "x=$(cat <<A <<B\nbody0\nA\nbody1\nB)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-plainplain-xP-inside",
+   "cmd": "x=$(cat <<A <<B\nbody0\nA\nbody1\nB) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-plainplain-PP-same",
+   "cmd": "x=$(cat <<A <<B\nbody0\nA)\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-plainplain-PP-next",
+   "cmd": "x=$(cat <<A <<B\nbody0\nA)\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-plainplain-PP-inside",
+   "cmd": "x=$(cat <<A <<B\nbody0\nA) rm -rf /etc\nbody1\nB)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-quotedquoted-xx-same",
+   "cmd": "x=$(cat <<'A' <<'B'\nbody0\nA\nbody1\nB\n); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-quotedquoted-xx-next",
+   "cmd": "x=$(cat <<'A' <<'B'\nbody0\nA\nbody1\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-quotedquoted-Px-same",
+   "cmd": "x=$(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB\n); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-quotedquoted-Px-next",
+   "cmd": "x=$(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB\n)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-quotedquoted-Px-inside",
+   "cmd": "x=$(cat <<'A' <<'B'\nbody0\nA) rm -rf /etc\nbody1\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-quotedquoted-xP-same",
+   "cmd": "x=$(cat <<'A' <<'B'\nbody0\nA\nbody1\nB); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-quotedquoted-xP-next",
+   "cmd": "x=$(cat <<'A' <<'B'\nbody0\nA\nbody1\nB)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-quotedquoted-xP-inside",
+   "cmd": "x=$(cat <<'A' <<'B'\nbody0\nA\nbody1\nB) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-quotedquoted-PP-same",
+   "cmd": "x=$(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-quotedquoted-PP-next",
+   "cmd": "x=$(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-quotedquoted-PP-inside",
+   "cmd": "x=$(cat <<'A' <<'B'\nbody0\nA) rm -rf /etc\nbody1\nB)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-dashplain-xx-same",
+   "cmd": "x=$(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB\n); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-dashplain-xx-next",
+   "cmd": "x=$(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-dashplain-Px-same",
+   "cmd": "x=$(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB\n); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-dashplain-Px-next",
+   "cmd": "x=$(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB\n)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-dashplain-Px-inside",
+   "cmd": "x=$(cat <<-A <<B\n\tbody0\n\tA) rm -rf /etc\nbody1\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-dashplain-xP-same",
+   "cmd": "x=$(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-dashplain-xP-next",
+   "cmd": "x=$(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-dashplain-xP-inside",
+   "cmd": "x=$(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-dashplain-PP-same",
+   "cmd": "x=$(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-dashplain-PP-next",
+   "cmd": "x=$(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-dashplain-PP-inside",
+   "cmd": "x=$(cat <<-A <<B\n\tbody0\n\tA) rm -rf /etc\nbody1\nB)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-emptyplain-xx-same",
+   "cmd": "x=$(cat <<'' <<B\nebody\n\nbody1\nB\n); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-emptyplain-xx-next",
+   "cmd": "x=$(cat <<'' <<B\nebody\n\nbody1\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-emptyplain-Px-same",
+   "cmd": "x=$(cat <<'' <<B\nebody\n)\nbody1\nB\n); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-emptyplain-Px-next",
+   "cmd": "x=$(cat <<'' <<B\nebody\n)\nbody1\nB\n)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-emptyplain-Px-inside",
+   "cmd": "x=$(cat <<'' <<B\nebody\n) rm -rf /etc\nbody1\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-emptyplain-xP-same",
+   "cmd": "x=$(cat <<'' <<B\nebody\n\nbody1\nB); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-emptyplain-xP-next",
+   "cmd": "x=$(cat <<'' <<B\nebody\n\nbody1\nB)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-emptyplain-xP-inside",
+   "cmd": "x=$(cat <<'' <<B\nebody\n\nbody1\nB) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n2-emptyplain-PP-same",
+   "cmd": "x=$(cat <<'' <<B\nebody\n)\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-emptyplain-PP-next",
+   "cmd": "x=$(cat <<'' <<B\nebody\n)\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n2-emptyplain-PP-inside",
+   "cmd": "x=$(cat <<'' <<B\nebody\n) rm -rf /etc\nbody1\nB)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-xxx-same",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC\n); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-xxx-next",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-Pxx-same",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC\n); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-Pxx-next",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC\n)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-Pxx-inside",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-xPx-same",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC\n); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-xPx-next",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC\n)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-xPx-inside",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-PPx-same",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC\n); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-PPx-next",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC\n)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-PPx-inside",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-xxP-same",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-xxP-next",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-xxP-inside",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-PxP-same",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-PxP-next",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-PxP-inside",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-xPP-same",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-xPP-next",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-xPP-inside",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-PPP-same",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-PPP-next",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-plainplainplain-PPP-inside",
+   "cmd": "x=$(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-xxx-same",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC\n); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-xxx-next",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-Pxx-same",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC\n); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-Pxx-next",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC\n)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-Pxx-inside",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-xPx-same",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC\n); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-xPx-next",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC\n)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-xPx-inside",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-PPx-same",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC\n); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-PPx-next",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC\n)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-PPx-inside",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-xxP-same",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-xxP-next",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-xxP-inside",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-PxP-same",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-PxP-next",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-PxP-inside",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-xPP-same",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-xPP-next",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-xPP-inside",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-PPP-same",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-PPP-next",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dollar-n3-quotedquotedquoted-PPP-inside",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n1-plain-x-same",
+   "cmd": "x=\"$(cat <<A\nbody0\nA\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n1-plain-x-next",
+   "cmd": "x=\"$(cat <<A\nbody0\nA\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n1-plain-P-same",
+   "cmd": "x=\"$(cat <<A\nbody0\nA); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n1-plain-P-next",
+   "cmd": "x=\"$(cat <<A\nbody0\nA)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n1-plain-P-inside",
+   "cmd": "x=\"$(cat <<A\nbody0\nA) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n1-quoted-x-same",
+   "cmd": "x=\"$(cat <<'A'\nbody0\nA\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n1-quoted-x-next",
+   "cmd": "x=\"$(cat <<'A'\nbody0\nA\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n1-quoted-P-same",
+   "cmd": "x=\"$(cat <<'A'\nbody0\nA); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n1-quoted-P-next",
+   "cmd": "x=\"$(cat <<'A'\nbody0\nA)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n1-quoted-P-inside",
+   "cmd": "x=\"$(cat <<'A'\nbody0\nA) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n1-dash-x-same",
+   "cmd": "x=\"$(cat <<-A\n\tbody0\n\tA\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n1-dash-x-next",
+   "cmd": "x=\"$(cat <<-A\n\tbody0\n\tA\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n1-dash-P-same",
+   "cmd": "x=\"$(cat <<-A\n\tbody0\n\tA); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n1-dash-P-next",
+   "cmd": "x=\"$(cat <<-A\n\tbody0\n\tA)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n1-dash-P-inside",
+   "cmd": "x=\"$(cat <<-A\n\tbody0\n\tA) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n1-empty-x-same",
+   "cmd": "x=\"$(cat <<''\nebody\n\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n1-empty-x-next",
+   "cmd": "x=\"$(cat <<''\nebody\n\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n1-empty-P-same",
+   "cmd": "x=\"$(cat <<''\nebody\n); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n1-empty-P-next",
+   "cmd": "x=\"$(cat <<''\nebody\n)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n1-empty-P-inside",
+   "cmd": "x=\"$(cat <<''\nebody\n) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-plainplain-xx-same",
+   "cmd": "x=\"$(cat <<A <<B\nbody0\nA\nbody1\nB\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-plainplain-xx-next",
+   "cmd": "x=\"$(cat <<A <<B\nbody0\nA\nbody1\nB\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-plainplain-Px-same",
+   "cmd": "x=\"$(cat <<A <<B\nbody0\nA)\nbody1\nB\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-plainplain-Px-next",
+   "cmd": "x=\"$(cat <<A <<B\nbody0\nA)\nbody1\nB\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-plainplain-Px-inside",
+   "cmd": "x=\"$(cat <<A <<B\nbody0\nA) rm -rf /etc\nbody1\nB",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-plainplain-xP-same",
+   "cmd": "x=\"$(cat <<A <<B\nbody0\nA\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-plainplain-xP-next",
+   "cmd": "x=\"$(cat <<A <<B\nbody0\nA\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-plainplain-xP-inside",
+   "cmd": "x=\"$(cat <<A <<B\nbody0\nA\nbody1\nB) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-plainplain-PP-same",
+   "cmd": "x=\"$(cat <<A <<B\nbody0\nA)\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-plainplain-PP-next",
+   "cmd": "x=\"$(cat <<A <<B\nbody0\nA)\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-plainplain-PP-inside",
+   "cmd": "x=\"$(cat <<A <<B\nbody0\nA) rm -rf /etc\nbody1\nB)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-quotedquoted-xx-same",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nbody0\nA\nbody1\nB\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-quotedquoted-xx-next",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nbody0\nA\nbody1\nB\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-quotedquoted-Px-same",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-quotedquoted-Px-next",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-quotedquoted-Px-inside",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nbody0\nA) rm -rf /etc\nbody1\nB",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-quotedquoted-xP-same",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nbody0\nA\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-quotedquoted-xP-next",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nbody0\nA\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-quotedquoted-xP-inside",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nbody0\nA\nbody1\nB) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-quotedquoted-PP-same",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-quotedquoted-PP-next",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-quotedquoted-PP-inside",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nbody0\nA) rm -rf /etc\nbody1\nB)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-dashplain-xx-same",
+   "cmd": "x=\"$(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-dashplain-xx-next",
+   "cmd": "x=\"$(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-dashplain-Px-same",
+   "cmd": "x=\"$(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-dashplain-Px-next",
+   "cmd": "x=\"$(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-dashplain-Px-inside",
+   "cmd": "x=\"$(cat <<-A <<B\n\tbody0\n\tA) rm -rf /etc\nbody1\nB",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-dashplain-xP-same",
+   "cmd": "x=\"$(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-dashplain-xP-next",
+   "cmd": "x=\"$(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-dashplain-xP-inside",
+   "cmd": "x=\"$(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-dashplain-PP-same",
+   "cmd": "x=\"$(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-dashplain-PP-next",
+   "cmd": "x=\"$(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-dashplain-PP-inside",
+   "cmd": "x=\"$(cat <<-A <<B\n\tbody0\n\tA) rm -rf /etc\nbody1\nB)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-emptyplain-xx-same",
+   "cmd": "x=\"$(cat <<'' <<B\nebody\n\nbody1\nB\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-emptyplain-xx-next",
+   "cmd": "x=\"$(cat <<'' <<B\nebody\n\nbody1\nB\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-emptyplain-Px-same",
+   "cmd": "x=\"$(cat <<'' <<B\nebody\n)\nbody1\nB\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-emptyplain-Px-next",
+   "cmd": "x=\"$(cat <<'' <<B\nebody\n)\nbody1\nB\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n2-emptyplain-Px-inside",
+   "cmd": "x=\"$(cat <<'' <<B\nebody\n) rm -rf /etc\nbody1\nB",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-emptyplain-xP-same",
+   "cmd": "x=\"$(cat <<'' <<B\nebody\n\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-emptyplain-xP-next",
+   "cmd": "x=\"$(cat <<'' <<B\nebody\n\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-emptyplain-xP-inside",
+   "cmd": "x=\"$(cat <<'' <<B\nebody\n\nbody1\nB) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-emptyplain-PP-same",
+   "cmd": "x=\"$(cat <<'' <<B\nebody\n)\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-emptyplain-PP-next",
+   "cmd": "x=\"$(cat <<'' <<B\nebody\n)\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n2-emptyplain-PP-inside",
+   "cmd": "x=\"$(cat <<'' <<B\nebody\n) rm -rf /etc\nbody1\nB)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-xxx-same",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-xxx-next",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-Pxx-same",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-Pxx-next",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-Pxx-inside",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-xPx-same",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-xPx-next",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-xPx-inside",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-PPx-same",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-PPx-next",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-PPx-inside",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-xxP-same",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-xxP-next",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-xxP-inside",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-PxP-same",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-PxP-next",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-PxP-inside",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-xPP-same",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-xPP-next",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-xPP-inside",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-PPP-same",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-PPP-next",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-plainplainplain-PPP-inside",
+   "cmd": "x=\"$(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-xxx-same",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-xxx-next",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-Pxx-same",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-Pxx-next",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-Pxx-inside",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-xPx-same",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-xPx-next",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-xPx-inside",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-PPx-same",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC\n)\"; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-PPx-next",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC\n)\"\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-PPx-inside",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-xxP-same",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-xxP-next",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-xxP-inside",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-PxP-same",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-PxP-next",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-PxP-inside",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-xPP-same",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-xPP-next",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-xPP-inside",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-PPP-same",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-PPP-next",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-dq-n3-quotedquotedquoted-PPP-inside",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n1-plain-x-same",
+   "cmd": "diff <(cat <<A\nbody0\nA\n) b.txt; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-plain-x-next",
+   "cmd": "diff <(cat <<A\nbody0\nA\n) b.txt\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-plain-P-same",
+   "cmd": "diff <(cat <<A\nbody0\nA); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-plain-P-next",
+   "cmd": "diff <(cat <<A\nbody0\nA)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-plain-P-inside",
+   "cmd": "diff <(cat <<A\nbody0\nA) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-quoted-x-same",
+   "cmd": "diff <(cat <<'A'\nbody0\nA\n) b.txt; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-quoted-x-next",
+   "cmd": "diff <(cat <<'A'\nbody0\nA\n) b.txt\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-quoted-P-same",
+   "cmd": "diff <(cat <<'A'\nbody0\nA); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-quoted-P-next",
+   "cmd": "diff <(cat <<'A'\nbody0\nA)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-quoted-P-inside",
+   "cmd": "diff <(cat <<'A'\nbody0\nA) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-dash-x-same",
+   "cmd": "diff <(cat <<-A\n\tbody0\n\tA\n) b.txt; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-dash-x-next",
+   "cmd": "diff <(cat <<-A\n\tbody0\n\tA\n) b.txt\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-dash-P-same",
+   "cmd": "diff <(cat <<-A\n\tbody0\n\tA); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-dash-P-next",
+   "cmd": "diff <(cat <<-A\n\tbody0\n\tA)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-dash-P-inside",
+   "cmd": "diff <(cat <<-A\n\tbody0\n\tA) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-empty-x-same",
+   "cmd": "diff <(cat <<''\nebody\n\n) b.txt; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-empty-x-next",
+   "cmd": "diff <(cat <<''\nebody\n\n) b.txt\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-empty-P-same",
+   "cmd": "diff <(cat <<''\nebody\n); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-empty-P-next",
+   "cmd": "diff <(cat <<''\nebody\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n1-empty-P-inside",
+   "cmd": "diff <(cat <<''\nebody\n) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-plainplain-xx-same",
+   "cmd": "diff <(cat <<A <<B\nbody0\nA\nbody1\nB\n) b.txt; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-plainplain-xx-next",
+   "cmd": "diff <(cat <<A <<B\nbody0\nA\nbody1\nB\n) b.txt\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-plainplain-Px-same",
+   "cmd": "diff <(cat <<A <<B\nbody0\nA)\nbody1\nB\n) b.txt; rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-plainplain-Px-next",
+   "cmd": "diff <(cat <<A <<B\nbody0\nA)\nbody1\nB\n) b.txt\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-plainplain-Px-inside",
+   "cmd": "diff <(cat <<A <<B\nbody0\nA) rm -rf /etc\nbody1\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-plainplain-xP-same",
+   "cmd": "diff <(cat <<A <<B\nbody0\nA\nbody1\nB); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-plainplain-xP-next",
+   "cmd": "diff <(cat <<A <<B\nbody0\nA\nbody1\nB)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-plainplain-xP-inside",
+   "cmd": "diff <(cat <<A <<B\nbody0\nA\nbody1\nB) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-plainplain-PP-same",
+   "cmd": "diff <(cat <<A <<B\nbody0\nA)\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-plainplain-PP-next",
+   "cmd": "diff <(cat <<A <<B\nbody0\nA)\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-plainplain-PP-inside",
+   "cmd": "diff <(cat <<A <<B\nbody0\nA) rm -rf /etc\nbody1\nB)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-quotedquoted-xx-same",
+   "cmd": "diff <(cat <<'A' <<'B'\nbody0\nA\nbody1\nB\n) b.txt; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-quotedquoted-xx-next",
+   "cmd": "diff <(cat <<'A' <<'B'\nbody0\nA\nbody1\nB\n) b.txt\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-quotedquoted-Px-same",
+   "cmd": "diff <(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB\n) b.txt; rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-quotedquoted-Px-next",
+   "cmd": "diff <(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB\n) b.txt\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-quotedquoted-Px-inside",
+   "cmd": "diff <(cat <<'A' <<'B'\nbody0\nA) rm -rf /etc\nbody1\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-quotedquoted-xP-same",
+   "cmd": "diff <(cat <<'A' <<'B'\nbody0\nA\nbody1\nB); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-quotedquoted-xP-next",
+   "cmd": "diff <(cat <<'A' <<'B'\nbody0\nA\nbody1\nB)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-quotedquoted-xP-inside",
+   "cmd": "diff <(cat <<'A' <<'B'\nbody0\nA\nbody1\nB) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-quotedquoted-PP-same",
+   "cmd": "diff <(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-quotedquoted-PP-next",
+   "cmd": "diff <(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-quotedquoted-PP-inside",
+   "cmd": "diff <(cat <<'A' <<'B'\nbody0\nA) rm -rf /etc\nbody1\nB)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-dashplain-xx-same",
+   "cmd": "diff <(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB\n) b.txt; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-dashplain-xx-next",
+   "cmd": "diff <(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB\n) b.txt\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-dashplain-Px-same",
+   "cmd": "diff <(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB\n) b.txt; rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-dashplain-Px-next",
+   "cmd": "diff <(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB\n) b.txt\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-dashplain-Px-inside",
+   "cmd": "diff <(cat <<-A <<B\n\tbody0\n\tA) rm -rf /etc\nbody1\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-dashplain-xP-same",
+   "cmd": "diff <(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-dashplain-xP-next",
+   "cmd": "diff <(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-dashplain-xP-inside",
+   "cmd": "diff <(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-dashplain-PP-same",
+   "cmd": "diff <(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-dashplain-PP-next",
+   "cmd": "diff <(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-dashplain-PP-inside",
+   "cmd": "diff <(cat <<-A <<B\n\tbody0\n\tA) rm -rf /etc\nbody1\nB)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-emptyplain-xx-same",
+   "cmd": "diff <(cat <<'' <<B\nebody\n\nbody1\nB\n) b.txt; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-emptyplain-xx-next",
+   "cmd": "diff <(cat <<'' <<B\nebody\n\nbody1\nB\n) b.txt\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-emptyplain-Px-same",
+   "cmd": "diff <(cat <<'' <<B\nebody\n)\nbody1\nB\n) b.txt; rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-emptyplain-Px-next",
+   "cmd": "diff <(cat <<'' <<B\nebody\n)\nbody1\nB\n) b.txt\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-emptyplain-Px-inside",
+   "cmd": "diff <(cat <<'' <<B\nebody\n) rm -rf /etc\nbody1\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-emptyplain-xP-same",
+   "cmd": "diff <(cat <<'' <<B\nebody\n\nbody1\nB); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-emptyplain-xP-next",
+   "cmd": "diff <(cat <<'' <<B\nebody\n\nbody1\nB)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-emptyplain-xP-inside",
+   "cmd": "diff <(cat <<'' <<B\nebody\n\nbody1\nB) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n2-emptyplain-PP-same",
+   "cmd": "diff <(cat <<'' <<B\nebody\n)\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-emptyplain-PP-next",
+   "cmd": "diff <(cat <<'' <<B\nebody\n)\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n2-emptyplain-PP-inside",
+   "cmd": "diff <(cat <<'' <<B\nebody\n) rm -rf /etc\nbody1\nB)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-xxx-same",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC\n) b.txt; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-xxx-next",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC\n) b.txt\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-Pxx-same",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC\n) b.txt; rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-Pxx-next",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC\n) b.txt\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-Pxx-inside",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-xPx-same",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC\n) b.txt; rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-xPx-next",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC\n) b.txt\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-xPx-inside",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-PPx-same",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC\n) b.txt; rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-PPx-next",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC\n) b.txt\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-PPx-inside",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-xxP-same",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-xxP-next",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-xxP-inside",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-PxP-same",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-PxP-next",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-PxP-inside",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-xPP-same",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-xPP-next",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-xPP-inside",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-PPP-same",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-PPP-next",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-plainplainplain-PPP-inside",
+   "cmd": "diff <(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-xxx-same",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC\n) b.txt; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-xxx-next",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC\n) b.txt\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-Pxx-same",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC\n) b.txt; rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-Pxx-next",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC\n) b.txt\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-Pxx-inside",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-xPx-same",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC\n) b.txt; rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-xPx-next",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC\n) b.txt\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-xPx-inside",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-PPx-same",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC\n) b.txt; rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-PPx-next",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC\n) b.txt\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-PPx-inside",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-xxP-same",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-xxP-next",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-xxP-inside",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC) rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-PxP-same",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-PxP-next",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-PxP-inside",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-xPP-same",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-xPP-next",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-xPP-inside",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-PPP-same",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-PPP-next",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-procsub-n3-quotedquotedquoted-PPP-inside",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-backtick-n1-plain-x-same",
+   "cmd": "x=`cat <<A\nbody0\nA\n`; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n1-plain-x-next",
+   "cmd": "x=`cat <<A\nbody0\nA\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n1-quoted-x-same",
+   "cmd": "x=`cat <<'A'\nbody0\nA\n`; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n1-quoted-x-next",
+   "cmd": "x=`cat <<'A'\nbody0\nA\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n1-dash-x-same",
+   "cmd": "x=`cat <<-A\n\tbody0\n\tA\n`; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n1-dash-x-next",
+   "cmd": "x=`cat <<-A\n\tbody0\n\tA\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n1-empty-x-same",
+   "cmd": "x=`cat <<''\nebody\n\n`; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n1-empty-x-next",
+   "cmd": "x=`cat <<''\nebody\n\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n2-plainplain-xx-same",
+   "cmd": "x=`cat <<A <<B\nbody0\nA\nbody1\nB\n`; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n2-plainplain-xx-next",
+   "cmd": "x=`cat <<A <<B\nbody0\nA\nbody1\nB\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n2-quotedquoted-xx-same",
+   "cmd": "x=`cat <<'A' <<'B'\nbody0\nA\nbody1\nB\n`; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n2-quotedquoted-xx-next",
+   "cmd": "x=`cat <<'A' <<'B'\nbody0\nA\nbody1\nB\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n2-dashplain-xx-same",
+   "cmd": "x=`cat <<-A <<B\n\tbody0\n\tA\nbody1\nB\n`; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n2-dashplain-xx-next",
+   "cmd": "x=`cat <<-A <<B\n\tbody0\n\tA\nbody1\nB\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n2-emptyplain-xx-same",
+   "cmd": "x=`cat <<'' <<B\nebody\n\nbody1\nB\n`; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n2-emptyplain-xx-next",
+   "cmd": "x=`cat <<'' <<B\nebody\n\nbody1\nB\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n3-plainplainplain-xxx-same",
+   "cmd": "x=`cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC\n`; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n3-plainplainplain-xxx-next",
+   "cmd": "x=`cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n3-quotedquotedquoted-xxx-same",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC\n`; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-backtick-n3-quotedquotedquoted-xxx-next",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n1-plain-x-same",
+   "cmd": "x=$(echo $(cat <<A\nbody0\nA\n)); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n1-plain-x-next",
+   "cmd": "x=$(echo $(cat <<A\nbody0\nA\n))\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n1-plain-P-same",
+   "cmd": "x=$(echo $(cat <<A\nbody0\nA); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n1-plain-P-next",
+   "cmd": "x=$(echo $(cat <<A\nbody0\nA)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n1-plain-P-inside",
+   "cmd": "x=$(echo $(cat <<A\nbody0\nA) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n1-quoted-x-same",
+   "cmd": "x=$(echo $(cat <<'A'\nbody0\nA\n)); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n1-quoted-x-next",
+   "cmd": "x=$(echo $(cat <<'A'\nbody0\nA\n))\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n1-quoted-P-same",
+   "cmd": "x=$(echo $(cat <<'A'\nbody0\nA); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n1-quoted-P-next",
+   "cmd": "x=$(echo $(cat <<'A'\nbody0\nA)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n1-quoted-P-inside",
+   "cmd": "x=$(echo $(cat <<'A'\nbody0\nA) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n1-dash-x-same",
+   "cmd": "x=$(echo $(cat <<-A\n\tbody0\n\tA\n)); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n1-dash-x-next",
+   "cmd": "x=$(echo $(cat <<-A\n\tbody0\n\tA\n))\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n1-dash-P-same",
+   "cmd": "x=$(echo $(cat <<-A\n\tbody0\n\tA); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n1-dash-P-next",
+   "cmd": "x=$(echo $(cat <<-A\n\tbody0\n\tA)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n1-dash-P-inside",
+   "cmd": "x=$(echo $(cat <<-A\n\tbody0\n\tA) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n1-empty-x-same",
+   "cmd": "x=$(echo $(cat <<''\nebody\n\n)); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n1-empty-x-next",
+   "cmd": "x=$(echo $(cat <<''\nebody\n\n))\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n1-empty-P-same",
+   "cmd": "x=$(echo $(cat <<''\nebody\n); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n1-empty-P-next",
+   "cmd": "x=$(echo $(cat <<''\nebody\n)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n1-empty-P-inside",
+   "cmd": "x=$(echo $(cat <<''\nebody\n) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-plainplain-xx-same",
+   "cmd": "x=$(echo $(cat <<A <<B\nbody0\nA\nbody1\nB\n)); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-plainplain-xx-next",
+   "cmd": "x=$(echo $(cat <<A <<B\nbody0\nA\nbody1\nB\n))\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-plainplain-Px-same",
+   "cmd": "x=$(echo $(cat <<A <<B\nbody0\nA)\nbody1\nB\n)); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-plainplain-Px-next",
+   "cmd": "x=$(echo $(cat <<A <<B\nbody0\nA)\nbody1\nB\n))\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-plainplain-Px-inside",
+   "cmd": "x=$(echo $(cat <<A <<B\nbody0\nA) rm -rf /etc\nbody1\nB",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-plainplain-xP-same",
+   "cmd": "x=$(echo $(cat <<A <<B\nbody0\nA\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-plainplain-xP-next",
+   "cmd": "x=$(echo $(cat <<A <<B\nbody0\nA\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-plainplain-xP-inside",
+   "cmd": "x=$(echo $(cat <<A <<B\nbody0\nA\nbody1\nB) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-plainplain-PP-same",
+   "cmd": "x=$(echo $(cat <<A <<B\nbody0\nA)\nbody1\nB); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-plainplain-PP-next",
+   "cmd": "x=$(echo $(cat <<A <<B\nbody0\nA)\nbody1\nB)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-plainplain-PP-inside",
+   "cmd": "x=$(echo $(cat <<A <<B\nbody0\nA) rm -rf /etc\nbody1\nB)",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-quotedquoted-xx-same",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nbody0\nA\nbody1\nB\n)); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-quotedquoted-xx-next",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nbody0\nA\nbody1\nB\n))\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-quotedquoted-Px-same",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB\n)); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-quotedquoted-Px-next",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB\n))\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-quotedquoted-Px-inside",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nbody0\nA) rm -rf /etc\nbody1\nB",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-quotedquoted-xP-same",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nbody0\nA\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-quotedquoted-xP-next",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nbody0\nA\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-quotedquoted-xP-inside",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nbody0\nA\nbody1\nB) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-quotedquoted-PP-same",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-quotedquoted-PP-next",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nbody0\nA)\nbody1\nB)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-quotedquoted-PP-inside",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nbody0\nA) rm -rf /etc\nbody1\nB)",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-dashplain-xx-same",
+   "cmd": "x=$(echo $(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB\n)); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-dashplain-xx-next",
+   "cmd": "x=$(echo $(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB\n))\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-dashplain-Px-same",
+   "cmd": "x=$(echo $(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB\n)); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-dashplain-Px-next",
+   "cmd": "x=$(echo $(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB\n))\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-dashplain-Px-inside",
+   "cmd": "x=$(echo $(cat <<-A <<B\n\tbody0\n\tA) rm -rf /etc\nbody1\nB",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-dashplain-xP-same",
+   "cmd": "x=$(echo $(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-dashplain-xP-next",
+   "cmd": "x=$(echo $(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-dashplain-xP-inside",
+   "cmd": "x=$(echo $(cat <<-A <<B\n\tbody0\n\tA\nbody1\nB) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-dashplain-PP-same",
+   "cmd": "x=$(echo $(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-dashplain-PP-next",
+   "cmd": "x=$(echo $(cat <<-A <<B\n\tbody0\n\tA)\nbody1\nB)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-dashplain-PP-inside",
+   "cmd": "x=$(echo $(cat <<-A <<B\n\tbody0\n\tA) rm -rf /etc\nbody1\nB)",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-emptyplain-xx-same",
+   "cmd": "x=$(echo $(cat <<'' <<B\nebody\n\nbody1\nB\n)); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-emptyplain-xx-next",
+   "cmd": "x=$(echo $(cat <<'' <<B\nebody\n\nbody1\nB\n))\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-emptyplain-Px-same",
+   "cmd": "x=$(echo $(cat <<'' <<B\nebody\n)\nbody1\nB\n)); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-emptyplain-Px-next",
+   "cmd": "x=$(echo $(cat <<'' <<B\nebody\n)\nbody1\nB\n))\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-emptyplain-Px-inside",
+   "cmd": "x=$(echo $(cat <<'' <<B\nebody\n) rm -rf /etc\nbody1\nB",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-emptyplain-xP-same",
+   "cmd": "x=$(echo $(cat <<'' <<B\nebody\n\nbody1\nB); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-emptyplain-xP-next",
+   "cmd": "x=$(echo $(cat <<'' <<B\nebody\n\nbody1\nB)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-emptyplain-xP-inside",
+   "cmd": "x=$(echo $(cat <<'' <<B\nebody\n\nbody1\nB) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n2-emptyplain-PP-same",
+   "cmd": "x=$(echo $(cat <<'' <<B\nebody\n)\nbody1\nB); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-emptyplain-PP-next",
+   "cmd": "x=$(echo $(cat <<'' <<B\nebody\n)\nbody1\nB)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n2-emptyplain-PP-inside",
+   "cmd": "x=$(echo $(cat <<'' <<B\nebody\n) rm -rf /etc\nbody1\nB)",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-xxx-same",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC\n)); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-xxx-next",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC\n))\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-Pxx-same",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC\n)); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-Pxx-next",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC\n))\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-Pxx-inside",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-xPx-same",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC\n)); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-xPx-next",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC\n))\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-xPx-inside",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-PPx-same",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC\n)); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-PPx-next",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC\n))\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-PPx-inside",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-xxP-same",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-xxP-next",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-xxP-inside",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-PxP-same",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-PxP-next",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-PxP-inside",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC)",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-xPP-same",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-xPP-next",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-xPP-inside",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC)",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-PPP-same",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-PPP-next",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA)\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-plainplainplain-PPP-inside",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-xxx-same",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC\n)); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-xxx-next",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC\n))\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-Pxx-same",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC\n)); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-Pxx-next",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC\n))\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-Pxx-inside",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-xPx-same",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC\n)); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-xPx-next",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC\n))\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-xPx-inside",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-PPx-same",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC\n)); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-PPx-next",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC\n))\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-PPx-inside",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-xxP-same",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-xxP-next",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-xxP-inside",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC) rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-PxP-same",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-PxP-next",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-PxP-inside",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB\nbody2\nC)",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-xPP-same",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-xPP-next",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-xPP-inside",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB) rm -rf /etc\nbody2\nC)",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-PPP-same",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC); rm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-PPP-next",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB)\nbody2\nC)\nrm -rf /etc",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "o-nested-n3-quotedquotedquoted-PPP-inside",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nbody0\nA) rm -rf /etc\nbody1\nB)\nbody2\nC)",
+   "runs53": false,
+   "runs32": false
+  }
+ ]
+}

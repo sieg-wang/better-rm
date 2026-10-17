@@ -1202,3 +1202,80 @@ a `tool_input` that is an array reads as an empty command and is ALLOW (measured
 Claude Code sends an object, Codex's input schema does not constrain the type, and no live producer
 was seen sending an array. `{x..y}` sequence expressions are not modelled or probed. `{x,.}` at
 command position turns off `$HOME`/`$PWD`/`$TMPDIR` resolution although it runs `x`.
+
+## R7-a — 一行多個 heredoc、前一段以 `DELIM)` 收尾時，後段內文照 bash 3.2 讀（既有，OPEN，僅記錄）
+
+2026-10-17 審查活動驗證 BR2-2-REG3 修法時由 exec 驗證者找到（與 R7-b 是同一次驗證），之後重新實測。在 `$( )` 或 `<( )` 裡一行開了兩個 heredoc、
+第一個以 `A)` 收尾時，兩個 bash 讀法不同：bash 3.2.57 在 `A)` 當場關掉替換，下面各行（包括本來是第二段內文的
+那些行）都是命令；bash 5.3.20 仍把第二段內文當 here-data 從下面讀進來，讀完才關替換，接著執行後面那一行。
+hook 照 3.2 的讀法（BR2-2-REG3）：後段內文被當成命令斷詞。後段內文裡若有不成對的引號或 heredoc 運算子，
+斷詞時就會把後面那條 bash 5.3 會執行的刪除藏起來。實測的五個形狀（`/` 是換行）：
+
+- h1：`x=$(cat <<A <<B` / `A)` / `see <<EOF` / `B` / `rm -rf /etc`
+- q1：`x=$(cat <<A <<B` / `A)` / `it's here` / `B` / `rm -rf /etc`
+- q2：與 q1 相同，標記寫成 `<<'A' <<'B'`
+- q3：`x=$(cat <<A <<B` / `A)` / `say "hi` / `B` / `rm -rf /etc`
+- q4b：`diff <(cat <<A <<B` / `A) b.txt` / `it's here` / `B` / `rm -rf /etc`
+
+刪除換成無害的 stand-in、包在從不呼叫的函式裡，以 `bash -n` 加 `;;` 命令位置差分實測（從不執行）：
+bash 5.3.20 五條都會跑那一行（`bash -n` rc 0、`;;` 放在那裡就是語法錯誤），bash 3.2.57 五條都拒絕整段
+（`bash -n` rc 2）。hook 在 START（6a3edb1，= live guard）與這個分支的 tip 都放行這五條（以 evaluate() 實測），所以是
+既有的，不是這個分支造成的回歸。修法要真的取兩種讀法的聯集，留到下一輪；test-hooks.js 不對這五條做放行的斷言，
+`test-hooks-heredoc-corpus.json` 的內文都是單字，也不涵蓋它們。
+
+**R7-a, two or more heredocs on a line with an earlier one closed by `DELIM)`: the later bodies are
+read as bash 3.2 reads them (pre-existing, OPEN, recorded).** Found by the exec validator while the
+2026-10-17 review campaign validated the BR2-2-REG3 fix (the same validation that found R7-b), and
+re-measured here. Inside `$( )` or `<( )`, with two heredocs
+opened on one line and the first closed by `A)`, the two bashes differ: bash 3.2.57 closes the
+substitution at `A)`, so the following lines -- what would have been the second body included -- are
+commands; bash 5.3.20 still reads the second body as here-data from the following lines, closes the
+substitution after it and then runs the next line. The hook follows bash 3.2 (BR2-2-REG3): the later
+body is tokenised as commands, so an unmatched quote or a heredoc operator in it can hide a removal
+after it that bash 5.3 runs. The five measured shapes (`/` is a newline): h1 `x=$(cat <<A <<B` /
+`A)` / `see <<EOF` / `B` / `rm -rf /etc`; q1 the same with `it's here` as the second body; q2 q1 with
+`<<'A' <<'B'`; q3 with `say "hi`; q4b `diff <(cat <<A <<B` / `A) b.txt` / `it's here` / `B` /
+`rm -rf /etc`. With a harmless stand-in for the removal, in a never-called function, by `bash -n`
+plus a `;;` command-position differential (nothing executed): bash 5.3.20 runs that line in all five
+(`bash -n` rc 0, `;;` there is a syntax error) and bash 3.2.57 rejects all five (`bash -n` rc 2). The
+hook ALLOWs all five at START (6a3edb1, = the live guard) and at this branch's tip (measured through evaluate()), so
+this is pre-existing, not a regression of this branch. The fix -- a real union of both readings -- is
+left to the next round; test-hooks.js asserts nothing about these five, and
+`test-hooks-heredoc-corpus.json` (plain-word bodies only) does not cover them.
+
+## R7-b — 引號外的反引號替換裡，結尾反引號結束了 heredoc 內文時，後面頂層的刪除會被藏起來（既有，OPEN，僅記錄）
+
+2026-10-17 審查活動驗證 BR2-2-REG3 修法時由 guard 驗證者找到（與 R7-a 是同一次驗證）。`` x=`cat <<A `` /
+`body0` / `` A` `` / `rm -rf /etc`（`/` 是換行）被放行。原因（以加了計數的 hook 副本實測）：頂層 tokenizer 把
+引號外的反引號當成一般的字元，readBackquoted 根本沒被呼叫（0 次），於是反引號裡的 `<<A` 被當成頂層 heredoc；
+沒有剛好是 `A` 的一行（那一行是 `` A` ``），它的內文（`body0`、`` A` ``、`rm -rf /etc`）就一路吃到輸入結尾、
+把刪除藏起來。同樣的形狀放在雙引號裡時 readBackquoted 會被呼叫（2 次），在 6a3edb1、f4c2982 與這個分支的 tip
+都以 /etc 被拒。標記行剛好是 `A`、結尾反引號在後面另一行時（下一行接刪除、同一行接 `; rm`、或標記寫成
+`<<'A'`），三個版本也都以 /etc 被拒——`test-hooks-heredoc-corpus.json` 的 20 個 o-backtick 列都是這一種，
+而且有斷言。所以缺口只在「結尾反引號結束了內文」：標記行帶著結尾反引號（`` A` ``、`` A)` ``），或空標記
+`<<''` 的內文在反引號之前沒有空行。刪除換成無害的 stand-in、包在從不呼叫的函式裡，以 `bash -n` 加 `;;`
+命令位置差分實測（從不執行）：bash 5.3.20 與 3.2.57 都把後面那一行當成獨立命令。guard 驗證者的 150 個反引號
+形狀裡有 50 個是「必須拒絕」，逐一模擬內文的讀法，50 個都是結尾反引號結束了內文（37 個具名標記、13 個空標記）；
+以 evaluate() 重新實測，這 50 個在 START（6a3edb1）與這個分支的 tip 都放行（50/50），所以是既有的、這個分支
+沒有引入也沒有改變。test-hooks.js 不對它們做放行的斷言。
+
+**R7-b, a heredoc in an unquoted backquote substitution whose body the closing backquote ends hides
+a top-level removal after it (pre-existing, OPEN, recorded).** Found by the guard validator while the
+2026-10-17 review campaign validated the BR2-2-REG3 fix (the same validation that found R7-a).
+`` x=`cat <<A `` / `body0` / `` A` `` / `rm -rf /etc` (`/` is a newline) is ALLOWED. The cause, measured
+with an instrumented copy of the hook: the top-level tokenizer reads an unquoted backquote as an
+ordinary word character -- readBackquoted is never called for this shape (0 calls) -- so it takes the
+`<<A` inside it for a top-level heredoc; with no exact `A` line (the line is `` A` ``), that heredoc's
+body (`body0`, `` A` ``, `rm -rf /etc`) runs to the end of the input, over the removal. Inside double
+quotes readBackquoted is called (2 calls) and the same shape is DENIED for /etc at 6a3edb1, f4c2982
+and this branch's tip. When an exact delimiter line comes before the closing backquote (the removal on
+the next line, `; rm` on the backquote's line, or `<<'A'`), the removal is DENIED for /etc at all three
+as well -- the 20 o-backtick rows of `test-hooks-heredoc-corpus.json` are that kind and are asserted.
+So the gap is only where the closing backquote ends a body: the delimiter line carries it (`` A` ``,
+`` A)` ``), or an empty `<<''` body reaches it with no empty line first. With a harmless stand-in for
+the removal, in a never-called function, by `bash -n` plus a `;;` command-position differential
+(nothing executed), bash 5.3.20 and bash 3.2.57 both read that line as a command of its own. Of the
+guard validator's 150 backquote shapes, 50 are must-deny; simulating how their bodies are read, in all
+50 the closing backquote ends a body (37 with a named delimiter, 13 with an empty one). Re-measured
+here through evaluate(), all 50 are ALLOWED at START (6a3edb1) and at this branch's tip (50/50), so
+the branch neither introduces nor changes them. test-hooks.js asserts nothing about them.
