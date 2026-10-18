@@ -65,7 +65,8 @@ Options:
 
 Examples:
   bump-and-release.sh                     # 一鍵走完整發佈流程
-  bump-and-release.sh --no-push            # 一鍵走完但不推播
+  bump-and-release.sh --no-push            # 只跑檢查並列出建議指令（不提交、不打標籤、不推播）
+  bump-and-release.sh --auto --no-push     # 提交並打標籤，但不推播
   bump-and-release.sh bump --repo ~/projects/better-rm minor
   bump-and-release.sh bump --repo ~/projects/better-rm
   bump-and-release.sh bump --repo ~/projects/better-rm --to 1.5.0

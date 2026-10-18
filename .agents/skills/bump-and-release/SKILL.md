@@ -40,13 +40,13 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
 
 ```bash
 ./.agents/skills/bump-and-release/scripts/bump-and-release.sh --dry-run
-./.agents/skills/bump-and-release/scripts/bump-and-release.sh --no-push
+./.agents/skills/bump-and-release/scripts/bump-and-release.sh --auto --no-push
 ```
 
 可用參數：
 
 - `--auto`：明確指定自動執行 `release` 全流程。
-- `--no-push`：保留提交與打標籤，但不推播到遠端。
+- `--no-push`：與 `--auto` 一起用時保留提交與打標籤，但不推播到遠端；單獨使用（`bump-and-release.sh --no-push`）時不會進入 auto，只跑檢查並列出建議指令，不提交也不打標籤。
 - `--dry-run`：不實際寫入或執行，僅輸出預定動作。
 
 ### 1) 僅做版本更新與變更檔

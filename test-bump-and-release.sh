@@ -571,6 +571,49 @@ else
     pass "no local tag is created when the remote cannot be asked"
 fi
 
+# What --no-push does, as the help and SKILL.md now say. Alone it is a release
+# run without --auto: checks, then printed suggestions, nothing committed or
+# tagged. With --auto it commits and tags and pushes nothing.
+# --no-push 做什麼（help 與 SKILL.md 現在的寫法）：單獨使用時是不帶 --auto 的 release：跑檢查、
+# 列出建議指令，不提交也不打標籤；加上 --auto 則提交、打標籤，什麼都不推。
+RG_PROJECT=$(make_release_fixture no-push-alone)
+RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
+( cd "$RG_PROJECT" && "$SCRIPT" bump patch ) > "$RG_ROOT/no-push-alone.bump.out" 2>&1
+run_release_fixture "$RG_PROJECT" success no-push-alone --no-push
+assert_status "--no-push alone completes" "0" "$RG_STATUS"
+assert_log_contains "--no-push alone runs the release checks" \
+    "./test-better-rm.sh" "$RG_ROOT/no-push-alone.out"
+assert_log_contains "--no-push alone prints the suggested commands" \
+    "版本檢查通過，建議後續指令：" "$RG_ROOT/no-push-alone.out"
+assert_status "--no-push alone makes no commit" "$RG_PREVIOUS" "$(rg_git -C "$RG_PROJECT" rev-parse HEAD)"
+if rg_git -C "$RG_PROJECT" rev-parse -q --verify refs/tags/v1.0.1 >/dev/null; then
+    fail "--no-push alone creates no tag"
+else
+    pass "--no-push alone creates no tag"
+fi
+
+RG_PROJECT=$(make_release_fixture auto-no-push)
+RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
+( cd "$RG_PROJECT" && "$SCRIPT" bump patch ) > "$RG_ROOT/auto-no-push.bump.out" 2>&1
+run_release_fixture "$RG_PROJECT" success auto-no-push --auto --no-push
+assert_status "--auto --no-push completes" "0" "$RG_STATUS"
+assert_status "--auto --no-push commits the bump" "chore(release): bump to 1.0.1" \
+    "$(rg_git -C "$RG_PROJECT" log -1 --format=%s)"
+assert_status "--auto --no-push tags the release commit" "$(rg_git -C "$RG_PROJECT" rev-parse HEAD)" \
+    "$(rg_git -C "$RG_PROJECT" rev-parse -q --verify 'refs/tags/v1.0.1^{commit}')"
+assert_status "--auto --no-push pushes nothing" "$RG_PREVIOUS" \
+    "$(rg_git --git-dir="$RG_ROOT/auto-no-push/mine.git" rev-parse refs/heads/main)"
+
+HELP_OUT="$TMP_ROOT/help.out"
+"$SCRIPT" --help > "$HELP_OUT" 2>&1
+if grep -E -- '^[[:space:]]*bump-and-release\.sh --no-push[[:space:]]' "$HELP_OUT" | grep -Fq '一鍵走完'; then
+    fail "the help does not say --no-push alone runs the whole flow"
+else
+    pass "the help does not say --no-push alone runs the whole flow"
+fi
+assert_log_contains "the help shows --auto --no-push for a commit and tag without a push" \
+    "bump-and-release.sh --auto --no-push" "$HELP_OUT"
+
 printf 'Passed: %s\nFailed: %s\n' "$PASSED" "$FAILED"
 if [ "$FAILED" -ne 0 ]; then
     exit 1
