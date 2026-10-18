@@ -1184,6 +1184,80 @@ assert_contains "the remote hook download uses the Sieg-owned HTTPS source" \
     "$(cat "$RELEASE_DOWNLOAD_LOG")" \
     "https://raw.githubusercontent.com/sieg-wang/better-rm/main/hooks/protect-important-paths.js"
 
+# The README's one-liner feeds this installer to bash on stdin
+# (`curl ... | bash -s -- -a claude`). A script read from stdin has no file of
+# its own, and SCRIPT_DIR used to fall back to the caller's $PWD: a
+# hooks/protect-important-paths.js or an .opencode plugin sitting there was taken
+# as the installer's own distribution and installed with no download and none
+# of the checks a download gets -- a stale or empty project copy included, and
+# `-a opencode` reported both files "already up to date" by comparing each with
+# itself. Run under the PATH `bash`, named the way `| bash -s` names it, and
+# under /bin/bash where it exists (3.2 on macOS).
+# README 的一行安裝把這支安裝程式從 stdin 餵給 bash。從 stdin 讀進來的腳本沒有自己的檔案，
+# SCRIPT_DIR 以前會退回呼叫端的 $PWD：那裡的 hooks/protect-important-paths.js 或 .opencode
+# 外掛被當成安裝程式自己的發行內容，不下載、也不做下載會做的檢查就裝上去——過期或空的專案副本
+# 也一樣；`-a opencode` 更是拿每個檔案跟它自己比，回報兩者「已是最新」。
+STDIN_SHELLS="bash"
+[ -x /bin/bash ] && STDIN_SHELLS="$STDIN_SHELLS /bin/bash"
+for stdin_shell in $STDIN_SHELLS; do
+    stdin_label="$(printf '%s' "$stdin_shell" | tr -c 'A-Za-z0-9' '-')"
+    stdin_run() {
+        local project="$1"
+        local log="$2"
+        shift 2
+        ( cd "$project" && env PATH="$RELEASE_STUB_BIN:$PATH" \
+            BETTER_RM_TEST_RELEASE_DIR="$RELEASE_ASSET_DIR" \
+            BETTER_RM_TEST_RELEASE_LOG="$log" \
+            HOME="$project-home" CLAUDE_CONFIG_DIR= \
+            "$stdin_shell" -s -- "$@" < "$INSTALLER" 2>&1 )
+    }
+
+    STDIN_PROJECT="$TMP_ROOT/stdin-claude$stdin_label"
+    make_repo "$STDIN_PROJECT"
+    mkdir -p "$STDIN_PROJECT/hooks"
+    { cat "$SCRIPT_DIR/hooks/protect-important-paths.js"; printf '\n// a stale project copy\n'; } \
+        > "$STDIN_PROJECT/hooks/protect-important-paths.js"
+    : > "$STDIN_PROJECT.log"
+    stdin_run "$STDIN_PROJECT" "$STDIN_PROJECT.log" -a claude >/dev/null || true
+    assert_contains "stdin install ($stdin_shell) of claude downloads the hook" \
+        "$(cat "$STDIN_PROJECT.log")" "/main/hooks/protect-important-paths.js"
+    assert_equal "stdin install ($stdin_shell) of claude installs the served hook, not the project copy" \
+        "$(file_hash "$RELEASE_ASSET_DIR/protect-important-paths.js")" \
+        "$(file_hash "$STDIN_PROJECT/.claude/protect-important-paths.js" 2>/dev/null)"
+
+    STDIN_OC_PROJECT="$TMP_ROOT/stdin-opencode$stdin_label"
+    make_repo "$STDIN_OC_PROJECT"
+    mkdir -p "$STDIN_OC_PROJECT/hooks" "$STDIN_OC_PROJECT/.opencode/plugins"
+    { cat "$SCRIPT_DIR/hooks/protect-important-paths.js"; printf '\n// a stale project copy\n'; } \
+        > "$STDIN_OC_PROJECT/hooks/protect-important-paths.js"
+    { cat "$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts"; printf '// edited in the project\n'; } \
+        > "$STDIN_OC_PROJECT/.opencode/plugins/protect-important-paths.ts"
+    : > "$STDIN_OC_PROJECT.log"
+    STDIN_OC_OUTPUT=$(stdin_run "$STDIN_OC_PROJECT" "$STDIN_OC_PROJECT.log" -a opencode) || true
+    assert_contains "stdin install ($stdin_shell) of opencode downloads the hook" \
+        "$(cat "$STDIN_OC_PROJECT.log")" "/main/hooks/protect-important-paths.js"
+    assert_equal "stdin install ($stdin_shell) of opencode replaces the runtime with the served hook" \
+        "$(file_hash "$RELEASE_ASSET_DIR/protect-important-paths.js")" \
+        "$(file_hash "$STDIN_OC_PROJECT/hooks/protect-important-paths.js")"
+    assert_equal "stdin install ($stdin_shell) of opencode writes the bundled plugin" \
+        "$(file_hash "$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts")" \
+        "$(file_hash "$STDIN_OC_PROJECT/.opencode/plugins/protect-important-paths.ts")"
+    assert_not_contains "stdin install ($stdin_shell) of opencode does not compare a project file with itself" \
+        "$STDIN_OC_OUTPUT" "already up to date"
+
+    STDIN_EMPTY_PROJECT="$TMP_ROOT/stdin-empty$stdin_label"
+    make_repo "$STDIN_EMPTY_PROJECT"
+    mkdir -p "$STDIN_EMPTY_PROJECT/hooks"
+    : > "$STDIN_EMPTY_PROJECT/hooks/protect-important-paths.js"
+    : > "$STDIN_EMPTY_PROJECT.log"
+    stdin_run "$STDIN_EMPTY_PROJECT" "$STDIN_EMPTY_PROJECT.log" -a claude --global >/dev/null || true
+    assert_contains "stdin --global install ($stdin_shell) beside a 0-byte project hook downloads the hook" \
+        "$(cat "$STDIN_EMPTY_PROJECT.log")" "/main/hooks/protect-important-paths.js"
+    assert_equal "stdin --global install ($stdin_shell) beside a 0-byte project hook installs the served hook" \
+        "$(file_hash "$RELEASE_ASSET_DIR/protect-important-paths.js")" \
+        "$(file_hash "$STDIN_EMPTY_PROJECT-home/.claude/protect-important-paths.js" 2>/dev/null)"
+done
+
 # PreToolUse 的完整契約：只有 exit 2、或 exit 0 且印出 deny，才算「擋下」。
 # 其餘一律是放行 —— 包含 SyntaxError 這種非零結束，本專案自己的註解就說那是
 # 「非阻擋錯誤」，工具照樣執行。hook_is_permissive 只認得 exit 0 那一種形狀，

@@ -18,6 +18,16 @@
 
 set -e  # 遇到錯誤時立即退出 / Exit on error
 
+# The installer's own file, read here at top level and nowhere else. A script
+# fed on stdin (the README's `curl ... | bash -s` route) has no file: at top
+# level bash 3.2 and 5.3 both leave BASH_SOURCE[0] empty, while inside a
+# function bash 5.3 reports $0 (`bash`), so a check made inside
+# resolve_source_paths could not tell the two routes apart.
+# 安裝程式自己的檔案，只在這裡（頂層）讀。從 stdin 餵進來的腳本（README 的 `curl ... | bash -s`）
+# 沒有檔案：頂層的 BASH_SOURCE[0] 在 bash 3.2 與 5.3 都是空的，但在函式裡 bash 5.3 會回報 $0
+# （`bash`），所以在 resolve_source_paths 裡判斷分不出兩條路。
+INSTALLER_SOURCE="${BASH_SOURCE[0]:-}"
+
 # 顏色定義 (Color definitions)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -223,16 +233,35 @@ resolve_source_paths() {
     # The trap has to be armed before any mktemp, or an abort leaks the temp dir.
     trap cleanup_download_dirs EXIT
 
-    SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-    HOOK_SOURCE_PATH="$SCRIPT_DIR/hooks/protect-important-paths.js"
+    # A local distribution exists only when this installer is a file on disk.
+    # Read from stdin there is none, and the caller's working directory is not
+    # one: SCRIPT_DIR used to fall back to it, so a hooks/protect-important-paths.js
+    # or an .opencode plugin sitting there was installed as this installer's own
+    # source, with no download and none of the checks a download gets.
+    # 只有安裝程式是磁碟上的檔案時才有本機發行內容。從 stdin 讀入時沒有，而呼叫端的工作目錄
+    # 也不是：SCRIPT_DIR 以前會退回它，於是那裡的 hooks/protect-important-paths.js 或
+    # .opencode 外掛被當成本安裝程式自己的來源裝上去，不下載、也不做下載會做的檢查。
+    LOCAL_DISTRIBUTION=false
+    SCRIPT_DIR=""
+    HOOK_SOURCE_PATH=""
+    if [ -n "$INSTALLER_SOURCE" ] && [ -f "$INSTALLER_SOURCE" ]; then
+        SCRIPT_DIR=$(cd -- "$(dirname -- "$INSTALLER_SOURCE")" && pwd -P)
+        LOCAL_DISTRIBUTION=true
+        HOOK_SOURCE_PATH="$SCRIPT_DIR/hooks/protect-important-paths.js"
+    fi
 
-    if [ ! -f "$HOOK_SOURCE_PATH" ] || [ ! -r "$HOOK_SOURCE_PATH" ]; then
+    if [ "$LOCAL_DISTRIBUTION" != true ] || [ ! -f "$HOOK_SOURCE_PATH" ] || [ ! -r "$HOOK_SOURCE_PATH" ]; then
         local release_dir
         release_dir="$(mktemp -d)"
         CLEANUP_DIRS+=("$release_dir")
         HOOK_SOURCE_PATH="$release_dir/hooks/protect-important-paths.js"
-        info "本機未找到共用 hook，改從 Sieg-owned repository 下載"
-        info "Shared hook not found locally; downloading from the Sieg-owned repository"
+        if [ "$LOCAL_DISTRIBUTION" = true ]; then
+            info "本機未找到共用 hook，改從 Sieg-owned repository 下載"
+            info "Shared hook not found locally; downloading from the Sieg-owned repository"
+        else
+            info "安裝程式從 stdin 讀入、沒有本機發行內容，改從 Sieg-owned repository 下載共用 hook"
+            info "The installer was read from stdin and has no local distribution; downloading the shared hook from the Sieg-owned repository"
+        fi
         download_remote_file "$REMOTE_HOOK_ASSET_NAME" "$HOOK_SOURCE_PATH"
 
         if [ ! -f "$HOOK_SOURCE_PATH" ] || [ ! -r "$HOOK_SOURCE_PATH" ]; then
@@ -942,8 +971,14 @@ resolve_opencode_plugin() {
         error "Cannot resolve the physical path of the project root: $project_root"
         exit 1
     fi
-    PLUGIN_SOURCE_PATH="$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts"
-    if [ ! -f "$PLUGIN_SOURCE_PATH" ] || [ ! -r "$PLUGIN_SOURCE_PATH" ]; then
+    # Without a local distribution (installer read from stdin) the plugin always
+    # comes from the copy bundled in this installer, never from the caller's cwd.
+    # 沒有本機發行內容時（安裝程式從 stdin 讀入），外掛一律用本安裝程式內附的副本，絕不取自呼叫端的 cwd。
+    PLUGIN_SOURCE_PATH=""
+    if [ "$LOCAL_DISTRIBUTION" = true ]; then
+        PLUGIN_SOURCE_PATH="$SCRIPT_DIR/.opencode/plugins/protect-important-paths.ts"
+    fi
+    if [ -z "$PLUGIN_SOURCE_PATH" ] || [ ! -f "$PLUGIN_SOURCE_PATH" ] || [ ! -r "$PLUGIN_SOURCE_PATH" ]; then
         local plugin_bundle_dir
         plugin_bundle_dir="$(mktemp -d)"
         CLEANUP_DIRS+=("$plugin_bundle_dir")
