@@ -1840,6 +1840,13 @@ const allowed = [
   'case " $seen " in *" $f "*) continue;; esac',
   'case $1 in (-h|--help) echo usage;; *) echo run;; esac',
   'echo case "$a" in x',
+  // A first arm whose patterns are joined by `|`. The rows above leave the
+  // header reader's `|` step unchecked: with that step deleted every one of
+  // them stays allowed, and this one is refused as "/*" (the header is not
+  // stepped over, so `/*` is read as an operand of the subject again).
+  // 第一個 arm 的樣式以 `|` 相連。上面幾列都驗不到標頭 reader 處理 `|` 的那一步：把那一步刪掉，
+  // 它們全都照樣放行，而這一列會以「/*」被拒（標頭沒被跳過，`/*` 又被當成主詞的操作元）。
+  'case "$p" in /*|./*) echo path;; esac',
   // BR-NEW-1 (2026-10-17): the same idioms INSIDE "$( )" and in a nested one.
   // The two absolute-path rows were DENIED at 5451a62 ("protected directory:
   // /*"): the reader ended the substitution at the first pattern's `)`, and
@@ -4191,9 +4198,12 @@ const HEREDOC_IN_SUBSTITUTION_BLOCKED = [
   ["echo \"$(echo `echo )`; rm -rf /etc)\"", /Refused to remove protected directory: \/etc$/],
   ["git commit -m \"$(cat <<EOF\nfix: $(rm -rf /etc)\nEOF\n)\"", /Refused to remove protected directory: \/etc$/],
   ["echo \"$(cat <<'EOF'\nit's fine\nrm -rf /etc\n)\"", /Rule: unreadable command substitution/],
-  // A "$( )" nested in a quoted string within "$( )" is READ, not refused as
-  // unreadable: the deletion inside it is refused for its own target.
-  // 引號字串裡巢狀的 "$( )" 要被「讀到」，不是以讀不到拒絕：裡面的刪除因為它自己的目標被拒。
+  // A deletion in a "$( )" nested in a quoted string within "$( )" is refused
+  // for its own target. This row does not show that such a substitution is
+  // read: at 5451a62, where those reads failed, it was refused for /etc too.
+  // The NESTED_QUOTED_SUBSTITUTION_ALLOWED rows below are what pin the read.
+  // 引號字串裡、又包在 "$( )" 裡的 "$( )" 中的刪除，因為它自己的目標被拒。這一列「不」證明那個替換有被讀到：
+  // 在那種讀取會失敗的 5451a62，它同樣以 /etc 被拒。釘住「讀得到」的是下面 NESTED_QUOTED_SUBSTITUTION_ALLOWED 那幾列。
   ["echo \"$(echo \"$(rm -rf /etc)\")\"", /Refused to remove protected directory: \/etc$/],
 ];
 const NESTED_QUOTED_SUBSTITUTION_ALLOWED = [
