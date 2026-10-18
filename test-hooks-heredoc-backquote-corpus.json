@@ -1,5 +1,5 @@
 {
- "purpose": "R7-b backquote differential corpus (round 4c). An unquoted backquote substitution at the top level holds a heredoc whose body the closing backquote ends, an unmatched quote or a comment. runs53/runs32 were measured with bash 5.3 and bash 3.2 by `bash -n` plus a `;;` command-position differential on a never-called function wrapping the shape with a harmless stand-in (NEVER executed); regenerate with test/heredoc-backquote/generate.js and label.sh. A shape with runs53 OR runs32 true is one at least one bash runs the removal on, so the guard must DENY it. The gate reads a top-level backquote both as one word, as bash does, and character by character, and unions the targets (KNOWN-RESIDUALS.md R7-b).",
+ "purpose": "R7-b backquote differential corpus (round 4c). An unquoted backquote substitution at the top level holds a heredoc whose body the closing backquote ends, an unmatched quote or a comment. runs53/runs32 were measured with bash 5.3 and bash 3.2 by `bash -n` plus a `;;` command-position differential on a never-called function wrapping the shape with a harmless stand-in (NEVER executed); regenerate with test/heredoc-backquote/generate.js and label.sh. A shape with runs53 OR runs32 true is one at least one bash runs the removal on, so the guard must DENY it.",
  "generated": "2026-10-18",
  "shapes": 188,
  "mustDeny": 144,

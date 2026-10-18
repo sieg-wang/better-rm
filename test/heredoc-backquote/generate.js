@@ -15,8 +15,8 @@
 //          its own after the delimiters; the stand-in after the backquote, on
 //          its line, or as the first body line inside it (round 4b, 132 shapes);
 //   tail-  the round-4 guard validator's backquote shapes: one to three heredocs,
-//          one of them closed by a `DELIM)` line, the closing backquote glued to
-//          the last line, the stand-in on the next line;
+//          the closing backquote glued to the last line, the stand-in on the
+//          next line;
 //   other- an unmatched quote or a comment inside the backquote.
 //
 // Each shape is rendered twice from one stand-in slot:
@@ -180,9 +180,7 @@ function main() {
       + 'plus a `;;` command-position differential on a never-called function wrapping the shape '
       + 'with a harmless stand-in (NEVER executed); regenerate with '
       + 'test/heredoc-backquote/generate.js and label.sh. A shape with runs53 OR runs32 true is '
-      + 'one at least one bash runs the removal on, so the guard must DENY it. The gate reads a '
-      + 'top-level backquote both as one word, as bash does, and character by character, and '
-      + 'unions the targets (KNOWN-RESIDUALS.md R7-b).',
+      + 'one at least one bash runs the removal on, so the guard must DENY it.',
     generated: new Date().toISOString().slice(0, 10),
     shapes: rows.length,
     mustDeny,
