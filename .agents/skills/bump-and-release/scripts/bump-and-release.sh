@@ -399,7 +399,7 @@ run_release() {
       echo "DRY-RUN: 要新增並提交 release 檔案如下："
       echo "$changed"
       echo "DRY-RUN: git -C \"$PROJECT\" add ${RELEASE_FILES[*]}"
-      echo "DRY-RUN: git -C \"$PROJECT\" commit -m \"chore(release): bump to ${version}\""
+      echo "DRY-RUN: git -C \"$PROJECT\" commit -m \"chore(release): bump to ${version}\" -- ${RELEASE_FILES[*]}"
     else
       echo "DRY-RUN: 目前版本檔案無待提交差異，將直接標記標籤。"
     fi
@@ -417,7 +417,12 @@ run_release() {
       git -C "$PROJECT" add "${RELEASE_FILES[@]}"
       if ! git -C "$PROJECT" diff --cached --quiet -- "${RELEASE_FILES[@]}"; then
         echo "發現版本相關變更，將自動提交："
-        git -C "$PROJECT" commit -m "chore(release): bump to ${version}"
+        # The pathspec makes this commit take the release files only. Without it
+        # the commit took the whole index, so work already staged outside the
+        # list was released under this subject; with it, that work stays staged.
+        # 路徑限定讓這次提交只收 release 檔案。沒有它時提交會拿走整個 index，清單外已暫存的
+        # 工作就以這個標題被發佈；有它時，那些工作維持暫存。
+        git -C "$PROJECT" commit -m "chore(release): bump to ${version}" -- "${RELEASE_FILES[@]}"
       else
         echo "未偵測到需提交的 release 變更。"
       fi
@@ -573,7 +578,7 @@ run_release() {
 
   echo "版本檢查通過，建議後續指令："
   echo "  git -C \"$PROJECT\" add ${RELEASE_FILES[*]}"
-  echo "  git -C \"$PROJECT\" commit -m \"chore(release): bump to ${version}\""
+  echo "  git -C \"$PROJECT\" commit -m \"chore(release): bump to ${version}\" -- ${RELEASE_FILES[*]}"
   echo "  git -C \"$PROJECT\" tag -a ${tag} -m \"Release ${tag}\""
   if [[ "$PUSH" -eq 1 ]]; then
     echo "  git -C \"$PROJECT\" push $RELEASE_REMOTE HEAD --follow-tags   # 推播後由 CI 建立 GitHub Release"

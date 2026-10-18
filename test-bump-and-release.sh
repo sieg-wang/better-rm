@@ -395,6 +395,65 @@ assert_log_lacks "a failed tag CI is never announced as complete" \
 assert_log_lacks "no release notes are written after a failed tag CI" \
     "release edit" "$RG_ROOT/ci-failure.gh.log"
 
+# The release commit takes the release files and nothing else. Work already
+# staged outside RELEASE_FILES must not be committed, tagged and pushed under a
+# "chore(release)" subject, and must still be staged afterwards. The unstaged
+# row is the control: a dirty tree is the designed use (--apply is the
+# default), so a fix that refuses it is wrong too.
+# release commit 只收 release 檔案。清單外已暫存的工作不能被當成 "chore(release)" 提交、
+# 打標籤並推播，結束後也必須仍是暫存狀態。未暫存那一列是對照：工作目錄有未提交變更正是
+# 設計上的用法（預設 --apply），拒絕它的修法也是錯的。
+rg_release_only_lists_release_files() {
+    local project="$1"
+    local label="$2"
+    local name
+    local outside=""
+    while IFS= read -r name; do
+        case " CHANGELOG.md better-rm test-better-rm.sh install.sh install-hooks.sh README.md " in
+            *" $name "*) ;;
+            *) outside="$outside $name" ;;
+        esac
+    done < <(rg_git -C "$project" diff-tree --no-commit-id -r --name-only 'v1.0.1^{commit}')
+    if [ -z "$outside" ]; then
+        pass "$label: the release commit holds release files only"
+    else
+        fail "$label: the release commit holds release files only (also:$outside)"
+    fi
+}
+
+RG_PROJECT=$(make_release_fixture staged-outside)
+RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
+( cd "$RG_PROJECT" && "$SCRIPT" bump patch ) > "$RG_ROOT/staged-outside.bump.out" 2>&1
+printf '// staged work in progress\n' >> "$RG_PROJECT/hooks/x.js"
+rg_git -C "$RG_PROJECT" add hooks/x.js
+run_release_fixture "$RG_PROJECT" success staged-outside
+assert_status "a release with staged work outside the release files completes" "0" "$RG_STATUS"
+rg_release_only_lists_release_files "$RG_PROJECT" "staged work outside the list"
+if rg_git -C "$RG_PROJECT" diff --cached --name-only | grep -Fxq hooks/x.js \
+    && rg_git -C "$RG_PROJECT" show :hooks/x.js | grep -Fq 'staged work in progress'; then
+    pass "the staged change outside the release files is still staged"
+else
+    fail "the staged change outside the release files is still staged (index: $(rg_git -C "$RG_PROJECT" diff --cached --name-only | tr '\n' ' '))"
+fi
+if rg_git --git-dir="$RG_ROOT/staged-outside/mine.git" show main:hooks/x.js | grep -Fq 'staged work in progress'; then
+    fail "the pushed main does not carry the staged work"
+else
+    pass "the pushed main does not carry the staged work"
+fi
+
+RG_PROJECT=$(make_release_fixture unstaged-outside)
+RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
+( cd "$RG_PROJECT" && "$SCRIPT" bump patch ) > "$RG_ROOT/unstaged-outside.bump.out" 2>&1
+printf '// unstaged work in progress\n' >> "$RG_PROJECT/hooks/x.js"
+run_release_fixture "$RG_PROJECT" success unstaged-outside
+assert_status "a release with unstaged work outside the release files completes" "0" "$RG_STATUS"
+rg_release_only_lists_release_files "$RG_PROJECT" "unstaged work outside the list"
+if [ "$(rg_git -C "$RG_PROJECT" status --porcelain -- hooks/x.js)" = " M hooks/x.js" ]; then
+    pass "the unstaged change outside the release files stays unstaged"
+else
+    fail "the unstaged change outside the release files stays unstaged (status: $(rg_git -C "$RG_PROJECT" status --porcelain -- hooks/x.js))"
+fi
+
 printf 'Passed: %s\nFailed: %s\n' "$PASSED" "$FAILED"
 if [ "$FAILED" -ne 0 ]; then
     exit 1

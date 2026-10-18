@@ -36,7 +36,7 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
   - 若 release 相關檔案無變更，將直接建立標籤；若有變更，會自動提交後再標籤。
 - tag push 觸發後，流程會等待 `ci-release.yml` 完成，並在 Release 建立後自動使用 `gh release edit` 以**繁體中文**更新 Release Note。
 - 真正的 GitHub Release 物件建立仍由 GitHub Actions 的 `ci-release.yml` 負責。
-- 預設會啟用 `--apply`，避免在本機工作目錄有未提交變更時中斷流程（這些變更若不在 release 檔案清單內，仍不會被提交到 release commit）。
+- 預設會啟用 `--apply`，避免在本機工作目錄有未提交變更時中斷流程（這些變更若不在 release 檔案清單內，仍不會被提交到 release commit：release commit 以路徑限定只提交清單內的檔案，清單外已 `git add` 的變更提交後仍維持暫存）。
 
 ```bash
 ./.agents/skills/bump-and-release/scripts/bump-and-release.sh --dry-run
