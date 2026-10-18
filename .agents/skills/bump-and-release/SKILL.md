@@ -31,7 +31,7 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
 
 - 無參數時，預設會以 `release` 模式執行，並進入 `auto`，直接完成 release 流程（預設會嘗試 `add`、`commit`、`tag`、`push`）。
 - 流程會先讀取目前 `better-rm` 版本並檢查 `refs/tags/<prefix><版本>` 是否已存在：
-  - 若標籤已存在：直接停止，提醒先進行 bump。
+  - 若標籤已存在：直接停止，提醒先進行 bump。會推播時也會先以 `git ls-remote` 查遠端 `mine`：遠端已有這個標籤、或查詢失敗，都會在提交與打標籤之前停止。
   - 若標籤不存在：以目前版本進行 release 準備，不會再做版本位元調整。
   - 若 release 相關檔案無變更，將直接建立標籤；若有變更，會自動提交後再標籤。
 - tag push 觸發後，流程會等待 `ci-release.yml` 完成，並在 Release 建立後自動使用 `gh release edit` 以**繁體中文**更新 Release Note。

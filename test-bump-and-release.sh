@@ -147,6 +147,9 @@ case "$1" in
     push)
         exit 0
         ;;
+    ls-remote)
+        exit 2   # --exit-code: the remote has no such tag
+        ;;
     log|rev-list|diff)
         exit 0   # empty stdout; callers all tolerate that
         ;;
@@ -206,16 +209,40 @@ if [ "$AUTO_STATUS" -ne 0 ]; then
 fi
 assert_status "auto-release run completes" "0" "$AUTO_STATUS"
 
+# The remote a logged `git push` names: the first word after `push` that is
+# not an option (the push now starts with --atomic).
+# 記錄下來的 `git push` 指向哪個遠端：`push` 之後第一個不是選項的字（推播現在以 --atomic 開頭）。
+push_remote_of() {
+    local seen_push=0
+    local word
+    for word in $1; do
+        if [ "$seen_push" -eq 0 ]; then
+            [ "$word" = "push" ] && seen_push=1
+            continue
+        fi
+        case "$word" in
+            -*) continue ;;
+        esac
+        printf '%s\n' "$word"
+        return 0
+    done
+}
+
 PUSH_LINE="$(grep -F ' push ' "$GIT_LOG" | head -n 1)"
-if printf '%s' "$PUSH_LINE" | grep -Fq -- ' push mine HEAD'; then
+if [ "$(push_remote_of "$PUSH_LINE")" = "mine" ]; then
     pass "git push targets the mine remote"
 else
     fail "git push targets the mine remote (logged: $PUSH_LINE)"
 fi
-if printf '%s' "$PUSH_LINE" | grep -Fq -- ' push origin HEAD'; then
+if [ "$(push_remote_of "$PUSH_LINE")" = "origin" ]; then
     fail "git push never targets origin (logged: $PUSH_LINE)"
 else
     pass "git push never targets origin"
+fi
+if printf '%s' "$PUSH_LINE" | grep -Fq -- ' refs/tags/v0.0.1'; then
+    pass "git push names the release tag explicitly"
+else
+    fail "git push names the release tag explicitly (logged: $PUSH_LINE)"
 fi
 
 GH_CALL_COUNT="$(wc -l < "$GH_LOG" | tr -d ' ')"
@@ -237,7 +264,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_TEST_GIT_LOG="$TMP_ROOT/git-suggest.log" \
     || SUGGEST_STATUS=$?
 assert_status "suggestion-only run completes" "0" "$SUGGEST_STATUS"
 assert_log_contains "suggested push command names the mine remote" \
-    "push mine HEAD" "$TMP_ROOT/suggest.out"
+    "push --atomic mine HEAD refs/tags/v0.0.1" "$TMP_ROOT/suggest.out"
 assert_log_lacks "suggested push command does not name origin" \
     "push origin HEAD" "$TMP_ROOT/suggest.out"
 
@@ -382,6 +409,8 @@ assert_log_lacks "the previous commit's run is not reported as the release CI" \
     "https://example.test/runs/previous-commit" "$RG_ROOT/ci-success.out"
 assert_log_contains "the published notes cite the tag's commit" \
     "- Commit：$RG_TAG_COMMIT" "$RG_ROOT/ci-success.notes"
+assert_status "the release tag reaches mine and names the release commit" \
+    "$RG_TAG_COMMIT" "$(rg_git --git-dir="$RG_ROOT/ci-success/mine.git" rev-parse -q --verify 'refs/tags/v1.0.1^{commit}')"
 
 RG_PROJECT=$(make_release_fixture ci-failure)
 RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
@@ -452,6 +481,53 @@ if [ "$(rg_git -C "$RG_PROJECT" status --porcelain -- hooks/x.js)" = " M hooks/x
     pass "the unstaged change outside the release files stays unstaged"
 else
     fail "the unstaged change outside the release files stays unstaged (status: $(rg_git -C "$RG_PROJECT" status --porcelain -- hooks/x.js))"
+fi
+
+# A tag the remote already has. The refusal used to ask only the local tags,
+# and `--follow-tags` skips a tag the remote has under that name without an
+# error, so a clone without the tag committed a new bump, pushed main, left
+# the remote tag where it was and then edited that existing release's notes.
+# The release must stop before it commits, tags or pushes anything.
+# 遠端已經有的標籤。拒絕原本只問本機標籤，而 `--follow-tags` 遇到遠端同名標籤會無聲略過，
+# 所以沒有那個標籤的 clone 會提交新的 bump、推 main、遠端標籤原地不動，接著改寫那個既有
+# release 的說明。release 必須在提交、打標籤、推播任何東西之前就停下。
+RG_PROJECT=$(make_release_fixture remote-tag)
+RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
+rg_git --git-dir="$RG_ROOT/remote-tag/mine.git" tag -a v1.0.1 -m 'published elsewhere' "$RG_PREVIOUS"
+( cd "$RG_PROJECT" && "$SCRIPT" bump patch ) > "$RG_ROOT/remote-tag.bump.out" 2>&1
+run_release_fixture "$RG_PROJECT" success remote-tag
+if [ "$RG_STATUS" -ne 0 ]; then
+    pass "a release whose tag the remote already has stops (status $RG_STATUS)"
+else
+    fail "a release whose tag the remote already has stops (status 0)"
+fi
+assert_status "no release commit is made when the remote has the tag" \
+    "$RG_PREVIOUS" "$(rg_git -C "$RG_PROJECT" rev-parse HEAD)"
+if rg_git -C "$RG_PROJECT" rev-parse -q --verify refs/tags/v1.0.1 >/dev/null; then
+    fail "no local tag is created when the remote has the tag"
+else
+    pass "no local tag is created when the remote has the tag"
+fi
+assert_status "the remote main is untouched when the remote has the tag" \
+    "$RG_PREVIOUS" "$(rg_git --git-dir="$RG_ROOT/remote-tag/mine.git" rev-parse refs/heads/main)"
+assert_log_lacks "no release notes are edited when the remote has the tag" \
+    "release edit" "$RG_ROOT/remote-tag.gh.log"
+
+# The same question when the remote cannot answer: the release stops before it
+# commits rather than guessing that the tag is free.
+# 遠端無法回答時也一樣：release 在提交之前停下，而不是猜標籤沒人用。
+RG_PROJECT=$(make_release_fixture remote-unreachable)
+RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
+rg_git -C "$RG_PROJECT" remote set-url mine "$RG_ROOT/remote-unreachable/no-such-repository.git"
+( cd "$RG_PROJECT" && "$SCRIPT" bump patch ) > "$RG_ROOT/remote-unreachable.bump.out" 2>&1
+run_release_fixture "$RG_PROJECT" success remote-unreachable
+assert_status "a release whose remote cannot be asked stops with status 2" "2" "$RG_STATUS"
+assert_status "no release commit is made when the remote cannot be asked" \
+    "$RG_PREVIOUS" "$(rg_git -C "$RG_PROJECT" rev-parse HEAD)"
+if rg_git -C "$RG_PROJECT" rev-parse -q --verify refs/tags/v1.0.1 >/dev/null; then
+    fail "no local tag is created when the remote cannot be asked"
+else
+    pass "no local tag is created when the remote cannot be asked"
 fi
 
 printf 'Passed: %s\nFailed: %s\n' "$PASSED" "$FAILED"

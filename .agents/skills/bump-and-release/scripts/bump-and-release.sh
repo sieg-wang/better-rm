@@ -367,7 +367,12 @@ run_release() {
   previous_tag="$(git -C "$PROJECT" tag --sort=-creatordate | grep -m 1 "^${VERSION_PREFIX}[0-9]\+\.[0-9]\+\.[0-9]\+$" || true)"
   local previous_tag_or_head=""
   local changed
-  local -a push_cmd=(git -C "$PROJECT" push "$RELEASE_REMOTE" HEAD --follow-tags)
+  # The tag is named, not left to --follow-tags: --follow-tags skips a tag the
+  # remote already has under that name without an error. --atomic makes a
+  # rejected tag fail the whole push, main included.
+  # 標籤明確寫出，不交給 --follow-tags：遠端已有同名標籤時 --follow-tags 會無聲略過。
+  # --atomic 讓標籤被拒時整次推播（包括 main）一起失敗。
+  local -a push_cmd=(git -C "$PROJECT" push --atomic "$RELEASE_REMOTE" HEAD "refs/tags/${tag}")
   local branch
   local sha
   local release_notes_file
@@ -389,6 +394,26 @@ run_release() {
   if release_tag_exists "$version"; then
     echo "目前版本 ${version} 已存在標籤 ${tag}，請先執行 bump 後再做 release。"
     exit 2
+  fi
+
+  # The remote's tags too, before anything is committed, tagged or pushed: a
+  # clone without the tag passes the local check above. Only on the path that
+  # will push, so the dry-run and suggestion paths stay offline. ls-remote
+  # exits 2 when nothing matches; any other failure stops the release rather
+  # than guessing.
+  # 也問遠端的標籤，而且在提交、打標籤、推播之前：沒有那個標籤的 clone 過得了上面的本機
+  # 檢查。只在會推播的路徑上問，dry-run 與建議指令的路徑不連網。ls-remote 找不到時結束碼
+  # 是 2；其他失敗一律停下，不猜。
+  if [[ "$AUTO_RELEASE" -eq 1 && "$PUSH" -eq 1 && "$DRY_RUN" -ne 1 ]]; then
+    local remote_tag_status=0
+    git -C "$PROJECT" ls-remote --exit-code --tags "$RELEASE_REMOTE" "refs/tags/${tag}" >/dev/null || remote_tag_status=$?
+    if [[ "$remote_tag_status" -eq 0 ]]; then
+      echo "遠端 ${RELEASE_REMOTE} 已存在標籤 ${tag}，請先執行 bump 後再做 release。"
+      exit 2
+    elif [[ "$remote_tag_status" -ne 2 ]]; then
+      echo "無法查詢遠端 ${RELEASE_REMOTE} 的標籤（git ls-remote 結束碼 ${remote_tag_status}），停止 release。"
+      exit 2
+    fi
   fi
 
   run_release_checks
@@ -581,9 +606,9 @@ run_release() {
   echo "  git -C \"$PROJECT\" commit -m \"chore(release): bump to ${version}\" -- ${RELEASE_FILES[*]}"
   echo "  git -C \"$PROJECT\" tag -a ${tag} -m \"Release ${tag}\""
   if [[ "$PUSH" -eq 1 ]]; then
-    echo "  git -C \"$PROJECT\" push $RELEASE_REMOTE HEAD --follow-tags   # 推播後由 CI 建立 GitHub Release"
+    echo "  git -C \"$PROJECT\" push --atomic $RELEASE_REMOTE HEAD refs/tags/${tag}   # 推播後由 CI 建立 GitHub Release"
   else
-    echo "  git -C \"$PROJECT\" push $RELEASE_REMOTE HEAD --follow-tags   # 已設定 --no-push，需手動改執行"
+    echo "  git -C \"$PROJECT\" push --atomic $RELEASE_REMOTE HEAD refs/tags/${tag}   # 已設定 --no-push，需手動改執行"
   fi
   echo "如不直接提交，請先確認已在 git diff 中檢視版本同步情形。"
 }
