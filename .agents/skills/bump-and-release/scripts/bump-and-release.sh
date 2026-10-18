@@ -385,7 +385,6 @@ run_release() {
   local release_url
 
   branch="$(git -C "$PROJECT" rev-parse --abbrev-ref HEAD)"
-  sha="$(git -C "$PROJECT" rev-parse HEAD)"
 
   if release_tag_exists "$version"; then
     echo "目前版本 ${version} 已存在標籤 ${tag}，請先執行 bump 後再做 release。"
@@ -428,6 +427,12 @@ run_release() {
 
     git -C "$PROJECT" tag -a "${tag}" -m "Release ${tag}"
     echo "已建立標籤：${tag}"
+    # The commit the tag names, read AFTER the release commit above: the CI wait
+    # and the notes are about that commit. `^{commit}` because an annotated tag's
+    # own object id is not a commit and matches no CI run.
+    # 標籤指向的 commit，在上面的 release 提交「之後」才讀：CI 等待與發佈說明講的都是它。
+    # 用 `^{commit}`：annotated tag 自己的物件 id 不是 commit，對不上任何 CI 執行。
+    sha="$(git -C "$PROJECT" rev-parse "${tag}^{commit}")"
     if [[ "$PUSH" -eq 1 ]]; then
       require_command gh
       echo "開始推播..."

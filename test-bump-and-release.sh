@@ -125,6 +125,7 @@ case "$1" in
             --is-inside-work-tree) printf 'true\n' ;;
             --abbrev-ref) printf 'main\n' ;;
             HEAD) printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n' ;;
+            *'^{commit}') printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n' ;;
             *) exit 1 ;;
         esac
         exit 0
@@ -239,6 +240,160 @@ assert_log_contains "suggested push command names the mine remote" \
     "push mine HEAD" "$TMP_ROOT/suggest.out"
 assert_log_lacks "suggested push command does not name origin" \
     "push origin HEAD" "$TMP_ROOT/suggest.out"
+
+# ---------------------------------------------------------------------------
+# REAL-GIT FIXTURE. The fake git above answers one fixed HEAD and a clean
+# status, so it cannot see which commit the release commits, tags and waits
+# for. These rows run the real git against a local bare repository standing in
+# for the `mine` remote (nothing leaves TMP_ROOT); gh is still a stub, and it
+# answers `run list` from the commit named in the script's own --jq filter.
+# 真 git 的 fixture：上面的假 git 只回一個固定的 HEAD 與乾淨的狀態，看不到 release
+# 提交、打標籤、等 CI 的是哪一個 commit。這幾列用真的 git，`mine` 換成 TMP_ROOT 裡的
+# 本機 bare repository；gh 仍是替身，依腳本自己 --jq 裡寫的 commit 回答 run list。
+RG_ROOT="$TMP_ROOT/real-git"
+RG_BIN="$RG_ROOT/bin"
+mkdir -p "$RG_BIN"
+
+rg_git() {
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+        GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+        GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
+        git "$@"
+}
+
+cat > "$RG_BIN/gh" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$BETTER_RM_TEST_GH_LOG"
+case "$1 $2" in
+    "run list")
+        want=$(printf '%s' "$*" | sed -n 's/.*headSha == "\([0-9a-f]*\)".*/\1/p')
+        tag_commit=$(git -C "$BETTER_RM_TEST_PROJECT" rev-parse -q --verify \
+            "refs/tags/$BETTER_RM_TEST_TAG^{commit}" 2>/dev/null)
+        if [ -n "$want" ] && [ "$want" = "$tag_commit" ]; then
+            printf 'completed\t%s\thttps://example.test/runs/tag-commit\n' "$BETTER_RM_TEST_TAG_CI"
+        elif [ -n "$want" ] && [ "$want" = "$BETTER_RM_TEST_PREVIOUS" ]; then
+            printf 'completed\tsuccess\thttps://example.test/runs/previous-commit\n'
+        elif [ -n "$want" ]; then
+            # Any other id (an annotated tag's own object, say) gets a failed run,
+            # so a wrong id ends the release at once instead of polling for 30 min.
+            # 其他 id（例如 annotated tag 自己的物件）一律回失敗的執行，錯的 id 會立刻結束，
+            # 而不是輪詢 30 分鐘。
+            printf 'completed\tfailure\thttps://example.test/runs/unknown-commit\n'
+        fi
+        exit 0
+        ;;
+    "release view")
+        case "$*" in
+            *"--json id"*) exit 0 ;;
+            *"--json url"*) printf 'https://example.test/releases/%s\n' "$BETTER_RM_TEST_TAG"; exit 0 ;;
+            *) exit 1 ;;
+        esac
+        ;;
+    "release edit")
+        while [ $# -gt 0 ]; do
+            if [ "$1" = "--notes-file" ]; then cp "$2" "$BETTER_RM_TEST_NOTES"; fi
+            shift
+        done
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod +x "$RG_BIN/gh"
+
+# make_release_fixture NAME: a repository at version 1.0.0 (tag v1.0.0) plus a
+# later commit, pushed to a bare `mine`. Prints the project path.
+make_release_fixture() {
+    local dir="$RG_ROOT/$1"
+    local project="$dir/project"
+    mkdir -p "$project/hooks"
+    rg_git init -q --bare "$dir/mine.git"
+    rg_git init -q -b main "$project"
+    printf '#!/bin/bash\nshow_version() {\n  echo "better-rm 1.0.0"\n}\n' > "$project/better-rm"
+    printf '#!/bin/bash\n# expects better-rm 1.0.0\nexit 0\n' > "$project/test-better-rm.sh"
+    printf '# better-rm 1.0.0\n' > "$project/install.sh"
+    printf 'VERSION="1.0.0"\n' > "$project/install-hooks.sh"
+    printf 'better-rm 1.0.0\n' > "$project/README.md"
+    printf '## [Unreleased]\n\n## [1.0.0] - 2020-01-01\n- initial\n' > "$project/CHANGELOG.md"
+    printf '// inert fixture\n' > "$project/test-hooks.js"
+    printf '#!/bin/bash\nexit 0\n' > "$project/test-install-hooks.sh"
+    printf '// a tracked file outside the release list\n' > "$project/hooks/x.js"
+    chmod +x "$project/better-rm" "$project/test-better-rm.sh" "$project/test-install-hooks.sh"
+    rg_git -C "$project" add -A
+    rg_git -C "$project" commit -q -m initial
+    rg_git -C "$project" tag -a v1.0.0 -m v1.0.0
+    printf '// later work\n' >> "$project/hooks/x.js"
+    rg_git -C "$project" commit -q -am work
+    rg_git -C "$project" remote add mine "$dir/mine.git"
+    rg_git -C "$project" push -q mine main refs/tags/v1.0.0
+    printf '%s\n' "$project"
+}
+
+# run_release_fixture PROJECT TAG_CI LABEL [args...]: the release from the
+# project root, stubbed gh first on PATH, real git. Sets RG_STATUS.
+run_release_fixture() {
+    local project="$1"
+    local tag_ci="$2"
+    local label="$3"
+    shift 3
+    RG_STATUS=0
+    ( cd "$project" && PATH="$RG_BIN:$PATH" \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+        GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+        GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
+        BETTER_RM_TEST_GH_LOG="$RG_ROOT/$label.gh.log" \
+        BETTER_RM_TEST_PROJECT="$project" BETTER_RM_TEST_TAG=v1.0.1 \
+        BETTER_RM_TEST_TAG_CI="$tag_ci" BETTER_RM_TEST_PREVIOUS="$RG_PREVIOUS" \
+        BETTER_RM_TEST_NOTES="$RG_ROOT/$label.notes" \
+        "$SCRIPT" "$@" ) > "$RG_ROOT/$label.out" 2>&1 < /dev/null || RG_STATUS=$?
+}
+
+# The CI wait and the published notes must be about the commit the tag names.
+# The release commits the bump AFTER reading HEAD, so a HEAD captured before
+# that commit is the previous commit: its old CI run was taken for the
+# release's and the notes cited it. Two cases, so that both the verdict and
+# the notes are tied to the tag: the tag's CI succeeds, then it fails.
+# CI 等待與發佈說明必須針對「標籤指向的 commit」。release 在讀 HEAD 之後才提交版本
+# 變更，所以提交前讀到的 HEAD 是上一個 commit：它舊的 CI 結果被當成這次的，說明也引用
+# 它。兩個情境，讓判定與說明都綁在標籤上：標籤的 CI 成功、以及失敗。
+RG_PROJECT=$(make_release_fixture ci-success)
+RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
+( cd "$RG_PROJECT" && "$SCRIPT" bump patch ) > "$RG_ROOT/ci-success.bump.out" 2>&1
+run_release_fixture "$RG_PROJECT" success ci-success
+RG_TAG_COMMIT=$(rg_git -C "$RG_PROJECT" rev-parse -q --verify 'refs/tags/v1.0.1^{commit}')
+assert_status "real-git release completes when the tag's CI succeeds" "0" "$RG_STATUS"
+if [ -n "$RG_TAG_COMMIT" ] && [ "$RG_TAG_COMMIT" != "$RG_PREVIOUS" ]; then
+    pass "the release commit is a new commit and v1.0.1 names it"
+else
+    fail "the release commit is a new commit and v1.0.1 names it (tag=$RG_TAG_COMMIT previous=$RG_PREVIOUS)"
+fi
+if grep -F 'run list' "$RG_ROOT/ci-success.gh.log" | grep -Fq -- "\"$RG_TAG_COMMIT\""; then
+    pass "the CI wait asks for the tag's commit"
+else
+    fail "the CI wait asks for the tag's commit (run list calls: $(grep -F 'run list' "$RG_ROOT/ci-success.gh.log" | head -n 1))"
+fi
+assert_log_lacks "the CI wait never asks for the commit before the release commit" \
+    "\"$RG_PREVIOUS\"" "$RG_ROOT/ci-success.gh.log"
+assert_log_contains "the CI result reported is the tag commit's run" \
+    "https://example.test/runs/tag-commit" "$RG_ROOT/ci-success.out"
+assert_log_lacks "the previous commit's run is not reported as the release CI" \
+    "https://example.test/runs/previous-commit" "$RG_ROOT/ci-success.out"
+assert_log_contains "the published notes cite the tag's commit" \
+    "- Commit：$RG_TAG_COMMIT" "$RG_ROOT/ci-success.notes"
+
+RG_PROJECT=$(make_release_fixture ci-failure)
+RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
+( cd "$RG_PROJECT" && "$SCRIPT" bump patch ) > "$RG_ROOT/ci-failure.bump.out" 2>&1
+run_release_fixture "$RG_PROJECT" failure ci-failure
+assert_status "real-git release stops when the tag's CI fails" "2" "$RG_STATUS"
+assert_log_contains "the failed tag CI is reported as a failure" \
+    "CI 結束但未成功" "$RG_ROOT/ci-failure.out"
+assert_log_lacks "a failed tag CI is never announced as complete" \
+    "CI 已完成" "$RG_ROOT/ci-failure.out"
+assert_log_lacks "no release notes are written after a failed tag CI" \
+    "release edit" "$RG_ROOT/ci-failure.gh.log"
 
 printf 'Passed: %s\nFailed: %s\n' "$PASSED" "$FAILED"
 if [ "$FAILED" -ne 0 ]; then
