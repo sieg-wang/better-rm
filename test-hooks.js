@@ -6430,6 +6430,39 @@ let heredocBackquoteChecks = 0;
     'a command the first reading refuses keeps its own refusal');
   assert.equal(verdictOf(afterOneBackquote(300, '$(date)')), undefined, 'the way out the refusal names is allowed');
   heredocBackquoteChecks += 10;
+  // WHICH BACKQUOTES COUNT. One the tokenizer reads character by character in a
+  // text the gate scans for removals: the command itself, or one it carries, such
+  // as a `$( )` substitution or a `bash -c` string. The dot-command check
+  // (sourcesAFile()) also reads words and heredoc bodies as commands; a backquote
+  // only it reads does not count. So each command below, whose backquotes all
+  // stand in quotes, behind a backslash or in a heredoc body read as data, is read
+  // once, and about 300 KiB after it is allowed; one in a `$( )` substitution or a
+  // `bash -c` string still counts, and its refusal does not say the command has a
+  // substitution at its top level.
+  // 哪些反引號算數：tokenizer 在閘門掃描刪除的文字裡逐字讀到的那種——命令本身，或它帶著的命令（例如 `$( )` 替換、
+  // `bash -c` 字串）。點命令檢查（sourcesAFile()）也把字與 heredoc 內文當命令讀；只有它讀到的反引號不算。所以下面這些
+  // 反引號全在引號裡、反斜線後面或當資料讀的 heredoc 內文裡的命令只讀一次，其後接約 300 KiB 放行；在 `$( )` 替換或
+  // `bash -c` 字串裡的仍然算數，而它的拒絕不說這條命令頂層有替換。
+  const padded = (head) => `${head}\n${'echo ok\n'.repeat(Math.ceil((300 * 1024) / 8))}`;
+  for (const head of [
+    "echo 'a `b` c'",
+    'echo "a \\`b\\` c"',
+    'echo \\`b\\`',
+    'x="`date`"',
+    "cat > notes.md <<'EOF'\nuse `code` here\nEOF",
+    "git commit -m \"$(cat <<'EOF'\nFix `foo`\nEOF\n)\"",
+    "bash -lc 'apply_patch <<\"EOF\"\n*** Add File: notes.md\n+use `code` here\nEOF'",
+  ]) {
+    assert.equal(verdictOf(padded(head)), undefined,
+      `a command whose backquotes are all quoted, escaped or heredoc data is read once: ${JSON.stringify(head)}`);
+  }
+  for (const head of ['echo $(x=`date`)', "bash -c 'x=`date`'"]) {
+    const reason = verdictOf(padded(head))?.permissionDecisionReason || '';
+    assert.match(reason, backquoteRule, `a backquote in a command the gate reads counts: ${JSON.stringify(head)}`);
+    assert.doesNotMatch(reason, /at its top level|頂層有未加引號/,
+      `the refusal does not claim a substitution at the top level: ${JSON.stringify(head)}`);
+  }
+  heredocBackquoteChecks += 11;
 }
 
 // THE R7-a READING BUDGET (round 4b). At a `DELIM)` close with later pending

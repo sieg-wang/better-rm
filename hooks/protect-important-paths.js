@@ -489,9 +489,11 @@ const MAX_FAILED_SUBSTITUTION_READS = 64;
 // （設定 readBackquotesAsWords），任一讀法拒絕就拒絕；第一種讀法維持原樣，見 evaluate()。
 let readBackquotesAsWords = false;
 // How many unquoted top-level backquotes shellWords met while reading them
-// character by character; evaluate() reads a command a second time only when its
-// first reading met at least one.
-// shellWords 逐字讀時遇到幾個頂層未加引號的反引號；evaluate() 只在第一種讀法遇到過時才讀第二次。
+// character by character, outside the dot-command check (sourcesAFileWords() puts
+// this back); evaluate() reads a command a second time only when its first
+// reading counted at least one.
+// shellWords 逐字讀時遇到幾個頂層未加引號的反引號，不含點命令檢查讀到的（sourcesAFileWords() 會還原）；evaluate() 只在
+// 第一種讀法數到至少一個時才讀第二次。
 let topLevelBackquotesRead = 0;
 
 function shellWords(command) {
@@ -2736,7 +2738,7 @@ function braceWordCanBeADotCommand(word) {
 // 「有 source」。展開後才是命令字的（`x='. f'; $x`）看不到，記在 KNOWN-RESIDUALS.md R6-e。
 function sourcesAFile(text, depth = 0, preTokenized = null) {
   if (depth > 8) return true;
-  const words = preTokenized || shellWords(text);
+  const words = preTokenized || sourcesAFileWords(text);
   const operators = words.operatorTokens || [];
   const heredocs = new Map((words.heredocs || []).map((entry) => [entry.operatorIndex, entry.body]));
   const isOp = (k, spelling) => operators[k] === true && words[k] === spelling;
@@ -2772,7 +2774,7 @@ function sourcesAFile(text, depth = 0, preTokenized = null) {
     // Text nested in this word, read as commands of its own.
     // 這個字裡的巢狀文字，當成它自己的命令讀。
     if (/[\s;&|()<>`]|\$\(/.test(word)) {
-      const inner = shellWords(word);
+      const inner = sourcesAFileWords(word);
       if (inner.length === 1 && inner[0] === word) {
         for (const substitution of commandSubstitutions(word)) {
           if (sourcesAFile(substitution, depth + 1)) return true;
@@ -2806,6 +2808,23 @@ function sourcesAFile(text, depth = 0, preTokenized = null) {
     skippingOptions = false;
   }
   return false;
+}
+// The tokenizer sourcesAFile() reads with (R7-b, round 4c): shellWords(), with
+// topLevelBackquotesRead put back as it was, so a backquote that only the
+// dot-command check reads does not make evaluate() read the command a second
+// time. That check reads words and heredoc bodies as commands whatever runs
+// them; a backquote in a text the gate scans for removals (a `bash -c` string,
+// for one) is counted when commandTargets() reads that text.
+// sourcesAFile() 用的 tokenizer（R7-b，round 4c）：shellWords()，但把 topLevelBackquotesRead 還原，所以只有點命令檢查
+// 讀到的反引號不會讓 evaluate() 再讀一次。那個檢查不論誰執行，都把字與 heredoc 內文當命令讀；閘門掃描刪除的文字
+// （例如 `bash -c` 字串）裡的反引號，在 commandTargets() 讀那段文字時計數。
+function sourcesAFileWords(text) {
+  const counted = topLevelBackquotesRead;
+  try {
+    return shellWords(text);
+  } finally {
+    topLevelBackquotesRead = counted;
+  }
 }
 const NAME_TAKING_BUILTIN = /(?:^|[^A-Za-z0-9_-])(eval|read|mapfile|readarray|getopts|local|let|readonly|compgen|coproc|printf|wait)(?![A-Za-z0-9_-])/g;
 const KNOWN_REFERENCE = /\$(?:HOME|PWD|TMPDIR)(?![A-Za-z0-9_])|\$\{(?:HOME|PWD|TMPDIR)\}/g;
@@ -7187,12 +7206,12 @@ function alternateReadingBudgetDenial(isCopilot, isAntigravity, isCursor, isGrok
 // R7-b 第二種讀法超過讀取預算時的拒絕（round 4c；見 evaluate()）。自成一條規則：這道閘門沒讀的是「照 bash 讀反引號的
 // 那條命令」，不是 heredoc 的尾段。出路是拿掉頂層反引號，讓閘門不必再讀第二次。
 function backquoteReadingBudgetDenial(isCopilot, isAntigravity, isCursor, isGrok) {
-  const zh = '拒絕執行：這條命令的頂層有未加引號的反引號替換。bash 把一個反引號替換讀成一個字；這道閘門除了'
+  const zh = '拒絕執行：bash 把一個反引號替換讀成一個字；這道閘門除了'
     + '逐字讀這條命令，也照 bash 的方式把整條命令再讀一次，而這第二次讀取超過了單次判定的讀取預算（'
     + MAX_ALTERNATE_READINGS + ' 段，或合計 ' + MAX_ALTERNATE_READING_LENGTH + ' 個字元），所以沒有讀——'
     + '包括只有那種讀法才看得到的刪除（這不是說一定有，是說這道閘門沒有讀到）。規則：backquote reading budget exhausted。'
     + '繞法：把反引號替換改寫成 `$( )`，或把文字放進檔案再讓命令去讀。';
-  const en = 'Refused to run: this command has an unquoted backquote substitution at its top level.'
+  const en = 'Refused to run:'
     + ' bash reads a backquote substitution as one word; besides reading this command character by'
     + ' character, this gate reads the whole command again the way bash does, and that second reading'
     + ' went past the per-invocation reading budget (' + MAX_ALTERNATE_READINGS + ' readings, or '
@@ -7299,25 +7318,26 @@ function evaluate(payload, env = process.env) {
   const extraDirs = (env.BETTER_RM_PROTECTED_DIRS || '')
     .split(path.delimiter).filter(Boolean).map((item) => path.resolve(cwd, item));
 
-  // R7-b (round 4c): READ TWICE when a top-level backquote was met. The first
+  // R7-b (round 4c): READ TWICE when a backquote was counted. The first
   // reading is the one this gate has always made, kept whole: when it refuses,
-  // that refusal is the answer, unchanged. When it allows a command in which
-  // shellWords met an unquoted top-level backquote, the command is read again
-  // with readBackquotesAsWords set -- bash's reading of such a backquote -- and
-  // refused when that reading refuses it, so a removal either reading surfaces is
-  // refused. A command with no such backquote is read once, as before. Keeping the
-  // first reading whole also keeps its refusals of shapes where bash runs no
-  // removal (in test-hooks.js's backquote corpus, a removal that is heredoc data
-  // inside the backquote), deliberately: dropping them is a separate decision.
+  // that refusal is the answer, unchanged. When it allows a command for which
+  // topLevelBackquotesRead counted a backquote (see there), the command is read
+  // again with readBackquotesAsWords set -- bash's reading of such a backquote --
+  // and refused when that reading refuses it, so a removal either reading
+  // surfaces is refused. A command for which none was counted is read once, as
+  // before. Keeping the first reading whole also keeps its refusals of shapes
+  // where bash runs no removal (in test-hooks.js's backquote corpus, a removal
+  // that is heredoc data inside the backquote), deliberately: dropping them is a
+  // separate decision.
   // Bounded as the R7-a readings are: the second reading counts as one reading of
   // the command's length against the same budget object, checked before it runs
   // and refused unread past it (rule: backquote reading budget exhausted). The
   // two readings share that budget and the judging budget, and a target the
   // first reading judged ordinary is not judged again. One second reading per
   // invocation, never one per backquote.
-  // R7-b（round 4c）：遇到頂層反引號時讀兩次。第一種讀法就是這道閘門一直以來的讀法，整個保留：它拒絕時就以那個拒絕作答、
-  // 不變。它放行、而 shellWords 在這條命令裡遇到過頂層未加引號的反引號時，設定 readBackquotesAsWords（bash 對這種
-  // 反引號的讀法）再讀一次，那一次拒絕就拒絕；所以任一讀法看得到的刪除都會被擋。沒有這種反引號的命令照舊只讀一次。
+  // R7-b（round 4c）：數到反引號時讀兩次。第一種讀法就是這道閘門一直以來的讀法，整個保留：它拒絕時就以那個拒絕作答、
+  // 不變。它放行、而 topLevelBackquotesRead 在這條命令數到反引號時（見那裡），設定 readBackquotesAsWords（bash 對這種
+  // 反引號的讀法）再讀一次，那一次拒絕就拒絕；所以任一讀法看得到的刪除都會被擋。沒數到反引號的命令照舊只讀一次。
   // 保留第一種讀法，也就保留了它對「bash 不會執行刪除」的形狀的拒絕（test-hooks.js 反引號語料裡，刪除是反引號裡的
   // heredoc 資料），這是刻意的：要不要拿掉是另一個決定。與 R7-a 一樣有界：第二次讀取以「一段、整條命令的長度」計入同一份
   // 預算，跑之前先檢查，超過就不讀而拒絕（規則 backquote reading budget exhausted）；兩次讀取共用這份預算與判定的時間預算，
