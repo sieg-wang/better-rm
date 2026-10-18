@@ -131,7 +131,8 @@ case "$1" in
         exit 0
         ;;
     show-ref)
-        # No release tag exists yet.
+        # No release tag exists yet, unless a row says it does.
+        [ "${BETTER_RM_TEST_LOCAL_TAG:-0}" = 1 ] && exit 0
         exit 1
         ;;
     tag)
@@ -252,6 +253,46 @@ GH_REPO_COUNT="$(grep -Fc -- "--repo $EXPECTED_GH_REPO" "$GH_LOG")"
 assert_status "every gh call carries --repo $EXPECTED_GH_REPO" "$GH_CALL_COUNT" "$GH_REPO_COUNT"
 
 assert_log_lacks "no gh call resolves to the doggy8088 upstream" "doggy8088" "$GH_LOG"
+
+# The push must never overwrite anything on the remote. The checks above read
+# only which remote it names, so a trailing --force kept every row green; split
+# the logged argv into words and refuse every overwriting spelling.
+# 推播絕不能覆寫遠端的任何東西。上面幾列只看指向哪個遠端，結尾多一個 --force 時全部仍綠；
+# 把記錄下來的 argv 拆成字，任何覆寫的寫法都不接受。
+PUSH_OVERWRITE_WORDS=""
+for push_word in $PUSH_LINE; do
+    case "$push_word" in
+        --force|--force=*|-f|--force-with-lease|--force-with-lease=*|--force-if-includes|--mirror|--delete|-d|--prune|+*)
+            PUSH_OVERWRITE_WORDS="$PUSH_OVERWRITE_WORDS $push_word"
+            ;;
+    esac
+done
+if [ -n "$PUSH_LINE" ] && [ -z "$PUSH_OVERWRITE_WORDS" ]; then
+    pass "git push carries no force, delete or '+' refspec"
+else
+    fail "git push carries no force, delete or '+' refspec (logged: $PUSH_LINE; found:$PUSH_OVERWRITE_WORDS)"
+fi
+
+# The local tag refusal, the one the real-git rows cannot reach because their
+# clones never hold the next tag: with the tag present the release must stop
+# with status 2 before it commits, tags or pushes. A refusal that came after
+# the push would still exit 2, so the git log is read as well.
+# 本機標籤的拒絕（真 git 那幾列碰不到它，因為它們的 clone 從來沒有下一個標籤）：標籤已在時，
+# release 必須以狀態 2 停下，而且在提交、打標籤、推播之前。推播之後才拒絕的版本也會回 2，
+# 所以也讀 git 記錄。
+TAGGED_GIT_LOG="$TMP_ROOT/git-tagged.log"
+: > "$TAGGED_GIT_LOG"
+TAGGED_STATUS=0
+PATH="$FAKE_BIN:$PATH" BETTER_RM_TEST_GIT_LOG="$TAGGED_GIT_LOG" \
+    BETTER_RM_TEST_GH_LOG="$TMP_ROOT/gh-tagged.log" BETTER_RM_TEST_LOCAL_TAG=1 \
+    "$SCRIPT" release --repo "$PROJECT" --auto >"$TMP_ROOT/tagged.out" 2>"$TMP_ROOT/tagged.err" \
+    || TAGGED_STATUS=$?
+assert_status "a release whose tag already exists locally stops with status 2" "2" "$TAGGED_STATUS"
+if grep -Eq -- ' (commit|push)( |$)| tag -a( |$)' "$TAGGED_GIT_LOG"; then
+    fail "nothing is committed, tagged or pushed when the tag exists locally ($(grep -E -- ' (commit|push)( |$)| tag -a( |$)' "$TAGGED_GIT_LOG" | head -n 1))"
+else
+    pass "nothing is committed, tagged or pushed when the tag exists locally"
+fi
 
 # ---------------------------------------------------------------------------
 # Suggestion-only path (no --auto): PUSH stays at its default of 1, so the
