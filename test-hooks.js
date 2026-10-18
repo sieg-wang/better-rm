@@ -6516,11 +6516,14 @@ let alternateReadingBudgetChecks = 0;
     ['copies whose later heredoc is closed once, at the end, before one removal',
       (length) => atLength(copies('x=$(cat <<A <<B\nA)', 'B\nrm -rf /etc'), length)],
     // R7-b (round 4c): copies of a heredoc in a top-level backquote whose body
-    // the closing backquote ends. The first reading hides every removal after the
-    // first copy; the second reading (bash's) is counted against the same budget
-    // before it runs, so past 262144 characters these are refused unread.
-    // R7-b（round 4c）：頂層反引號裡、內文由結尾反引號結束的 heredoc 的多份複本。第一種讀法把第一份之後的刪除全藏起來；
-    // 第二種讀法（bash 的）在跑之前計入同一份預算，超過 262144 個字元就不讀而拒絕。
+    // the closing backquote ends. At 49f89ae the chained and the six-level rows
+    // were allowed at every size (the first copy's heredoc hides the removals
+    // after it) and the deeply nested rows were refused by the nesting cap. The
+    // second reading (bash's) is counted against the same budget before it runs,
+    // so past 262144 characters these are refused unread.
+    // R7-b（round 4c）：頂層反引號裡、內文由結尾反引號結束的 heredoc 的多份複本。在 49f89ae，串接的與六層的各列在每種大小都放行
+    // （第一份的 heredoc 把其後的刪除藏起來），層數很深的各列則被巢狀上限拒絕。第二種讀法（bash 的）在跑之前計入同一份預算，
+    // 超過 262144 個字元就不讀而拒絕。
     ['chained backquote copies, a removal after each',
       (length) => atLength((k) => Array.from({ length: k }, () => 'x=`cat <<A\nbody0\nA`\nrm -rf /etc').join('\n'), length)],
     ['chained backquote copies with a quoted delimiter, one removal at the end',
@@ -7838,13 +7841,13 @@ let substitutionScanBudgetChecks = 0;
 // through stdin at about 96 KB, 420 KB and 1 MB: each must exit 0 with a deny for
 // /etc, inside a budget that grows with the size (2,000 ms per MiB, at least
 // 400 ms) scaled by hostFactor(). At 49f89ae every row took longer than its
-// budget, through stdin on this Mac at a quiet load.
+// budget, through stdin on this Mac with hostFactor() at 1.
 // FU-BR-OPENER-TIMING（round 4c）：讀取失敗預算「之內」的不收尾開頭。上面那個區塊限制的是「可以失敗幾次」，不是每次的成本：
 // 失敗的讀取一路掃到輸入結尾，所以長命令前面的 63 個不收尾開頭，在每一趟讀它們的掃描裡都要讀 63 次到結尾。在 49f89ae
 // 經 stdin 實測：63 個 `$( ` 加 1 MB 的 `echo pad` 行再加 `rm -rf /etc` 要 7,118 ms，超過 live 5,000 ms 逾時，而逾時的
 // hook 不做裁決。readParenthesized 現在每一趟都記下「已知讀不完」的開頭。這些列把三種這樣的寫法以約 96 KB、420 KB、1 MB
 // 送進 stdin：每一列都必須以 0 結束、以 /etc 拒絕，而且在隨大小成長的預算之內（每 MiB 2,000 ms、至少 400 ms，再依
-// hostFactor() 放大）。在 49f89ae，每一列都超過自己的預算（在這台 Mac、安靜的負載下經 stdin 量測）。
+// hostFactor() 放大）。在 49f89ae，每一列都超過自己的預算（在這台 Mac、hostFactor() 為 1 時經 stdin 量測）。
 let openerReadTimingChecks = 0;
 {
   const MIB = 1024 * 1024;
