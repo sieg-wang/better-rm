@@ -7827,6 +7827,60 @@ let substitutionScanBudgetChecks = 0;
   substitutionScanBudgetChecks += 1;
 }
 
+// FU-BR-OPENER-TIMING (round 4c): unclosed openers UNDER the failed-read budget.
+// The block above caps how many reads may fail, not what each one costs: a read
+// that fails scans to the end of the input, so 63 unclosed openers in front of a
+// long command cost 63 reads to its end in every pass that reads them. Measured
+// through the stdin entry point at 49f89ae: `echo ` + 63 x `$( ` + 1 MB of
+// `echo pad` lines + `rm -rf /etc` took 7,118 ms, past the live 5,000 ms timeout,
+// where a hook makes no decision. readParenthesized now keeps a per-pass record
+// of the openers whose read is known to fail. These rows send three such shapes
+// through stdin at about 96 KB, 420 KB and 1 MB: each must exit 0 with a deny for
+// /etc, inside a budget that grows with the size (2,000 ms per MiB, at least
+// 400 ms) scaled by hostFactor(). At 49f89ae every row took longer than its
+// budget, through stdin on this Mac at a quiet load.
+// FU-BR-OPENER-TIMING（round 4c）：讀取失敗預算「之內」的不收尾開頭。上面那個區塊限制的是「可以失敗幾次」，不是每次的成本：
+// 失敗的讀取一路掃到輸入結尾，所以長命令前面的 63 個不收尾開頭，在每一趟讀它們的掃描裡都要讀 63 次到結尾。在 49f89ae
+// 經 stdin 實測：63 個 `$( ` 加 1 MB 的 `echo pad` 行再加 `rm -rf /etc` 要 7,118 ms，超過 live 5,000 ms 逾時，而逾時的
+// hook 不做裁決。readParenthesized 現在每一趟都記下「已知讀不完」的開頭。這些列把三種這樣的寫法以約 96 KB、420 KB、1 MB
+// 送進 stdin：每一列都必須以 0 結束、以 /etc 拒絕，而且在隨大小成長的預算之內（每 MiB 2,000 ms、至少 400 ms，再依
+// hostFactor() 放大）。在 49f89ae，每一列都超過自己的預算（在這台 Mac、安靜的負載下經 stdin 量測）。
+let openerReadTimingChecks = 0;
+{
+  const MIB = 1024 * 1024;
+  const lines = (chars) => 'echo pad\n'.repeat(Math.ceil(chars / 9));
+  const openerShapes = [
+    ['63 unclosed `$(`', (size) => `echo ${'$( '.repeat(63)}\n${lines(size)}rm -rf /etc`],
+    ['63 unclosed `$((`', (size) => `echo ${'$(( '.repeat(63)}\n${lines(size)}rm -rf /etc`],
+    ['63 unclosed `$(`, `<(` and `>(`', (size) => `echo ${
+      Array.from({ length: 63 }, (_, i) => ['$( ', '<( ', '>( '][i % 3]).join('')}\n${lines(size)}rm -rf /etc`],
+  ];
+  // A hang guard, not a budget, as in the R7-a rows.
+  // 防卡住而不是預算，與 R7-a 那幾列相同。
+  const hangGuardMs = 30000;
+  for (const kb of [96, 420, 1024]) {
+    const size = kb * 1024;
+    const openerBudgetMs = Math.max(400, (2000 * size) / MIB) * hostFactor();
+    for (const [label, make] of openerShapes) {
+      const command = make(size);
+      const started = process.hrtime.bigint();
+      const { status, signal, stdout } = runHookOverStdin(claude(command), hangGuardMs);
+      const run = { ms: Number(process.hrtime.bigint() - started) / 1e6 };
+      assert.equal(status, 0,
+        `${label} before ${kb} KB of lines: the hook must answer through stdin, not exit ${status}`
+        + (signal ? ` (${signal}, after ${run.ms.toFixed(0)}ms)` : ''));
+      assert.match(stdout || '', /"permissionDecision":"deny".*\/etc/,
+        `${label} before ${kb} KB of lines: the removal after them must be denied for /etc`);
+      timingBudget(
+        run.ms < openerBudgetMs,
+        `${label} before ${kb} KB of lines took ${run.ms.toFixed(0)}ms through stdin against a `
+        + `${openerBudgetMs.toFixed(0)}ms budget: a failed read is read again from each unclosed opener`,
+      );
+      openerReadTimingChecks += 3;
+    }
+  }
+}
+
 // R5-13 (r5-fix-better-rm-8): a SPENT budget must fail CLOSED.
 // The block above bounds what a scan may COST. It said nothing about what the
 // gate answers once the cap is reached, and the answer was: scan no further, and
@@ -8963,6 +9017,7 @@ const PINNED_TIMING_COUNTERS = [
   ['findClauseTimingChecks', findClauseTimingChecks, 48],
   ['targetLimitChecks', targetLimitChecks, 9],
   ['alternateReadingBudgetChecks', alternateReadingBudgetChecks, 184],
+  ['openerReadTimingChecks', openerReadTimingChecks, 27],
 ];
 for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {
   assert.equal(actual, expected,
@@ -8991,8 +9046,8 @@ for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {
 // 用 __filename 而不是用 __dirname 組出來的路徑：清查必須讀「它自己」這個檔案。
 const ownSource = require('fs').readFileSync(__filename, 'utf8');
 const wallClockRows = ownSource.match(/\.ms\s*[<>]=?\s*[A-Za-z0-9_.]+/g) || [];
-assert.equal(wallClockRows.length, 10,
-  `this file holds ${wallClockRows.length} wall-clock comparisons, not the 10 pinned here: `
+assert.equal(wallClockRows.length, 11,
+  `this file holds ${wallClockRows.length} wall-clock comparisons, not the 11 pinned here: `
   + `${wallClockRows.join(', ')}. A new one needs a scaled budget and a pinned counter, `
   + 'which is what this number is for');
 const constantBudgetRows = wallClockRows.filter((row) => /[<>]=?\s*[0-9]/.test(row));
@@ -9007,12 +9062,12 @@ for (const [name] of PINNED_TIMING_COUNTERS) {
   assert.ok(new RegExp(`\\['${name}',`).test(ownSource),
     `${name} is not in PINNED_TIMING_COUNTERS, so nothing verifies that its block ran`);
 }
-// Every wall-clock row -- the 10 ceilings and the 1 ratio counted above -- reports
+// Every wall-clock row -- the 11 ceilings and the 1 ratio counted above -- reports
 // through the recorder defined next to hostFactor(), because an assert that
 // throws on a missed budget ends the file there and leaves the rest unread
 // (2026-10-17: the 120,000-symlink row did that). A row put back on an ordinary
 // assert lowers this count; a new row raises the counts above first.
-// 上面數到的每一個牆鐘列（10 個上限、1 個比值）都必須經過 hostFactor() 旁邊那個記錄器：預算
+// 上面數到的每一個牆鐘列（11 個上限、1 個比值）都必須經過 hostFactor() 旁邊那個記錄器：預算
 // 一沒達到就丟例外的 assert 會讓檔案停在那裡、其餘不讀（2026-10-17 那一列 120,000 個
 // symlink 就是這樣）。改回一般 assert 的列會讓這個數字變小。
 const deferredTimingRows = ownSource.match(/^\s*timingBudget\(/gm) || [];
@@ -9034,7 +9089,7 @@ process.exitCode = 1;
 runOpenCodePluginChecks().then(async (pluginChecks) => {
   const ompChecks = await runOmpHookChecks();
   const stdinStreamChecks = await runStdinStreamErrorChecks();
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + heredocSplitTimingChecks + heredocOracleChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + ompChecks + stdinStreamChecks + shimLoadChecks + heredocLaterBodyChecks + alternateReadingBudgetChecks + heredocBackquoteChecks}`);
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + heredocSplitTimingChecks + heredocOracleChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + ompChecks + stdinStreamChecks + shimLoadChecks + heredocLaterBodyChecks + alternateReadingBudgetChecks + heredocBackquoteChecks + openerReadTimingChecks}`);
   // A missed wall-clock budget fails the run, named, after everything else ran.
   // 牆鐘預算沒達到時，整次執行在其餘全部跑完之後指名失敗。
   if (TIMING_MISSES.length > 0) {

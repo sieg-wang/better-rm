@@ -215,7 +215,7 @@ function decodeAnsiCEscape(input, slashIndex) {
 // 就被刪掉的，所以 `EO\`+換行+`F` 是「未加引號」；舊讀法把它算成加了引號，是同一個繞過的另
 // 一半。反引號那種是兩個 bash 唯一分歧之處（3.2 字面、5.3 展開），這裡模型取「未加引號」，
 // 也就是掃得比較多的那一邊。引號沒有收尾就回傳 `unreadable`。
-function heredocDelimiter(input, start, readsLeft = Infinity) {
+function heredocDelimiter(input, start, readsLeft = Infinity, unclosedParens = null) {
   let index = start;
   // The three substitution readers below scan to end of input when they fail, and
   // the caller then advances ONE character -- the same O(N x len) shape
@@ -324,7 +324,7 @@ function heredocDelimiter(input, start, readsLeft = Infinity) {
     // 標記不做任何展開，所以標記就是那段「字面」文字（實測）。在 `(` 處斷字會把標記算成
     // `$`，任何一行都對不上，內文就吃到輸入結尾、把命令其餘部分藏起來。
     if (char === '$' && input[index + 1] === '(' && failedReads < readsLeft) {
-      const substitution = readParenthesized(input, index + 1);
+      const substitution = readParenthesized(input, index + 1, unclosedParens);
       if (substitution) {
         delimiter += input.slice(index, substitution.end + 1);
         index = substitution.end + 1;
@@ -500,6 +500,10 @@ function shellWords(command) {
   // Per invocation, not per file: each shellWords() call gets its own budget.
   // 逐次呼叫各自一份預算。
   let failedSubstitutionReads = 0;
+  // The `(` openers of this input whose read is known to fail (see
+  // readParenthesized), shared by every read this call makes.
+  // 這段輸入裡「已知讀不完」的 `(` 開頭（見 readParenthesized），這次呼叫的每一次讀取共用。
+  const unclosedParens = new Set();
   // Bodies lifted OUT of the word stream, each remembering which '<<' word it
   // belongs to, so commandTargets can hand a body back to a shell carrier and to
   // nothing else.
@@ -687,7 +691,7 @@ function shellWords(command) {
         quote === '"' && char === '$' && input[index + 1] === '('
         && failedSubstitutionReads < MAX_FAILED_SUBSTITUTION_READS
       ) {
-        const substitution = readParenthesized(input, index + 1);
+        const substitution = readParenthesized(input, index + 1, unclosedParens);
         wordHasDynamicExpansion = true;
         if (substitution) {
           word += input.slice(index, substitution.end + 1);
@@ -777,7 +781,7 @@ function shellWords(command) {
       // `$(which rm) -rf /` tokenize as the word `$` followed by a `(`
       // separator: the executable vanished and the operand scan stopped at that
       // separator before ever reaching the target.
-      const substitution = readParenthesized(input, index + 1);
+      const substitution = readParenthesized(input, index + 1, unclosedParens);
       wordHasDynamicExpansion = true;
       if (substitution) {
         word += input.slice(index, substitution.end + 1);
@@ -857,6 +861,7 @@ function shellWords(command) {
         input,
         index + (stripTabs ? 3 : 2),
         MAX_FAILED_SUBSTITUTION_READS - failedSubstitutionReads,
+        unclosedParens,
       );
       failedSubstitutionReads += parsed.failedReads;
       if (parsed.unreadable !== undefined) unreadableHeredocDelimiters.push(parsed.unreadable);
@@ -1249,7 +1254,43 @@ function readBackquoted(input, openIndex) {
 // （tokenizer 自己的規則）讀標記、整段內文逐行跳過；`$'…'` 照 ANSI-C 處理反斜線；反引號是到下一個
 // 未跳脫反引號為止的巢狀替換。結束行永遠不來、標記讀不出來、反引號沒收尾，都代表結尾未知：回傳
 // null，走呼叫端原本的失敗路徑（在雙引號裡，那條路徑現在會拒絕）。
-function readParenthesized(input, openIndex) {
+// FU-BR-OPENER-TIMING (round 4c): a read that fails can scan to the end of the
+// input, and its caller then advances one character and reads again from the
+// next `$(` -- so N unclosed openers cost N reads to the end, under the
+// failed-read budget of 64. Measured through the stdin entry point at 49f89ae:
+// `echo ` + 63 x `$( ` + 1 MB of `echo pad` lines + `rm -rf /etc` took 7,118 ms,
+// past the live 5,000 ms timeout, where the hook makes no decision. So a caller
+// passes `unclosedParens`, a record of the openers of THIS input whose read is
+// known to fail, and a read of one of them returns null without scanning. The
+// record is exact, not a guess: a read that fails also names the openers it
+// passed through whose own read must fail -- an opener met where no heredoc was
+// pending and the arithmetic mode matches what a read starting there would
+// assume, whose level was still open when the read failed. From there the two
+// reads go through the same states (the depth offset aside), so the read from
+// the inner opener fails at the same place. Same results, same failure counts
+// (the callers still count each failed read against their budget).
+// FU-BR-OPENER-TIMING（round 4c）：讀取失敗時可能一路掃到輸入結尾，呼叫端只前進一個字元、再從下一個 `$(` 讀一次，
+// 所以 N 個不收尾的開頭要讀 N 次到結尾（在 64 次失敗讀取的預算之下）。在 49f89ae 經 stdin 實測：63 個 `$( ` 加
+// 1 MB 填充再加刪除要 7,118 ms，超過 live 5,000 ms 逾時，而逾時的 hook 不做裁決。所以呼叫端傳入 `unclosedParens`：
+// 這段輸入裡「已知讀不完」的開頭，讀到它就直接回 null、不再掃。這份紀錄是精確的、不是猜的：一次失敗的讀取同時指出它經過、
+// 而且自己的讀取也必定失敗的那些開頭——遇到時沒有待讀的 heredoc、算術模式與從那裡開始讀的假設相同，失敗時那一層還沒關。
+// 從那裡起兩次讀取走過相同的狀態（深度差一個常數），所以從內層開頭的讀取會在同一處失敗。結果相同、失敗次數也相同
+// （呼叫端照樣把每次失敗計入預算）。
+function readParenthesized(input, openIndex, unclosedParens = null) {
+  if (unclosedParens !== null && unclosedParens.has(openIndex)) return null;
+  const opened = unclosedParens === null ? null : [];
+  const read = readParenthesizedOnce(input, openIndex, opened);
+  if (read === null && opened !== null) {
+    unclosedParens.add(openIndex);
+    for (const inner of opened) unclosedParens.add(inner.openIndex);
+  }
+  return read;
+}
+
+// One read from `openIndex`; `opened` (or null) collects the inner openers whose
+// own read would go the same way, with the depth their level opens at.
+// 從 `openIndex` 讀一次；`opened`（或 null）收集「自己的讀取會走同一條路」的內層開頭與它那一層開啟時的深度。
+function readParenthesizedOnce(input, openIndex, opened) {
   let depth = 1;
   let innerQuote = '';
   let innerEscaped = false;
@@ -1313,6 +1354,15 @@ function readParenthesized(input, openIndex) {
   const isWordEnd = (k) => k >= input.length || /[\s;&|()<>]/.test(input[k]);
   const wordAt = (k, word) => input.startsWith(word, k) && isWordEnd(k + word.length);
   const KEEPS_COMMAND_POSITION = ['if', 'then', 'else', 'elif', 'while', 'until', 'do', '!', '{', 'time'];
+  // An opener whose own read starts in the state this read is in right after it:
+  // no heredoc pending, and arithmetic exactly when it is `((`.
+  // 自己的讀取會從「這次讀取剛讀過它時」的狀態開始的開頭：沒有待讀的 heredoc，算術模式恰好在它是 `((` 時成立。
+  const noteOpened = (at) => {
+    if (opened !== null && pendingHeredocs.length === 0
+      && (arithmeticFrom !== 0) === (input[at + 1] === '(')) {
+      opened.push({ openIndex: at, depth });
+    }
+  };
   const looksLikeCaseHeader = (k) => {
     let j = k + 4;
     while (j < input.length && (input[j] === ' ' || input[j] === '\t')) j += 1;
@@ -1439,6 +1489,7 @@ function readParenthesized(input, openIndex) {
         commandPosition = true;
         atWordStart = true;
         if (input[i + 1] === '(' && arithmeticFrom === 0) arithmeticFrom = depth;
+        noteOpened(i);
       } else if (innerQuote === '"' && char === '`') {
         const close = readBackquoted(input, i);
         if (close === null) return null;
@@ -1524,12 +1575,15 @@ function readParenthesized(input, openIndex) {
       commandPosition = true;
       atWordStart = true;
       if (input[i + 1] === '(' && arithmeticFrom === 0) arithmeticFrom = depth;
+      noteOpened(i);
     } else if (char === '(') {
       depth += 1;
       if (wasAtWordStart && input[i + 1] === '(' && arithmeticFrom === 0) arithmeticFrom = depth;
+      noteOpened(i);
     } else if (char === ')') {
       const closing = depth;
       depth -= 1;
+      while (opened !== null && opened.length > 0 && opened[opened.length - 1].depth > depth) opened.pop();
       if (arithmeticFrom !== 0 && depth < arithmeticFrom) arithmeticFrom = 0;
       while (caseFrames.length > 0 && caseFrames[caseFrames.length - 1].depth > depth) caseFrames.pop();
       if (quotedFrom.length > 0 && quotedFrom[quotedFrom.length - 1] === closing) {
@@ -1638,6 +1692,9 @@ function commandSubstitutions(command, noCommentSpans = []) {
   // 因此預算花完不再等於沉默：commandTargetsScan 會讀這個計數並推入
   // SUBSTITUTION_BUDGET_EXHAUSTED，整條命令直接拒絕（R5-13）。計數器對外可見正是為了這件事。
   let failedSubstitutionReads = 0;
+  // The `(` openers of this input whose read is known to fail; see readParenthesized.
+  // 這段輸入裡「已知讀不完」的 `(` 開頭；見 readParenthesized。
+  const unclosedParens = new Set();
   const inNoCommentSpan = (i) => noCommentSpans.some(([a, b]) => i >= a && i < b);
   let quote = '';
   let escaped = false;
@@ -1706,7 +1763,7 @@ function commandSubstitutions(command, noCommentSpans = []) {
       // 少做那一次讀取，不會改變別的事。
       let nested = null;
       if (failedSubstitutionReads < MAX_FAILED_SUBSTITUTION_READS) {
-        nested = readParenthesized(input, i + 1);
+        nested = readParenthesized(input, i + 1, unclosedParens);
         // Only a read that was ATTEMPTED and FAILED spends budget. Incrementing
         // outside this guard would keep counting after the cap and turn the
         // counter into a length measurement, which is the one thing the row that
@@ -1761,7 +1818,7 @@ function commandSubstitutions(command, noCommentSpans = []) {
       // 級。共用同一份計數；只修 `$(` 那一半，形狀只要改一個字元就繞過去了。
       let nested = null;
       if (failedSubstitutionReads < MAX_FAILED_SUBSTITUTION_READS) {
-        nested = readParenthesized(input, i + 1);
+        nested = readParenthesized(input, i + 1, unclosedParens);
         if (!nested) failedSubstitutionReads += 1;
       }
       if (nested) {
