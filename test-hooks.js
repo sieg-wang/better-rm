@@ -6233,10 +6233,10 @@ let heredocSplitTimingChecks = 0;
 // heredocs close by `DELIM)`, stand-in placement and container. For each shape,
 // whether bash 5.3.20 and bash 3.2.57 would RUN the stand-in as a command was
 // measured with `bash -n` plus a `;;` command-position differential on a
-// never-called function (NEVER executed). The generator and the bash runs are
-// not in this repository (they live in the 2026-10-17 review campaign's
-// private directory); the runs53/runs32 labels below are that frozen
-// measurement. A shape either bash would run the removal on (runs53 OR runs32)
+// never-called function (NEVER executed). The generator (test/heredoc-oracle/
+// generate.js) and the labeller (label.sh) are in the repository; the
+// runs53/runs32 labels below are a frozen run of them, and the block re-derives
+// the shapes and asserts the rows match. A shape either bash would run the removal on (runs53 OR runs32)
 // MUST be denied here -- this is the regression guard the 7,391-payload corpus
 // and the everyday list could not be (they hold no `DELIM)` shape). What it does
 // NOT cover: every heredoc body in it is a plain word (body0, body1, ebody), so
@@ -6249,7 +6249,7 @@ let heredocSplitTimingChecks = 0;
 // the corpus is silently shrunk.
 // 差分 oracle 語料（BR2-2-REG3）：heredoc 在 $()/<()/反引號 裡的形狀，依 heredoc 數、標記樣式、哪些以 `DELIM)`
 // 收尾、stand-in 位置、容器組合而成。每個形狀「bash 5.3 與 3.2 會不會把 stand-in 當命令跑」是用 bash -n 加 `;;`
-// 命令位置差分量出來的（never-called 函式，從不執行）；產生器與 bash 的執行不在本 repo（在 2026-10-17 審查活動的私有目錄），
+// 命令位置差分量出來的（never-called 函式，從不執行）；產生器（test/heredoc-oracle/generate.js）與標記器（label.sh）在 repo 內，下面的標記是其凍結的一次執行，本區塊會重建形狀並斷言列相符，
 // 下面的 runs53/runs32 是那次凍結的量測。任一 bash 會跑刪除的形狀都必須在這裡被拒。它「沒有」涵蓋的：語料裡的內文都是單字
 // （body0、body1、ebody），所以含引號或 heredoc 運算子的後段內文由下面獨立的 later-body 語料涵蓋（R7-a，round 4b 已修）；
 // 語料的 20 個反引號列（o-backtick，下面有斷言）都在一行剛好是標記之後才關掉替換，所以標記行本身帶著結尾反引號的
@@ -6259,6 +6259,20 @@ let heredocOracleChecks = 0;
   const oracle = JSON.parse(fs.readFileSync(`${__dirname}/test-hooks-heredoc-corpus.json`, 'utf8'));
   assert.ok(oracle.rows.length >= 475 && oracle.mustDeny >= 236,
     `the heredoc oracle corpus was shrunk: ${oracle.rows.length} rows, ${oracle.mustDeny} must-deny`);
+  // The corpus rows are exactly what the in-repo generator emits, in order, so
+  // the frozen labels belong to a shape list that can be regenerated from the
+  // repository (test/heredoc-oracle/generate.js + label.sh; FU-BR-ORACLE-IN-REPO).
+  // 語料的列正好是 repo 內產生器輸出的那一份、順序相同，所以凍結的標記屬於一份可從 repo 重建的形狀清單。
+  const generated = require(`${__dirname}/test/heredoc-oracle/generate.js`).shapes();
+  assert.equal(oracle.rows.length, generated.length,
+    `the heredoc corpus has ${oracle.rows.length} rows but the generator emits ${generated.length}`);
+  for (let i = 0; i < generated.length; i += 1) {
+    assert.equal(oracle.rows[i].id, generated[i].id,
+      `heredoc corpus row ${i} is ${oracle.rows[i].id}, not the generator's ${generated[i].id}`);
+    assert.equal(oracle.rows[i].cmd, generated[i].cmd,
+      `heredoc corpus row ${oracle.rows[i].id} command drifted from the generator`);
+  }
+  heredocOracleChecks += 1;
   let mustDeny = 0;
   for (const row of oracle.rows) {
     if (!row.runs53 && !row.runs32) continue;
@@ -8782,7 +8796,7 @@ withScratchDir('better-rm-shim-load-', (scratch) => {
 const PINNED_TIMING_COUNTERS = [
   ['globTimingChecks', globTimingChecks, 4],
   ['heredocSplitTimingChecks', heredocSplitTimingChecks, 3],
-  ['heredocOracleChecks', heredocOracleChecks, 237],
+  ['heredocOracleChecks', heredocOracleChecks, 238],
   ['findClauseTimingChecks', findClauseTimingChecks, 48],
   ['targetLimitChecks', targetLimitChecks, 9],
   ['alternateReadingBudgetChecks', alternateReadingBudgetChecks, 64],
