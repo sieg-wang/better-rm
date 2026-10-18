@@ -1,0 +1,1136 @@
+{
+ "purpose": "R7-b backquote differential corpus (round 4c). An unquoted backquote substitution at the top level holds a heredoc whose body the closing backquote ends, an unmatched quote or a comment. runs53/runs32 were measured with bash 5.3 and bash 3.2 by `bash -n` plus a `;;` command-position differential on a never-called function wrapping the shape with a harmless stand-in (NEVER executed); regenerate with test/heredoc-backquote/generate.js and label.sh. A shape with runs53 OR runs32 true is one at least one bash runs the removal on, so the guard must DENY it. The gate reads a top-level backquote both as one word, as bash does, and character by character, and unions the targets (KNOWN-RESIDUALS.md R7-b).",
+ "generated": "2026-10-18",
+ "shapes": 188,
+ "mustDeny": 144,
+ "rows": [
+  {
+   "id": "line-n1-plain-c-1-after",
+   "cmd": "x=`cat <<A\nbody0\nA\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-plain-c-1-sameline",
+   "cmd": "x=`cat <<A\nbody0\nA\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-plain-c-1-inside",
+   "cmd": "x=`cat <<A\nrm -rf /etc\nbody0\nA\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n1-plain-c0-after",
+   "cmd": "x=`cat <<A\nbody0\nA`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-plain-c0-sameline",
+   "cmd": "x=`cat <<A\nbody0\nA` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-plain-c0-inside",
+   "cmd": "x=`cat <<A\nrm -rf /etc\nbody0\nA`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n1-quoted-c-1-after",
+   "cmd": "x=`cat <<'A'\nbody0\nA\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-quoted-c-1-sameline",
+   "cmd": "x=`cat <<'A'\nbody0\nA\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-quoted-c-1-inside",
+   "cmd": "x=`cat <<'A'\nrm -rf /etc\nbody0\nA\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n1-quoted-c0-after",
+   "cmd": "x=`cat <<'A'\nbody0\nA`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-quoted-c0-sameline",
+   "cmd": "x=`cat <<'A'\nbody0\nA` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-quoted-c0-inside",
+   "cmd": "x=`cat <<'A'\nrm -rf /etc\nbody0\nA`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n1-dash-c-1-after",
+   "cmd": "x=`cat <<-A\n\tbody0\n\tA\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-dash-c-1-sameline",
+   "cmd": "x=`cat <<-A\n\tbody0\n\tA\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-dash-c-1-inside",
+   "cmd": "x=`cat <<-A\nrm -rf /etc\n\tbody0\n\tA\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n1-dash-c0-after",
+   "cmd": "x=`cat <<-A\n\tbody0\n\tA`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-dash-c0-sameline",
+   "cmd": "x=`cat <<-A\n\tbody0\n\tA` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-dash-c0-inside",
+   "cmd": "x=`cat <<-A\nrm -rf /etc\n\tbody0\n\tA`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n1-empty-c-1-after",
+   "cmd": "x=`cat <<''\nebody\n\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-empty-c-1-sameline",
+   "cmd": "x=`cat <<''\nebody\n\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-empty-c-1-inside",
+   "cmd": "x=`cat <<''\nrm -rf /etc\nebody\n\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n1-empty-c0-after",
+   "cmd": "x=`cat <<''\nebody\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-empty-c0-sameline",
+   "cmd": "x=`cat <<''\nebody\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n1-empty-c0-inside",
+   "cmd": "x=`cat <<''\nrm -rf /etc\nebody\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-plainplain-c-1-after",
+   "cmd": "x=`cat <<A <<B\nbody0\nA\nbody1\nB\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-plainplain-c-1-sameline",
+   "cmd": "x=`cat <<A <<B\nbody0\nA\nbody1\nB\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-plainplain-c-1-inside",
+   "cmd": "x=`cat <<A <<B\nrm -rf /etc\nbody0\nA\nbody1\nB\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-plainplain-c0-after",
+   "cmd": "x=`cat <<A <<B\nbody0\nA`\nbody1\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-plainplain-c0-sameline",
+   "cmd": "x=`cat <<A <<B\nbody0\nA` rm -rf /etc\nbody1\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-plainplain-c0-inside",
+   "cmd": "x=`cat <<A <<B\nrm -rf /etc\nbody0\nA`\nbody1\nB",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-plainplain-c1-after",
+   "cmd": "x=`cat <<A <<B\nbody0\nA\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-plainplain-c1-sameline",
+   "cmd": "x=`cat <<A <<B\nbody0\nA\nbody1\nB` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-plainplain-c1-inside",
+   "cmd": "x=`cat <<A <<B\nrm -rf /etc\nbody0\nA\nbody1\nB`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-quotedquoted-c-1-after",
+   "cmd": "x=`cat <<'A' <<'B'\nbody0\nA\nbody1\nB\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-quotedquoted-c-1-sameline",
+   "cmd": "x=`cat <<'A' <<'B'\nbody0\nA\nbody1\nB\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-quotedquoted-c-1-inside",
+   "cmd": "x=`cat <<'A' <<'B'\nrm -rf /etc\nbody0\nA\nbody1\nB\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-quotedquoted-c0-after",
+   "cmd": "x=`cat <<'A' <<'B'\nbody0\nA`\nbody1\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-quotedquoted-c0-sameline",
+   "cmd": "x=`cat <<'A' <<'B'\nbody0\nA` rm -rf /etc\nbody1\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-quotedquoted-c0-inside",
+   "cmd": "x=`cat <<'A' <<'B'\nrm -rf /etc\nbody0\nA`\nbody1\nB",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-quotedquoted-c1-after",
+   "cmd": "x=`cat <<'A' <<'B'\nbody0\nA\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-quotedquoted-c1-sameline",
+   "cmd": "x=`cat <<'A' <<'B'\nbody0\nA\nbody1\nB` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-quotedquoted-c1-inside",
+   "cmd": "x=`cat <<'A' <<'B'\nrm -rf /etc\nbody0\nA\nbody1\nB`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-dashplain-c-1-after",
+   "cmd": "x=`cat <<-A <<B\n\tbody0\n\tA\nbody1\nB\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-dashplain-c-1-sameline",
+   "cmd": "x=`cat <<-A <<B\n\tbody0\n\tA\nbody1\nB\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-dashplain-c-1-inside",
+   "cmd": "x=`cat <<-A <<B\nrm -rf /etc\n\tbody0\n\tA\nbody1\nB\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-dashplain-c0-after",
+   "cmd": "x=`cat <<-A <<B\n\tbody0\n\tA`\nbody1\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-dashplain-c0-sameline",
+   "cmd": "x=`cat <<-A <<B\n\tbody0\n\tA` rm -rf /etc\nbody1\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-dashplain-c0-inside",
+   "cmd": "x=`cat <<-A <<B\nrm -rf /etc\n\tbody0\n\tA`\nbody1\nB",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-dashplain-c1-after",
+   "cmd": "x=`cat <<-A <<B\n\tbody0\n\tA\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-dashplain-c1-sameline",
+   "cmd": "x=`cat <<-A <<B\n\tbody0\n\tA\nbody1\nB` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-dashplain-c1-inside",
+   "cmd": "x=`cat <<-A <<B\nrm -rf /etc\n\tbody0\n\tA\nbody1\nB`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-emptyplain-c-1-after",
+   "cmd": "x=`cat <<'' <<B\nebody\n\nbody1\nB\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-emptyplain-c-1-sameline",
+   "cmd": "x=`cat <<'' <<B\nebody\n\nbody1\nB\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-emptyplain-c-1-inside",
+   "cmd": "x=`cat <<'' <<B\nrm -rf /etc\nebody\n\nbody1\nB\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-emptyplain-c0-after",
+   "cmd": "x=`cat <<'' <<B\nebody\n`\nbody1\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-emptyplain-c0-sameline",
+   "cmd": "x=`cat <<'' <<B\nebody\n` rm -rf /etc\nbody1\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-emptyplain-c0-inside",
+   "cmd": "x=`cat <<'' <<B\nrm -rf /etc\nebody\n`\nbody1\nB",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-emptyplain-c1-after",
+   "cmd": "x=`cat <<'' <<B\nebody\n\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-emptyplain-c1-sameline",
+   "cmd": "x=`cat <<'' <<B\nebody\n\nbody1\nB` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-emptyplain-c1-inside",
+   "cmd": "x=`cat <<'' <<B\nrm -rf /etc\nebody\n\nbody1\nB`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-plainempty-c-1-after",
+   "cmd": "x=`cat <<A <<''\nbody0\nA\nebody\n\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-plainempty-c-1-sameline",
+   "cmd": "x=`cat <<A <<''\nbody0\nA\nebody\n\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-plainempty-c-1-inside",
+   "cmd": "x=`cat <<A <<''\nrm -rf /etc\nbody0\nA\nebody\n\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-plainempty-c0-after",
+   "cmd": "x=`cat <<A <<''\nbody0\nA`\nebody\n\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-plainempty-c0-sameline",
+   "cmd": "x=`cat <<A <<''\nbody0\nA` rm -rf /etc\nebody\n",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-plainempty-c0-inside",
+   "cmd": "x=`cat <<A <<''\nrm -rf /etc\nbody0\nA`\nebody\n",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-plainempty-c1-after",
+   "cmd": "x=`cat <<A <<''\nbody0\nA\nebody\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-plainempty-c1-sameline",
+   "cmd": "x=`cat <<A <<''\nbody0\nA\nebody\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-plainempty-c1-inside",
+   "cmd": "x=`cat <<A <<''\nrm -rf /etc\nbody0\nA\nebody\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-emptyempty-c-1-after",
+   "cmd": "x=`cat <<'' <<''\nebody\n\nebody\n\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-emptyempty-c-1-sameline",
+   "cmd": "x=`cat <<'' <<''\nebody\n\nebody\n\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-emptyempty-c-1-inside",
+   "cmd": "x=`cat <<'' <<''\nrm -rf /etc\nebody\n\nebody\n\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-emptyempty-c0-after",
+   "cmd": "x=`cat <<'' <<''\nebody\n`\nebody\n\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-emptyempty-c0-sameline",
+   "cmd": "x=`cat <<'' <<''\nebody\n` rm -rf /etc\nebody\n",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-emptyempty-c0-inside",
+   "cmd": "x=`cat <<'' <<''\nrm -rf /etc\nebody\n`\nebody\n",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-emptyempty-c1-after",
+   "cmd": "x=`cat <<'' <<''\nebody\n\nebody\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-emptyempty-c1-sameline",
+   "cmd": "x=`cat <<'' <<''\nebody\n\nebody\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-emptyempty-c1-inside",
+   "cmd": "x=`cat <<'' <<''\nrm -rf /etc\nebody\n\nebody\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-quotedplain-c-1-after",
+   "cmd": "x=`cat <<'A' <<B\nbody0\nA\nbody1\nB\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-quotedplain-c-1-sameline",
+   "cmd": "x=`cat <<'A' <<B\nbody0\nA\nbody1\nB\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-quotedplain-c-1-inside",
+   "cmd": "x=`cat <<'A' <<B\nrm -rf /etc\nbody0\nA\nbody1\nB\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-quotedplain-c0-after",
+   "cmd": "x=`cat <<'A' <<B\nbody0\nA`\nbody1\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-quotedplain-c0-sameline",
+   "cmd": "x=`cat <<'A' <<B\nbody0\nA` rm -rf /etc\nbody1\nB",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-quotedplain-c0-inside",
+   "cmd": "x=`cat <<'A' <<B\nrm -rf /etc\nbody0\nA`\nbody1\nB",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-quotedplain-c1-after",
+   "cmd": "x=`cat <<'A' <<B\nbody0\nA\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-quotedplain-c1-sameline",
+   "cmd": "x=`cat <<'A' <<B\nbody0\nA\nbody1\nB` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-quotedplain-c1-inside",
+   "cmd": "x=`cat <<'A' <<B\nrm -rf /etc\nbody0\nA\nbody1\nB`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-dashempty-c-1-after",
+   "cmd": "x=`cat <<-A <<''\n\tbody0\n\tA\nebody\n\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-dashempty-c-1-sameline",
+   "cmd": "x=`cat <<-A <<''\n\tbody0\n\tA\nebody\n\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-dashempty-c-1-inside",
+   "cmd": "x=`cat <<-A <<''\nrm -rf /etc\n\tbody0\n\tA\nebody\n\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-dashempty-c0-after",
+   "cmd": "x=`cat <<-A <<''\n\tbody0\n\tA`\nebody\n\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-dashempty-c0-sameline",
+   "cmd": "x=`cat <<-A <<''\n\tbody0\n\tA` rm -rf /etc\nebody\n",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-dashempty-c0-inside",
+   "cmd": "x=`cat <<-A <<''\nrm -rf /etc\n\tbody0\n\tA`\nebody\n",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n2-dashempty-c1-after",
+   "cmd": "x=`cat <<-A <<''\n\tbody0\n\tA\nebody\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-dashempty-c1-sameline",
+   "cmd": "x=`cat <<-A <<''\n\tbody0\n\tA\nebody\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n2-dashempty-c1-inside",
+   "cmd": "x=`cat <<-A <<''\nrm -rf /etc\n\tbody0\n\tA\nebody\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n3-plainplainplain-c-1-after",
+   "cmd": "x=`cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-plainplainplain-c-1-sameline",
+   "cmd": "x=`cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-plainplainplain-c-1-inside",
+   "cmd": "x=`cat <<A <<B <<C\nrm -rf /etc\nbody0\nA\nbody1\nB\nbody2\nC\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n3-plainplainplain-c0-after",
+   "cmd": "x=`cat <<A <<B <<C\nbody0\nA`\nbody1\nB\nbody2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-plainplainplain-c0-sameline",
+   "cmd": "x=`cat <<A <<B <<C\nbody0\nA` rm -rf /etc\nbody1\nB\nbody2\nC",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-plainplainplain-c0-inside",
+   "cmd": "x=`cat <<A <<B <<C\nrm -rf /etc\nbody0\nA`\nbody1\nB\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n3-plainplainplain-c1-after",
+   "cmd": "x=`cat <<A <<B <<C\nbody0\nA\nbody1\nB`\nbody2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-plainplainplain-c1-sameline",
+   "cmd": "x=`cat <<A <<B <<C\nbody0\nA\nbody1\nB` rm -rf /etc\nbody2\nC",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-plainplainplain-c1-inside",
+   "cmd": "x=`cat <<A <<B <<C\nrm -rf /etc\nbody0\nA\nbody1\nB`\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n3-plainplainplain-c2-after",
+   "cmd": "x=`cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-plainplainplain-c2-sameline",
+   "cmd": "x=`cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-plainplainplain-c2-inside",
+   "cmd": "x=`cat <<A <<B <<C\nrm -rf /etc\nbody0\nA\nbody1\nB\nbody2\nC`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n3-quotedquotedquoted-c-1-after",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-quotedquotedquoted-c-1-sameline",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-quotedquotedquoted-c-1-inside",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nrm -rf /etc\nbody0\nA\nbody1\nB\nbody2\nC\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n3-quotedquotedquoted-c0-after",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nbody0\nA`\nbody1\nB\nbody2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-quotedquotedquoted-c0-sameline",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nbody0\nA` rm -rf /etc\nbody1\nB\nbody2\nC",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-quotedquotedquoted-c0-inside",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nrm -rf /etc\nbody0\nA`\nbody1\nB\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n3-quotedquotedquoted-c1-after",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB`\nbody2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-quotedquotedquoted-c1-sameline",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB` rm -rf /etc\nbody2\nC",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-quotedquotedquoted-c1-inside",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nrm -rf /etc\nbody0\nA\nbody1\nB`\nbody2\nC",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n3-quotedquotedquoted-c2-after",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-quotedquotedquoted-c2-sameline",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-quotedquotedquoted-c2-inside",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nrm -rf /etc\nbody0\nA\nbody1\nB\nbody2\nC`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n3-dashplainempty-c-1-after",
+   "cmd": "x=`cat <<-A <<B <<''\n\tbody0\n\tA\nbody1\nB\nebody\n\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-dashplainempty-c-1-sameline",
+   "cmd": "x=`cat <<-A <<B <<''\n\tbody0\n\tA\nbody1\nB\nebody\n\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-dashplainempty-c-1-inside",
+   "cmd": "x=`cat <<-A <<B <<''\nrm -rf /etc\n\tbody0\n\tA\nbody1\nB\nebody\n\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n3-dashplainempty-c0-after",
+   "cmd": "x=`cat <<-A <<B <<''\n\tbody0\n\tA`\nbody1\nB\nebody\n\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-dashplainempty-c0-sameline",
+   "cmd": "x=`cat <<-A <<B <<''\n\tbody0\n\tA` rm -rf /etc\nbody1\nB\nebody\n",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-dashplainempty-c0-inside",
+   "cmd": "x=`cat <<-A <<B <<''\nrm -rf /etc\n\tbody0\n\tA`\nbody1\nB\nebody\n",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n3-dashplainempty-c1-after",
+   "cmd": "x=`cat <<-A <<B <<''\n\tbody0\n\tA\nbody1\nB`\nebody\n\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-dashplainempty-c1-sameline",
+   "cmd": "x=`cat <<-A <<B <<''\n\tbody0\n\tA\nbody1\nB` rm -rf /etc\nebody\n",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-dashplainempty-c1-inside",
+   "cmd": "x=`cat <<-A <<B <<''\nrm -rf /etc\n\tbody0\n\tA\nbody1\nB`\nebody\n",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "line-n3-dashplainempty-c2-after",
+   "cmd": "x=`cat <<-A <<B <<''\n\tbody0\n\tA\nbody1\nB\nebody\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-dashplainempty-c2-sameline",
+   "cmd": "x=`cat <<-A <<B <<''\n\tbody0\n\tA\nbody1\nB\nebody\n` rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "line-n3-dashplainempty-c2-inside",
+   "cmd": "x=`cat <<-A <<B <<''\nrm -rf /etc\n\tbody0\n\tA\nbody1\nB\nebody\n`",
+   "runs53": false,
+   "runs32": false
+  },
+  {
+   "id": "tail-n1-plain-c-1-after",
+   "cmd": "x=`cat <<A\nbody0\nA`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n1-plain-c0-after",
+   "cmd": "x=`cat <<A\nbody0\nA)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n1-quoted-c-1-after",
+   "cmd": "x=`cat <<'A'\nbody0\nA`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n1-quoted-c0-after",
+   "cmd": "x=`cat <<'A'\nbody0\nA)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n1-dash-c-1-after",
+   "cmd": "x=`cat <<-A\nbody0\n\tA`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n1-dash-c0-after",
+   "cmd": "x=`cat <<-A\nbody0\n\tA)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n1-empty-c-1-after",
+   "cmd": "x=`cat <<''\nbody0\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n1-empty-c0-after",
+   "cmd": "x=`cat <<''\nbody0\n)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-plainplain-c-1-after",
+   "cmd": "x=`cat <<A <<B\nbody0\nA\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-plainplain-c0-after",
+   "cmd": "x=`cat <<A <<B\nbody0\nA)\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-plainplain-c1-after",
+   "cmd": "x=`cat <<A <<B\nbody0\nA\nbody1\nB)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-plainquoted-c-1-after",
+   "cmd": "x=`cat <<A <<'B'\nbody0\nA\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-plainquoted-c0-after",
+   "cmd": "x=`cat <<A <<'B'\nbody0\nA)\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-plainquoted-c1-after",
+   "cmd": "x=`cat <<A <<'B'\nbody0\nA\nbody1\nB)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-plainempty-c-1-after",
+   "cmd": "x=`cat <<A <<''\nbody0\nA\nbody1\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-plainempty-c0-after",
+   "cmd": "x=`cat <<A <<''\nbody0\nA)\nbody1\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-plainempty-c1-after",
+   "cmd": "x=`cat <<A <<''\nbody0\nA\nbody1\n)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-quotedplain-c-1-after",
+   "cmd": "x=`cat <<'A' <<B\nbody0\nA\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-quotedplain-c0-after",
+   "cmd": "x=`cat <<'A' <<B\nbody0\nA)\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-quotedplain-c1-after",
+   "cmd": "x=`cat <<'A' <<B\nbody0\nA\nbody1\nB)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-quotedquoted-c-1-after",
+   "cmd": "x=`cat <<'A' <<'B'\nbody0\nA\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-quotedquoted-c0-after",
+   "cmd": "x=`cat <<'A' <<'B'\nbody0\nA)\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-quotedquoted-c1-after",
+   "cmd": "x=`cat <<'A' <<'B'\nbody0\nA\nbody1\nB)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-quotedempty-c-1-after",
+   "cmd": "x=`cat <<'A' <<''\nbody0\nA\nbody1\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-quotedempty-c0-after",
+   "cmd": "x=`cat <<'A' <<''\nbody0\nA)\nbody1\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-quotedempty-c1-after",
+   "cmd": "x=`cat <<'A' <<''\nbody0\nA\nbody1\n)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-dashplain-c-1-after",
+   "cmd": "x=`cat <<-A <<B\nbody0\n\tA\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-dashplain-c0-after",
+   "cmd": "x=`cat <<-A <<B\nbody0\n\tA)\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-dashplain-c1-after",
+   "cmd": "x=`cat <<-A <<B\nbody0\n\tA\nbody1\nB)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-dashquoted-c-1-after",
+   "cmd": "x=`cat <<-A <<'B'\nbody0\n\tA\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-dashquoted-c0-after",
+   "cmd": "x=`cat <<-A <<'B'\nbody0\n\tA)\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-dashquoted-c1-after",
+   "cmd": "x=`cat <<-A <<'B'\nbody0\n\tA\nbody1\nB)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-dashempty-c-1-after",
+   "cmd": "x=`cat <<-A <<''\nbody0\n\tA\nbody1\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-dashempty-c0-after",
+   "cmd": "x=`cat <<-A <<''\nbody0\n\tA)\nbody1\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-dashempty-c1-after",
+   "cmd": "x=`cat <<-A <<''\nbody0\n\tA\nbody1\n)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-emptyplain-c-1-after",
+   "cmd": "x=`cat <<'' <<B\nbody0\n\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-emptyplain-c0-after",
+   "cmd": "x=`cat <<'' <<B\nbody0\n)\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-emptyplain-c1-after",
+   "cmd": "x=`cat <<'' <<B\nbody0\n\nbody1\nB)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-emptyquoted-c-1-after",
+   "cmd": "x=`cat <<'' <<'B'\nbody0\n\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-emptyquoted-c0-after",
+   "cmd": "x=`cat <<'' <<'B'\nbody0\n)\nbody1\nB`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-emptyquoted-c1-after",
+   "cmd": "x=`cat <<'' <<'B'\nbody0\n\nbody1\nB)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-emptyempty-c-1-after",
+   "cmd": "x=`cat <<'' <<''\nbody0\n\nbody1\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-emptyempty-c0-after",
+   "cmd": "x=`cat <<'' <<''\nbody0\n)\nbody1\n`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n2-emptyempty-c1-after",
+   "cmd": "x=`cat <<'' <<''\nbody0\n\nbody1\n)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n3-plainplainplain-c0-after",
+   "cmd": "x=`cat <<A <<B <<C\nbody0\nA)\nbody1\nB\nbody2\nC`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n3-plainplainplain-c1-after",
+   "cmd": "x=`cat <<A <<B <<C\nbody0\nA\nbody1\nB)\nbody2\nC`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n3-plainplainplain-c2-after",
+   "cmd": "x=`cat <<A <<B <<C\nbody0\nA\nbody1\nB\nbody2\nC)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n3-quotedquotedquoted-c0-after",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nbody0\nA)\nbody1\nB\nbody2\nC`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n3-quotedquotedquoted-c1-after",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB)\nbody2\nC`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "tail-n3-quotedquotedquoted-c2-after",
+   "cmd": "x=`cat <<'A' <<'B' <<'C'\nbody0\nA\nbody1\nB\nbody2\nC)`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "other-apos-nl",
+   "cmd": "x=`echo it's`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "other-apos-semi",
+   "cmd": "x=`echo it's` ; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "other-dquote-nl",
+   "cmd": "x=`echo \"x`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "other-dquote-semi",
+   "cmd": "x=`echo \"x` ; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "other-comment-nl",
+   "cmd": "x=`echo #`\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "other-comment-semi",
+   "cmd": "x=`echo #` ; rm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  }
+ ]
+}

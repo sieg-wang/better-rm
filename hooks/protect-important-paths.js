@@ -469,6 +469,31 @@ function alternateReadingText({ input, resumeAt, end, later }) {
 // 只有「失敗」的讀取會花預算，所以真實命令（替換都收得了尾）永遠碰不到它。
 const MAX_FAILED_SUBSTITUTION_READS = 64;
 
+// R7-b (round 4c): an UNQUOTED backquote at the top level of a command. bash
+// reads it as one word, from the backquote to the next one no backslash escapes
+// (readBackquoted), and parses its inside only when the substitution runs, so
+// what follows the closing backquote is read as shell of its own. Read character
+// by character, as shellWords does by default, a heredoc opened inside the
+// backquote whose body the closing backquote ends (the backquote on its delimiter
+// line, or an empty `<<''` body that reaches it), an unmatched quote or a `#`
+// inside it runs past the closing backquote and can hide a removal after it:
+// `x=` + backquote + `cat <<A` / `body0` / `A` + backquote / `rm -rf /etc` was
+// ALLOWED at the round-4b tip. evaluate() reads a command twice when its first
+// reading allows it and met such a backquote: again with readBackquotesAsWords
+// set, and refuses the command when either reading refuses it. The first reading
+// is kept as it was; see evaluate().
+// R7-b（round 4c）：命令頂層、未加引號的反引號。bash 把它讀成一個字（從反引號到下一個沒被反斜線跳脫的反引號，
+// readBackquoted），裡面要等替換執行時才解析，所以結尾反引號之後的文字自成 shell。shellWords 預設逐字讀它：
+// 反引號裡開的 heredoc 若由結尾反引號結束內文（反引號在標記行上，或空的 `<<''` 內文碰到它）、不成對的引號、
+// 或其中的 `#`，都會越過結尾反引號，把後面的刪除藏起來。evaluate() 在第一種讀法放行、而且遇到這種反引號時再讀一次
+// （設定 readBackquotesAsWords），任一讀法拒絕就拒絕；第一種讀法維持原樣，見 evaluate()。
+let readBackquotesAsWords = false;
+// How many unquoted top-level backquotes shellWords met while reading them
+// character by character; evaluate() reads a command a second time only when its
+// first reading met at least one.
+// shellWords 逐字讀時遇到幾個頂層未加引號的反引號；evaluate() 只在第一種讀法遇到過時才讀第二次。
+let topLevelBackquotesRead = 0;
+
 function shellWords(command) {
   const words = [];
   const dynamicExpansions = [];
@@ -1093,8 +1118,26 @@ function shellWords(command) {
     } else if (/\s/.test(char)) {
       if (word) pushWord(word), word = '';
       atWordStart = true;
+    } else if (
+      char === '`' && readBackquotesAsWords
+      && failedSubstitutionReads < MAX_FAILED_SUBSTITUTION_READS
+    ) {
+      // bash's reading of a top-level backquote (R7-b): one word, read with the
+      // same reader and budget the double-quote arm above uses. A backquote that
+      // never closes falls back to the character-by-character walk.
+      // bash 對頂層反引號的讀法（R7-b）：一個字，用上面雙引號那個臂同一個 reader 與預算；收不了尾就退回逐字讀。
+      const backquoted = readBackquoted(input, index);
+      wordHasDynamicExpansion = true;
+      if (backquoted !== null) {
+        word += input.slice(index, backquoted + 1);
+        index = backquoted;
+      } else {
+        failedSubstitutionReads += 1;
+        word += char;
+      }
     } else {
       if (char === '$' || char === '`') wordHasDynamicExpansion = true;
+      if (char === '`' && !readBackquotesAsWords) topLevelBackquotesRead += 1;
       word += char;
     }
   }
@@ -3774,12 +3817,20 @@ const wrapperCommands = new Set([
   'rm', 'rmdir', 'better-rm',
 ]);
 
-function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, expansionEnv = null) {
+// `readingBudget` is the R7-a second-reading budget ({ alternateReadings,
+// alternateLength }); evaluate() passes one object to both of its readings
+// (R7-b) so the invocation has one budget, and a caller that passes none gets its
+// own.
+// `readingBudget` 是 R7-a 第二種讀法的預算；evaluate() 把同一個物件交給它的兩種讀法（R7-b），整次呼叫只有一份預算；
+// 沒傳的呼叫端各自一份。
+function commandTargets(
+  command, depth = 0, bodiesAreCodeFromCaller = false, expansionEnv = null, readingBudget = null,
+) {
   const owned = nestedScanMemo === null;
   if (owned) {
     nestedScanMemo = {
       expansionEnv, scanned: new Set(), applyBuilt: new Set(), applyBytes: 0,
-      alternateReadings: 0, alternateLength: 0,
+      readingBudget: readingBudget || { alternateReadings: 0, alternateLength: 0 },
     };
   }
   try {
@@ -6707,7 +6758,8 @@ function commandTargetsScanOneReading(
   // past the budget is refused without being read.
   // 每一段另讀在建出文字與掃描「之前」先計入單次呼叫的預算（ALTERNATE_READING_BUDGET_EXHAUSTED），超過預算的那一段
   // 不讀就拒絕。
-  const alternateBudget = nestedScanMemo || { alternateReadings: 0, alternateLength: 0 };
+  const alternateBudget = nestedScanMemo
+    ? nestedScanMemo.readingBudget : { alternateReadings: 0, alternateLength: 0 };
   for (const alternate of (words.alternateReadings || [])) {
     alternateBudget.alternateReadings += 1;
     if (alternateBudget.alternateReadings > MAX_ALTERNATE_READINGS) {
@@ -7070,6 +7122,31 @@ function alternateReadingBudgetDenial(isCopilot, isAntigravity, isCursor, isGrok
   return denialShape(zh + ' / ' + en, isCopilot, isAntigravity, isCursor, isGrok);
 }
 
+// The refusal for the R7-b second reading past the reading budget (round 4c; see
+// evaluate()). Its own rule for the reason each refusal here has one: the thing
+// this gate did not read is the command as bash reads its backquotes, not a
+// heredoc tail. The way out removes the top-level backquote, which is what makes
+// this gate read the command a second time.
+// R7-b 第二種讀法超過讀取預算時的拒絕（round 4c；見 evaluate()）。自成一條規則：這道閘門沒讀的是「照 bash 讀反引號的
+// 那條命令」，不是 heredoc 的尾段。出路是拿掉頂層反引號，讓閘門不必再讀第二次。
+function backquoteReadingBudgetDenial(isCopilot, isAntigravity, isCursor, isGrok) {
+  const zh = '拒絕執行：這條命令的頂層有未加引號的反引號替換。bash 把一個反引號替換讀成一個字；這道閘門除了'
+    + '逐字讀這條命令，也照 bash 的方式把整條命令再讀一次，而這第二次讀取超過了單次判定的讀取預算（'
+    + MAX_ALTERNATE_READINGS + ' 段，或合計 ' + MAX_ALTERNATE_READING_LENGTH + ' 個字元），所以沒有讀——'
+    + '包括只有那種讀法才看得到的刪除（這不是說一定有，是說這道閘門沒有讀到）。規則：backquote reading budget exhausted。'
+    + '繞法：把反引號替換改寫成 `$( )`，或把文字放進檔案再讓命令去讀。';
+  const en = 'Refused to run: this command has an unquoted backquote substitution at its top level.'
+    + ' bash reads a backquote substitution as one word; besides reading this command character by'
+    + ' character, this gate reads the whole command again the way bash does, and that second reading'
+    + ' went past the per-invocation reading budget (' + MAX_ALTERNATE_READINGS + ' readings, or '
+    + MAX_ALTERNATE_READING_LENGTH + ' characters of them in all), so it went unread -- including any'
+    + ' deletion only that reading would show (this does not say one is there; it says this gate did'
+    + ' not read it). Rule: backquote reading budget exhausted.'
+    + ' Workaround: write the substitution as `$( )` instead of backquotes, or put the text in a file'
+    + ' and have the command read it.';
+  return denialShape(zh + ' / ' + en, isCopilot, isAntigravity, isCursor, isGrok);
+}
+
 function denial(reason, isCopilot, isAntigravity, isCursor, isGrok) {
   const message = `拒絕刪除受保護的目錄：${reason} / Refused to remove protected directory: ${reason}`;
   return denialShape(message, isCopilot, isAntigravity, isCursor, isGrok);
@@ -7107,6 +7184,16 @@ function denialShape(message, isCopilot, isAntigravity, isCursor, isGrok) {
           permissionDecisionReason: message,
         },
       };
+}
+
+// Whether an answer of evaluate() is a refusal, in any of the shapes
+// denialShape() builds; every other answer is an allowance (R7-b, round 4c).
+// evaluate() 的答案是不是拒絕（denialShape() 建的任一種形狀）；其他答案都是放行（R7-b，round 4c）。
+function refuses(answer) {
+  if (!answer) return false;
+  if (answer.hookSpecificOutput) return answer.hookSpecificOutput.permissionDecision === 'deny';
+  return answer.permissionDecision === 'deny' || answer.permission === 'deny'
+    || answer.decision === 'deny' || answer.allow_tool === false;
 }
 
 // The refusal for a command that is not a string (BRM-cd-02). Its own rule and
@@ -7155,6 +7242,66 @@ function evaluate(payload, env = process.env) {
   const extraDirs = (env.BETTER_RM_PROTECTED_DIRS || '')
     .split(path.delimiter).filter(Boolean).map((item) => path.resolve(cwd, item));
 
+  // R7-b (round 4c): READ TWICE when a top-level backquote was met. The first
+  // reading is the one this gate has always made, kept whole: when it refuses,
+  // that refusal is the answer, unchanged. When it allows a command in which
+  // shellWords met an unquoted top-level backquote, the command is read again
+  // with readBackquotesAsWords set -- bash's reading of such a backquote -- and
+  // refused when that reading refuses it, so a removal either reading surfaces is
+  // refused. A command with no such backquote is read once, as before. Keeping the
+  // first reading whole also keeps its refusals of shapes where bash runs no
+  // removal (in test-hooks.js's backquote corpus, a removal that is heredoc data
+  // inside the backquote), deliberately: dropping them is a separate decision.
+  // Bounded as the R7-a readings are: the second reading counts as one reading of
+  // the command's length against the same budget object, checked before it runs
+  // and refused unread past it (rule: backquote reading budget exhausted). The
+  // two readings share that budget and the judging budget, and a target the
+  // first reading judged ordinary is not judged again. One second reading per
+  // invocation, never one per backquote.
+  // R7-b（round 4c）：遇到頂層反引號時讀兩次。第一種讀法就是這道閘門一直以來的讀法，整個保留：它拒絕時就以那個拒絕作答、
+  // 不變。它放行、而 shellWords 在這條命令裡遇到過頂層未加引號的反引號時，設定 readBackquotesAsWords（bash 對這種
+  // 反引號的讀法）再讀一次，那一次拒絕就拒絕；所以任一讀法看得到的刪除都會被擋。沒有這種反引號的命令照舊只讀一次。
+  // 保留第一種讀法，也就保留了它對「bash 不會執行刪除」的形狀的拒絕（test-hooks.js 反引號語料裡，刪除是反引號裡的
+  // heredoc 資料），這是刻意的：要不要拿掉是另一個決定。與 R7-a 一樣有界：第二次讀取以「一段、整條命令的長度」計入同一份
+  // 預算，跑之前先檢查，超過就不讀而拒絕（規則 backquote reading budget exhausted）；兩次讀取共用這份預算與判定的時間預算，
+  // 第一次判定為普通的目標不再判第二次。每次呼叫最多一次第二種讀法，不是每個反引號一次。
+  const budgets = {
+    readings: { alternateReadings: 0, alternateLength: 0 },
+    judgingMs: JUDGING_BUDGET_MS,
+    cleared: new Set(),
+    secondReading: false,
+  };
+  topLevelBackquotesRead = 0;
+  const firstReading = evaluateReading(
+    command, cwd, home, extraDirs, env, budgets, isCopilot, isAntigravity, isCursor, isGrok,
+  );
+  if (refuses(firstReading) || topLevelBackquotesRead === 0) return firstReading;
+  budgets.readings.alternateReadings += 1;
+  budgets.readings.alternateLength += command.length;
+  if (
+    budgets.readings.alternateReadings > MAX_ALTERNATE_READINGS
+    || budgets.readings.alternateLength > MAX_ALTERNATE_READING_LENGTH
+  ) {
+    return backquoteReadingBudgetDenial(isCopilot, isAntigravity, isCursor, isGrok);
+  }
+  budgets.secondReading = true;
+  readBackquotesAsWords = true;
+  try {
+    const secondReading = evaluateReading(
+      command, cwd, home, extraDirs, env, budgets, isCopilot, isAntigravity, isCursor, isGrok,
+    );
+    return refuses(secondReading) ? secondReading : firstReading;
+  } finally {
+    readBackquotesAsWords = false;
+  }
+}
+
+// One reading of the command (R7-b): what evaluate() did in one pass before round
+// 4c. `budgets` carries what the readings share.
+// 命令的一種讀法（R7-b）：round 4c 之前 evaluate() 一趟做完的事。`budgets` 帶著兩種讀法共用的東西。
+function evaluateReading(
+  command, cwd, home, extraDirs, env, budgets, isCopilot, isAntigravity, isCursor, isGrok,
+) {
   // The values the allowlisted variables really have for THIS call. HOME is the
   // one the rest of this file already trusts; PWD is the tool call's own cwd,
   // which is where the command will run, not the hook process's directory.
@@ -7168,8 +7315,9 @@ function evaluate(payload, env = process.env) {
   // way -- the order decides what the user reads, not whether it is denied.
   // 刻意分兩輪。一條命令可能同時寫了真正受保護的路徑，又帶著這個閘門解不開的變數；對使用者
   // 更有用的是前者，所以由它決定訊息。兩者都會拒絕，順序只決定使用者看到什麼。
-  const targets = commandTargets(command, 0, false, expansionEnv);
-  const deadline = Date.now() + JUDGING_BUDGET_MS;
+  const targets = commandTargets(command, 0, false, expansionEnv, budgets.readings);
+  const judgingStarted = Date.now();
+  const deadline = judgingStarted + budgets.judgingMs;
   let judged = 0;
   for (; judged < targets.length; judged += 1) {
     // The clock is read on EVERY target, so the budget can be overrun by at most
@@ -7211,9 +7359,14 @@ function evaluate(payload, env = process.env) {
       || target.startsWith(UNREADABLE_HEREDOC_DELIMITER)
       || target.startsWith(UNREADABLE_QUOTED_SUBSTITUTION)
     ) continue;
+    // R7-b: a target the first reading judged ordinary is not judged again.
+    // R7-b：第一種讀法判定為普通的目標不再判一次。
+    if (budgets.secondReading && budgets.cleared.has(target)) continue;
     const reason = protectedReason(target, cwd, home, extraDirs);
     if (reason) return denial(reason, isCopilot, isAntigravity, isCursor, isGrok);
+    budgets.cleared.add(target);
   }
+  budgets.judgingMs = Math.max(0, budgets.judgingMs - (Date.now() - judgingStarted));
   // Out of time with targets left. A protected path found BEFORE the budget ran
   // out still wins the message, because that is the useful thing to be told;
   // everything after it is unread, and unread is refused.

@@ -6250,16 +6250,16 @@ let heredocSplitTimingChecks = 0;
 // the separate later-body corpus below (R7-a, closed in round 4b); and its 20
 // backquote rows (o-backtick, asserted below) all close the substitution after
 // an exact delimiter line, so a heredoc whose delimiter line carries the closing
-// backquote (`A` + backquote, R7-b) is outside it too. R7-b is still open
-// (KNOWN-RESIDUALS.md). This loop fails if any must-deny shape is allowed or if
-// the corpus is silently shrunk.
+// backquote (`A` + backquote, R7-b) is outside it too -- that is the separate
+// backquote corpus below (R7-b, closed in round 4c). This loop fails if any
+// must-deny shape is allowed or if the corpus is silently shrunk.
 // 差分 oracle 語料（BR2-2-REG3）：heredoc 在 $()/<()/反引號 裡的形狀，依 heredoc 數、標記樣式、哪些以 `DELIM)`
 // 收尾、stand-in 位置、容器組合而成。每個形狀「bash 5.3 與 3.2 會不會把 stand-in 當命令跑」是用 bash -n 加 `;;`
 // 命令位置差分量出來的（never-called 函式，從不執行）；產生器（test/heredoc-oracle/generate.js）與標記器（label.sh）在 repo 內，下面的標記是其凍結的一次執行，本區塊會重建形狀並斷言列相符，
 // 下面的 runs53/runs32 是那次凍結的量測。任一 bash 會跑刪除的形狀都必須在這裡被拒。它「沒有」涵蓋的：語料裡的內文都是單字
 // （body0、body1、ebody），所以含引號或 heredoc 運算子的後段內文由下面獨立的 later-body 語料涵蓋（R7-a，round 4b 已修）；
 // 語料的 20 個反引號列（o-backtick，下面有斷言）都在一行剛好是標記之後才關掉替換，所以標記行本身帶著結尾反引號的
-// heredoc（R7-b）不在裡面，R7-b 仍未修（KNOWN-RESIDUALS.md）。
+// heredoc（R7-b）不在裡面，由下面獨立的反引號語料涵蓋（R7-b，round 4c 已修）。
 let heredocOracleChecks = 0;
 {
   const oracle = JSON.parse(fs.readFileSync(`${__dirname}/test-hooks-heredoc-corpus.json`, 'utf8'));
@@ -6333,6 +6333,105 @@ let heredocLaterBodyChecks = 0;
   heredocLaterBodyChecks += 1;
 }
 
+// R7-b (round 4c): the backquote corpus. An unquoted backquote substitution at the
+// top level holds a heredoc whose body the closing backquote ends, an unmatched
+// quote or a comment. bash reads the backquote as one word and runs the command
+// after it; read character by character, the heredoc, the quote or the comment
+// runs past the closing backquote and can hide that command. The gate reads such
+// a command a second time, the way bash reads the backquote, and refuses it when
+// either reading refuses it (evaluate()). The rows are re-derived from the
+// checked-in generator (test/heredoc-backquote/generate.js) and must match the
+// corpus file exactly; every row at least one bash runs the removal on must be
+// DENIED.
+// THE KEPT OVER-REFUSALS. In the 15 `-c-1-inside` rows the removal is the first
+// body line of a heredoc inside the backquote and the closing backquote stands on
+// a line of its own, so bash runs no removal there (it is here-data), yet the
+// character-by-character reading refuses all 15. The gate keeps that reading
+// whole, so they stay DENIED on purpose: deliberate over-refusals, kept until Sieg
+// decides whether to drop them. Reading every top-level backquote as one word, and
+// nothing else, would allow them; this loop fails then. The other rows bash runs
+// no removal on are allowed.
+// R7-b（round 4c）：反引號語料。命令頂層、未加引號的反引號替換裡有 heredoc（內文由結尾反引號結束）、不成對的引號或註解。
+// bash 把反引號讀成一個字、執行其後的命令；逐字讀時 heredoc／引號／註解會越過結尾反引號，把那條命令藏起來。閘門照 bash
+// 讀反引號的方式再讀一次，任一讀法拒絕就拒絕（evaluate()）。列由已簽入的產生器重新推導，必須與語料檔完全一致；任一 bash
+// 會跑刪除的列都必須被拒。保留的誤擋：15 個 `-c-1-inside` 列的刪除是反引號裡 heredoc 的第一行內文、結尾反引號獨佔一行，
+// bash 不會執行（那是 here-data），但逐字讀法拒絕這 15 列；閘門整個保留那種讀法，所以它們刻意維持拒絕，等 Sieg 決定要不要
+// 拿掉。只把頂層反引號讀成一個字、別的都不做，會放行它們，這個迴圈就會失敗。其餘 bash 不會執行刪除的列放行。
+let heredocBackquoteChecks = 0;
+{
+  const corpus = JSON.parse(fs.readFileSync(`${__dirname}/test-hooks-heredoc-backquote-corpus.json`, 'utf8'));
+  const generated = require(`${__dirname}/test/heredoc-backquote/generate.js`).shapes();
+  assert.equal(corpus.rows.length, generated.length,
+    `the backquote corpus has ${corpus.rows.length} rows but the generator emits ${generated.length}`);
+  for (let i = 0; i < generated.length; i += 1) {
+    assert.equal(corpus.rows[i].id, generated[i].id,
+      `backquote corpus row ${i} is ${corpus.rows[i].id}, not the generator's ${generated[i].id}`);
+    assert.equal(corpus.rows[i].cmd, generated[i].cmd,
+      `backquote corpus row ${corpus.rows[i].id} command drifted from the generator`);
+  }
+  assert.ok(corpus.rows.length >= 188 && corpus.mustDeny >= 144,
+    `the backquote corpus was shrunk: ${corpus.rows.length} rows, ${corpus.mustDeny} must-deny`);
+  const keptOverRefusal = (id) => /^line-n[0-9]-[a-z]+-c-1-inside$/.test(id);
+  let mustDeny = 0;
+  let kept = 0;
+  for (const row of corpus.rows) {
+    const out = evaluate(claude(row.cmd), env)?.hookSpecificOutput;
+    if (row.runs53 || row.runs32) {
+      mustDeny += 1;
+      assert.equal(out?.permissionDecision, 'deny',
+        `backquote ${row.id} (bash 5.3 runs=${row.runs53}, 3.2 runs=${row.runs32}) must be denied: ${JSON.stringify(row.cmd)}`);
+    } else if (keptOverRefusal(row.id)) {
+      kept += 1;
+      assert.equal(out?.permissionDecision, 'deny',
+        `backquote ${row.id} is a kept over-refusal (bash runs no removal; the character-by-character reading refuses it) and must stay denied: ${JSON.stringify(row.cmd)}`);
+    } else {
+      assert.equal(out, undefined,
+        `backquote ${row.id}: bash runs no removal and neither reading refuses it, so it must be allowed: ${JSON.stringify(row.cmd)}`);
+    }
+    heredocBackquoteChecks += 1;
+  }
+  assert.equal(mustDeny, corpus.mustDeny,
+    `counted ${mustDeny} must-deny backquote rows but the corpus header says ${corpus.mustDeny}`);
+  assert.equal(kept, 15, `counted ${kept} kept over-refusals, not the 15 \`-c-1-inside\` rows`);
+  heredocBackquoteChecks += 2;
+  const verdictOf = (command) => evaluate(claude(command), env)?.hookSpecificOutput;
+  // The second reading is a whole reading, so what the first reading hid from
+  // the dot-command check is read as well: `.` sources a file this gate cannot
+  // see, so `$HOME` is not resolved there and the removal is refused, as it is
+  // without the backquote. Also a backquote inside a `bash -c` string.
+  // 第二種讀法是整條命令的讀法，所以第一種讀法藏起來、點命令檢查看不到的部分也會讀到：`.` source 一個閘門看不到的檔案，
+  // 那裡不解析 `$HOME`，刪除被拒，與沒有反引號時一樣。`bash -c` 字串裡的反引號也一樣。
+  for (const command of [
+    'x=`echo #` ; . ./env.sh; rm -rf "$HOME/build"',
+    'x=`cat <<A\nb\nA`\n. ./env.sh; rm -rf "$HOME/build"',
+    "bash -c 'x=`cat <<A\nb\nA`\nrm -rf /etc'",
+  ]) {
+    assert.equal(verdictOf(command)?.permissionDecision, 'deny',
+      `the second reading must refuse what the first one hid: ${JSON.stringify(command)}`);
+  }
+  assert.equal(verdictOf('x=`echo #` ; rm -rf "$HOME/build"'), undefined,
+    'an ordinary removal after a backquote stays allowed');
+  // THE BUDGET. The second reading counts as one reading of the command's length
+  // against the R7-a reading budget, before it runs: one top-level backquote and
+  // about 200 KiB after it is read; about 300 KiB is refused unread. A command the
+  // first reading refuses keeps that refusal, and the way out the refusal names
+  // (`$( )` for the backquotes) is allowed.
+  // 預算：第二種讀法在跑之前，以「一段、整條命令的長度」計入 R7-a 的讀取預算：一個頂層反引號、其後約 200 KiB 會讀；
+  // 約 300 KiB 不讀就拒絕。第一種讀法拒絕的命令維持那個拒絕；拒絕訊息指的出路（把反引號寫成 `$( )`）放行。
+  const backquoteRule = /Rule: backquote reading budget exhausted\./;
+  const afterOneBackquote = (kib, substitution = '`date`') => `x=${substitution}\n${'echo ok\n'.repeat(Math.ceil((kib * 1024) / 8))}`;
+  assert.equal(verdictOf(afterOneBackquote(200)), undefined,
+    'a second reading of about 200 KiB is inside the budget: allowed');
+  const overLength = verdictOf(afterOneBackquote(300))?.permissionDecisionReason || '';
+  assert.match(overLength, backquoteRule, 'a second reading of about 300 KiB is past the budget: refused unread');
+  assert.match(overLength, /\(64 readings, or 262144 characters of them in all\)/, 'the refusal names both limits');
+  assert.match(overLength, /write the substitution as `\$\( \)` instead of backquotes/, 'the refusal names the way out');
+  assert.match(verdictOf(`rm -rf /etc\n${afterOneBackquote(300)}`)?.permissionDecisionReason || '', /\/etc/,
+    'a command the first reading refuses keeps its own refusal');
+  assert.equal(verdictOf(afterOneBackquote(300, '$(date)')), undefined, 'the way out the refusal names is allowed');
+  heredocBackquoteChecks += 10;
+}
+
 // THE R7-a READING BUDGET (round 4b). At a `DELIM)` close with later pending
 // heredocs the gate also scans bash 5.3's reading of the rest of the command
 // (the corpus block above). An alternate holds everything after its construct,
@@ -6348,7 +6447,10 @@ let heredocLaterBodyChecks = 0;
 // or to its one delimiter there. 54b5d49 built every copy's reading in the
 // tokenizer, before the budget counted any: there each of the five took longer
 // than the 2,000 ms budget at 420 KB and none answered within 30 s at 1 MB
-// (measured through stdin). The rows after them
+// (measured through stdin). Round 4c adds five R7-b shapes to the same rows
+// (chained and nested copies of a heredoc in a top-level backquote, the backquote
+// corpus above), whose second reading is counted against the same budget. The
+// rows after them
 // are in-process: the budget's two edges (64 readings; 262144 characters of
 // them), the refusal's wording, a protected path that still names itself, the
 // benign later-body shapes the corpus above cannot show (it has no must-allow
@@ -6360,7 +6462,8 @@ let heredocLaterBodyChecks = 0;
 // stdin 入口（live hook 就是這樣跑的）：每一列都必須以 0 結束並拒絕，且在依 hostFactor() 放大的 2,000 ms
 // 預算之內。其中五種寫法的後段 heredoc 從不收尾、或只在最後收尾一次，建一份另讀就要把那段內文讀到輸入結尾、
 // 或讀到結尾那唯一一個結束標記；54b5d49 在 tokenizer 裡就把每一份的另讀都建出來、在預算計入任何一段之前：那裡這五種
-// 在 420 KB 都超過 2,000 ms 預算，在 1 MB 沒有一種在 30 秒內回答（經 stdin 實測）。後面幾列在行程內：
+// 在 420 KB 都超過 2,000 ms 預算，在 1 MB 沒有一種在 30 秒內回答（經 stdin 實測）。round 4c 在同一組列加了五種
+// R7-b 寫法（頂層反引號裡 heredoc 的串接與巢狀複本，即上面的反引號語料），它們的第二種讀法計入同一份預算。後面幾列在行程內：
 // 預算的兩個邊（64 段；合計 262144 個字元）、拒絕的措辭、受保護路徑仍以自己
 // 為由被拒、上面語料看不到的良性 later-body 寫法（它沒有必須放行的列），以及拒絕訊息建議的出路。
 let alternateReadingBudgetChecks = 0;
@@ -6412,6 +6515,31 @@ let alternateReadingBudgetChecks = 0;
       (length) => atLength(copies('diff <(cat <<A <<B <<C\nA) f', 'rm -rf /etc'), length)],
     ['copies whose later heredoc is closed once, at the end, before one removal',
       (length) => atLength(copies('x=$(cat <<A <<B\nA)', 'B\nrm -rf /etc'), length)],
+    // R7-b (round 4c): copies of a heredoc in a top-level backquote whose body
+    // the closing backquote ends. The first reading hides every removal after the
+    // first copy; the second reading (bash's) is counted against the same budget
+    // before it runs, so past 262144 characters these are refused unread.
+    // R7-b（round 4c）：頂層反引號裡、內文由結尾反引號結束的 heredoc 的多份複本。第一種讀法把第一份之後的刪除全藏起來；
+    // 第二種讀法（bash 的）在跑之前計入同一份預算，超過 262144 個字元就不讀而拒絕。
+    ['chained backquote copies, a removal after each',
+      (length) => atLength((k) => Array.from({ length: k }, () => 'x=`cat <<A\nbody0\nA`\nrm -rf /etc').join('\n'), length)],
+    ['chained backquote copies with a quoted delimiter, one removal at the end',
+      (length) => atLength(copies("x=`cat <<'A'\nbody0\nA`", 'rm -rf /etc'), length)],
+    ['chained backquote copies with an empty delimiter, one removal at the end',
+      (length) => atLength(copies("x=`cat <<''\nebody\n`", 'rm -rf /etc'), length)],
+    ['nested backquote copies, a removal at the core',
+      (length) => atLength((k) => {
+        let text = 'rm -rf /etc';
+        for (let i = 0; i < k; i += 1) text = `x=$(\nx=\`cat <<A\nbody0\nA\`\n${text}\n)`;
+        return text;
+      }, length)],
+    ['six nested backquote copies padded to the length, a removal at the core',
+      (length) => {
+        const pad = 'echo pad\n'.repeat(Math.ceil(length / 6 / 9));
+        let text = 'rm -rf /etc';
+        for (let i = 0; i < 6; i += 1) text = `x=$(\nx=\`cat <<A\nbody0\nA\`\n${pad}${text}\n)`;
+        return text;
+      }],
   ];
   const alternateBudgetMs = 2000 * hostFactor();
   // A hang guard, not a budget: a hook that has not answered in 30 s has failed
@@ -8834,7 +8962,7 @@ const PINNED_TIMING_COUNTERS = [
   ['heredocOracleChecks', heredocOracleChecks, 238],
   ['findClauseTimingChecks', findClauseTimingChecks, 48],
   ['targetLimitChecks', targetLimitChecks, 9],
-  ['alternateReadingBudgetChecks', alternateReadingBudgetChecks, 124],
+  ['alternateReadingBudgetChecks', alternateReadingBudgetChecks, 184],
 ];
 for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {
   assert.equal(actual, expected,
@@ -8906,7 +9034,7 @@ process.exitCode = 1;
 runOpenCodePluginChecks().then(async (pluginChecks) => {
   const ompChecks = await runOmpHookChecks();
   const stdinStreamChecks = await runStdinStreamErrorChecks();
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + heredocSplitTimingChecks + heredocOracleChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + ompChecks + stdinStreamChecks + shimLoadChecks + heredocLaterBodyChecks + alternateReadingBudgetChecks}`);
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + heredocSplitTimingChecks + heredocOracleChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + ompChecks + stdinStreamChecks + shimLoadChecks + heredocLaterBodyChecks + alternateReadingBudgetChecks + heredocBackquoteChecks}`);
   // A missed wall-clock budget fails the run, named, after everything else ran.
   // 牆鐘預算沒達到時，整次執行在其餘全部跑完之後指名失敗。
   if (TIMING_MISSES.length > 0) {
