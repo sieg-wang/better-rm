@@ -130,6 +130,12 @@ cat > "$FIXTURE/test-hooks.js" <<'EOF'
 // The fake node executable records this suite; the body is intentionally inert.
 EOF
 
+cat > "$FIXTURE/test-hooks-timing-miss.sh" <<'EOF'
+#!/bin/bash
+printf 'hooks-timing-miss\n' >> "$BETTER_RM_RUNNER_LOG"
+exit "${BETTER_RM_HOOK_TIMING_MISS_STATUS:-0}"
+EOF
+
 cat > "$FIXTURE/test-wrapper-model.js" <<'EOF'
 // The fake node executable records this suite; the body is intentionally inert.
 EOF
@@ -182,6 +188,7 @@ exit 1
 EOF
 
 chmod +x "$FIXTURE/test-run-test-suites.sh" "$FIXTURE/test-better-rm.sh" \
+    "$FIXTURE/test-hooks-timing-miss.sh" \
     "$FIXTURE/test-install.sh" "$FIXTURE/test-install-hooks.sh" \
     "$FIXTURE/test-bump-and-release.sh" "$FAKE_BIN/node"
 
@@ -194,7 +201,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$CONTRACT_FAIL_LOG" \
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || CONTRACT_FAIL_STATUS=$?
 assert_equal "runner reports an aggregation-contract-only failure" "1" "$CONTRACT_FAIL_STATUS"
 assert_equal "runner completes the manifest after an aggregation-contract failure" \
-    "$(printf 'contract\ncore\nhooks\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" \
+    "$(printf 'contract\ncore\nhooks\nhooks-timing-miss\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" \
     "$(cat "$CONTRACT_FAIL_LOG" 2>/dev/null)"
 
 # The earliest suite fails. The public runner must still invoke both later suites,
@@ -206,7 +213,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$FAIL_LOG" BETTER_RM_CORE_STATUS=17
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || FAIL_STATUS=$?
 assert_equal "runner reports aggregate failure" "1" "$FAIL_STATUS"
 assert_equal "runner continues through all suites after the first failure" \
-    "$(printf 'contract\ncore\nhooks\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$FAIL_LOG" 2>/dev/null)"
+    "$(printf 'contract\ncore\nhooks\nhooks-timing-miss\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$FAIL_LOG" 2>/dev/null)"
 
 # Each later suite gets its own failing leg. Otherwise a runner that aggregates
 # only the first command's status still satisfies the continuation test above.
@@ -216,7 +223,22 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$HOOK_FAIL_LOG" BETTER_RM_HOOK_STAT
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || HOOK_FAIL_STATUS=$?
 assert_equal "runner reports a runtime-hook-only failure" "1" "$HOOK_FAIL_STATUS"
 assert_equal "runner completes the manifest after a runtime-hook failure" \
-    "$(printf 'contract\ncore\nhooks\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$HOOK_FAIL_LOG" 2>/dev/null)"
+    "$(printf 'contract\ncore\nhooks\nhooks-timing-miss\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$HOOK_FAIL_LOG" 2>/dev/null)"
+
+# The suite that runs test-hooks.js with every timing row forced to miss gets its
+# own failing leg, for the reason the wrapper-model one below gives: a suite the
+# runner drops provides no protection however green it is on its own.
+# 「讓每個計時列都算沒達到再跑 test-hooks.js」那一套也要有自己的失敗腳，理由與下面 wrapper-model
+# 那一腳相同：runner 漏掉的 suite，自己再綠也是零保護。
+HOOK_TIMING_FAIL_LOG="$TMP_ROOT/hook-timing-fail.log"
+HOOK_TIMING_FAIL_STATUS=0
+PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$HOOK_TIMING_FAIL_LOG" \
+    BETTER_RM_HOOK_TIMING_MISS_STATUS=37 \
+    "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || HOOK_TIMING_FAIL_STATUS=$?
+assert_equal "runner reports a hook-timing-miss-only failure" "1" "$HOOK_TIMING_FAIL_STATUS"
+assert_equal "runner completes the manifest after a hook-timing-miss failure" \
+    "$(printf 'contract\ncore\nhooks\nhooks-timing-miss\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" \
+    "$(cat "$HOOK_TIMING_FAIL_LOG" 2>/dev/null)"
 
 # The wrapper-model suite is the guarantee that REPLACED the platform sweep deleted
 # from test-hooks.js: it is the only thing that goes red when a row is removed from
@@ -237,7 +259,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$WRAPPER_MODEL_FAIL_LOG" \
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || WRAPPER_MODEL_FAIL_STATUS=$?
 assert_equal "runner reports a wrapper-model-only failure" "1" "$WRAPPER_MODEL_FAIL_STATUS"
 assert_equal "runner completes the manifest after a wrapper-model failure" \
-    "$(printf 'contract\ncore\nhooks\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" \
+    "$(printf 'contract\ncore\nhooks\nhooks-timing-miss\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" \
     "$(cat "$WRAPPER_MODEL_FAIL_LOG" 2>/dev/null)"
 
 # The guard-parity suite reserves a distinct exit code (99) for "the probe itself
@@ -251,7 +273,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$PARITY_FAIL_LOG" BETTER_RM_PARITY_
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || PARITY_FAIL_STATUS=$?
 assert_equal "runner reports a guard-parity-only failure" "1" "$PARITY_FAIL_STATUS"
 assert_equal "runner completes the manifest after a guard-parity failure" \
-    "$(printf 'contract\ncore\nhooks\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$PARITY_FAIL_LOG" 2>/dev/null)"
+    "$(printf 'contract\ncore\nhooks\nhooks-timing-miss\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$PARITY_FAIL_LOG" 2>/dev/null)"
 
 SOURCE_INSTALLER_FAIL_LOG="$TMP_ROOT/source-installer-fail.log"
 SOURCE_INSTALLER_FAIL_STATUS=0
@@ -260,7 +282,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$SOURCE_INSTALLER_FAIL_LOG" \
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || SOURCE_INSTALLER_FAIL_STATUS=$?
 assert_equal "runner reports a source-installer-only failure" "1" "$SOURCE_INSTALLER_FAIL_STATUS"
 assert_equal "runner records the complete manifest on a source-installer failure" \
-    "$(printf 'contract\ncore\nhooks\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" \
+    "$(printf 'contract\ncore\nhooks\nhooks-timing-miss\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" \
     "$(cat "$SOURCE_INSTALLER_FAIL_LOG" 2>/dev/null)"
 
 INSTALLER_FAIL_LOG="$TMP_ROOT/installer-fail.log"
@@ -270,7 +292,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$INSTALLER_FAIL_LOG" \
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || INSTALLER_FAIL_STATUS=$?
 assert_equal "runner reports an installer-only failure" "1" "$INSTALLER_FAIL_STATUS"
 assert_equal "runner records the complete manifest on an installer failure" \
-    "$(printf 'contract\ncore\nhooks\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$INSTALLER_FAIL_LOG" 2>/dev/null)"
+    "$(printf 'contract\ncore\nhooks\nhooks-timing-miss\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$INSTALLER_FAIL_LOG" 2>/dev/null)"
 
 PASS_LOG="$TMP_ROOT/pass.log"
 PASS_STATUS=0
@@ -278,7 +300,7 @@ PATH="$FAKE_BIN:$PATH" BETTER_RM_RUNNER_LOG="$PASS_LOG" \
     "$FIXTURE/run-test-suites.sh" >/dev/null 2>&1 || PASS_STATUS=$?
 assert_equal "runner succeeds when every suite succeeds" "0" "$PASS_STATUS"
 assert_equal "successful runner invokes each suite exactly once" \
-    "$(printf 'contract\ncore\nhooks\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$PASS_LOG" 2>/dev/null)"
+    "$(printf 'contract\ncore\nhooks\nhooks-timing-miss\nwrapper-model\nparity\nsource-installer\ninstaller\nrelease')" "$(cat "$PASS_LOG" 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
 # 解析檢查掃描：每一個追蹤中的 shell 與 JS 檔（含 better-rm 自己）都必須解析得過。

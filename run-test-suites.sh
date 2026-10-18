@@ -28,6 +28,11 @@ run_suite() {
 run_suite "CI suite aggregation contract" "$SCRIPT_DIR/test-run-test-suites.sh"
 run_suite "better-rm core" "$SCRIPT_DIR/test-better-rm.sh"
 run_suite "runtime hooks" node "$SCRIPT_DIR/test-hooks.js"
+# The same file run with every timing row forced to miss: it must still run to
+# the end and then exit 1. Without this, deleting that exit left every suite green.
+# 同一個檔案，讓每個計時列都算沒達到再跑一次：它仍須跑到底，然後以 1 結束。少了這一套，
+# 刪掉那個結束碼時每一套都還是綠的。
+run_suite "runtime hooks timing-miss exit" "$SCRIPT_DIR/test-hooks-timing-miss.sh"
 # The exec-wrapper table's guarantee, and the reason it can be a PINNED LIST at
 # all. The platform sweep that used to discover those names read man-page sources
 # and was removed for not converging; this suite replaces it by comparing the
