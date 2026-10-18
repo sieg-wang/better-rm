@@ -784,6 +784,55 @@ hook_is_permissive() {
     return 1
 }
 
+# OpenCode does not run the runtime hook as a command: its plugin loads it as a
+# module. So a published runtime is also judged through the published plugin,
+# imported by node (types stripped; extensionless relative specifiers retried
+# with `.js`, as bun resolves them) from a directory at the same depth, so its
+# ../../hooks path reaches the project's runtime. Prints the verdicts for
+# `rm -rf /etc` and `ls -la`, `load-failed`, or `host-status-N` when loading
+# ended the process.
+# OpenCode 不把 runtime hook 當命令執行：它的外掛把它當模組載入。所以已發布的 runtime 也要
+# 經由已發布的外掛來判定：由 node 匯入（去掉型別；沒有副檔名的相對路徑照 bun 的方式補 `.js`），
+# 放在同樣深度的目錄，讓它的 ../../hooks 指到專案的 runtime。
+opencode_plugin_verdicts() {
+    local root="$1"
+    local check_dir="$root/.better-rm-verdict-check/plugins"
+    local verdicts=""
+    local status=0
+    mkdir -p "$check_dir"
+    verdicts=$(node --input-type=module -e '
+import { register } from "node:module";
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+register("data:text/javascript," + encodeURIComponent(
+  "export async function resolve(s, c, next) { try { return await next(s, c); } catch (e) {"
+  + " if (/^\\.{1,2}\\//.test(s) && !/\\.[cm]?js$/.test(s)) return next(s + \".js\", c); throw e; } }"));
+const [root, dir] = process.argv.slice(1);
+const source = readFileSync(`${root}/.opencode/plugins/protect-important-paths.ts`, "utf8")
+  .replace(/^import type \{ Plugin \} from "@opencode-ai\/plugin";$/m, "")
+  .replace(/: Plugin\b/, "")
+  .replace(/\(ctx as any\)/g, "ctx");
+writeFileSync(`${dir}/check.mjs`, source);
+let hooks;
+try { hooks = await (await import(pathToFileURL(`${dir}/check.mjs`).href)).default({ directory: root }); }
+catch { process.stdout.write("load-failed"); process.exit(0); }
+const out = [];
+for (const command of ["rm -rf /etc", "ls -la"]) {
+  try { await hooks["tool.execute.before"]({ tool: "bash" }, { args: { command } }); out.push("allow"); }
+  catch { out.push("deny"); }
+}
+process.stdout.write(out.join(" "));
+' "$root" "$check_dir" 2>/dev/null) || status=$?
+    rm -rf "$root/.better-rm-verdict-check"
+    if [ "$status" -ne 0 ]; then
+        printf 'host-status-%s\n' "$status"
+    else
+        printf '%s\n' "$verdicts"
+    fi
+}
+assert_equal "the published opencode plugin judges with the published runtime" \
+    "deny allow" "$(opencode_plugin_verdicts "$OPENCODE_PROJECT")"
+
 DISARM_HOME="$TMP_ROOT/disarm-home"
 mkdir -p "$DISARM_HOME/.claude"
 DISARM_HOOK="$DISARM_HOME/.claude/protect-important-paths.js"
@@ -1578,6 +1627,8 @@ else
 fi
 assert_contains "a truncated opencode runtime hook says it now fails closed" \
     "$OPENCODE_TRUNC_RUNTIME_OUTPUT" "fails closed"
+assert_equal "a truncated opencode runtime leaves a plugin that refuses every bash call" \
+    "deny deny" "$(opencode_plugin_verdicts "$OPENCODE_TRUNC_RUNTIME_PROJECT")"
 
 # 外掛沒有行為探測可用（它是 TypeScript），但「複製過去的內容是否與來源相同」是
 # 驗得了的，而來源本身的正確性已由上面的 byte-identity 斷言釘住。這裡要求的只有

@@ -556,13 +556,22 @@ hook_is_trustworthy() {
 # Write a stub that always fails closed. Exit 2 is this project's existing
 # convention for a blocking PreToolUse error; other agents see a non-zero exit
 # and empty stdout, which is never an allow.
+#
+# Run as a command it exits 2. Loaded as a module -- the OpenCode and oh-my-pi
+# shims load the runtime that way -- it must not exit, or loading it would end
+# the host; it exports no evaluate(), and the shim then refuses every bash call.
+# 當成命令執行時以 2 結束。被當成模組載入時（OpenCode 與 oh-my-pi 的 shim 就是這樣載入
+# runtime）不能結束行程，否則載入它就會結束宿主；它不匯出 evaluate()，shim 於是拒絕每個
+# bash 呼叫。
 write_fail_closed_hook_stub() {
     printf '%s\n' \
         '#!/usr/bin/env node' \
         '// better-rm: 這個 runtime hook 更新失敗，內容不可信任，因此保持 fail-closed。' \
         '// better-rm: this runtime hook failed to update; it stays fail-closed until restored.' \
-        "console.error('better-rm hook 未正確安裝，已拒絕工具呼叫 / better-rm hook is not installed correctly; tool call denied');" \
-        'process.exit(2);' \
+        "if (typeof module === 'undefined' || require.main === module) {" \
+        "  console.error('better-rm hook 未正確安裝，已拒絕工具呼叫 / better-rm hook is not installed correctly; tool call denied');" \
+        '  process.exit(2);' \
+        '}' \
         > "$1"
 }
 
@@ -856,14 +865,34 @@ write_bundled_opencode_plugin() {
     mkdir -p -- "$(dirname -- "$destination")" || return 1
     printf '%s\n' \
         'import type { Plugin } from "@opencode-ai/plugin";' \
+        'import { createRequire } from "node:module";' \
         'import path from "node:path";' \
-        '// @ts-ignore' \
-        'import { evaluate } from "../../hooks/protect-important-paths";' \
+        '' \
+        '// The guard runtime is loaded here, inside try/catch, not by a static import:' \
+        '// when a static import fails (runtime missing, empty or broken), OpenCode drops' \
+        '// the plugin and bash runs unguarded. A runtime that cannot be loaded, or that' \
+        '// has no evaluate(), leaves a handler that refuses every bash call.' \
+        'function loadGuard() {' \
+        '  try {' \
+        '    const load = typeof require === "function" ? require : createRequire(import.meta.url);' \
+        '    const runtime = load("../../hooks/protect-important-paths.js");' \
+        '    if (runtime && typeof runtime.evaluate === "function") {' \
+        '      return { evaluate: runtime.evaluate, failure: "" };' \
+        '    }' \
+        '    return { evaluate: null, failure: "it has no evaluate()" };' \
+        '  } catch (error) {' \
+        '    return { evaluate: null, failure: String(error) };' \
+        '  }' \
+        '}' \
         '' \
         'export const ProtectImportantPathsPlugin: Plugin = async (ctx) => {' \
+        '  const guard = loadGuard();' \
         '  return {' \
         '    "tool.execute.before": async (input, output) => {' \
         '      if (input.tool === "bash") {' \
+        '        if (!guard.evaluate) {' \
+        '          throw new Error(`拒絕刪除：better-rm 的 guard runtime（hooks/protect-important-paths.js）無法使用（${guard.failure}），在它能載入之前每個 bash 呼叫都會被拒絕；請重跑 install-hooks.sh -a opencode 後重新啟動 OpenCode。 / Refused to remove: cannot determine what this bash call deletes, because the better-rm guard runtime hooks/protect-important-paths.js is unusable (${guard.failure}); every bash call is refused until it loads. Re-run install-hooks.sh -a opencode, then restart OpenCode.`);' \
+        '        }' \
         '        const command = output.args.command;' \
         '        // OpenCode runs a bash call that carries a workdir in' \
         '        // path.resolve(directory, workdir), so that is the cwd to judge with.' \
@@ -879,7 +908,12 @@ write_bundled_opencode_plugin() {
         '          cwd' \
         '        };' \
         '' \
-        '        const result = evaluate(payload);' \
+        '        let result;' \
+        '        try {' \
+        '          result = guard.evaluate(payload);' \
+        '        } catch (error) {' \
+        '          throw new Error(`拒絕刪除：better-rm 的 guard 判定這次 bash 呼叫時出錯（${String(error)}）。 / Refused to remove: cannot determine what this bash call deletes, because the better-rm guard failed on it (${String(error)}).`);' \
+        '        }' \
         '        if (result && result.hookSpecificOutput?.permissionDecision === "deny") {' \
         '          throw new Error(result.hookSpecificOutput.permissionDecisionReason);' \
         '        }' \
@@ -2400,8 +2434,8 @@ install_anchored_opencode_runtime() {
                publish_anchored_opencode_file \
                    /dev/fd/9 "$OPENCODE_STAGE_PATH" "$destination" -f "runtime file"; then
                 OPENCODE_STAGE_PATH=""
-                error "OpenCode 共用 hook 無法通過驗證；fail-closed replacement 已發布，現在會拒絕所有工具呼叫：$display_path"
-                error "The OpenCode runtime hook could not be verified; the fail-closed replacement was published and it now fails closed: $display_path"
+                error "OpenCode 共用 hook 無法通過驗證；fail-closed replacement 已發布，現在是 fail-closed（OpenCode 外掛用它時拒絕每個 bash 呼叫）：$display_path"
+                error "The OpenCode runtime hook could not be verified; the fail-closed replacement was published and it now fails closed (OpenCode's plugin refuses every bash call with it): $display_path"
             else
                 error "fail-closed replacement 已寫入錨定暫存檔，但無法發布；執行位置的保護狀態未確認：$display_path"
                 error "The fail-closed replacement was staged but could not be published; protection at the execution path is not confirmed: $display_path"

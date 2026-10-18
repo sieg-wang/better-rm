@@ -8201,11 +8201,11 @@ withScratchDir('better-rm-hook-device-', (scratchDir) => {
 const pluginPath = `${__dirname}/.opencode/plugins/protect-important-paths.ts`;
 const pluginRewrites = [
   [/^import type \{ Plugin \} from "@opencode-ai\/plugin";$/m, ''],
+  [/^import \{ createRequire \} from "node:module";$/m, ''],
   [/^import path from "node:path";$/m, 'const path = nodePath;'],
-  [/^\/\/ @ts-ignore$/m, ''],
   [
-    /^import \{ evaluate \} from "\.\.\/\.\.\/hooks\/protect-important-paths";$/m,
-    'const { evaluate } = hookModule;',
+    /^    const load = typeof require === "function" \? require : createRequire\(import\.meta\.url\);$/m,
+    '    const load = () => hookModule;',
   ],
   [/: Plugin\b/, ''],
   [/\(ctx as any\)/, 'ctx'],
@@ -8359,10 +8359,10 @@ async function runOpenCodePluginChecks() {
 const ompHookPath = `${__dirname}/.omp/hooks/pre/protect-important-paths.ts`;
 const ompRewrites = [
   [/^import type \{ HookAPI \} from "@oh-my-pi\/pi-coding-agent\/extensibility\/hooks";$/m, ''],
-  [/^\/\/ @ts-ignore$/m, ''],
+  [/^import \{ createRequire \} from "node:module";$/m, ''],
   [
-    /^import \{ evaluate \} from "\.\.\/\.\.\/\.\.\/hooks\/protect-important-paths";$/m,
-    'const { evaluate } = hookModule;',
+    /^    const load = typeof require === "function" \? require : createRequire\(import\.meta\.url\);$/m,
+    '    const load = () => hookModule;',
   ],
   [/^export default function hook\(pi: HookAPI\): void \{$/m, 'function hook(pi) {'],
   [/\(ctx as any\)/, 'ctx'],
@@ -8418,6 +8418,159 @@ async function runOmpHookChecks() {
 
   return ompChecks;
 }
+
+// ---------------------------------------------------------------------------
+// The two TypeScript shims, LOADED the way a host loads them, with the guard
+// runtime broken. OpenCode v1.19.3 imports each plugin inside try/catch and,
+// when the import throws, publishes "Failed to load plugin" and goes on without
+// it (packages/opencode/src/plugin/loader.ts load(), plugin/index.ts). A shim
+// that imports the runtime statically then has no code left to refuse anything,
+// and bash runs unguarded. The blocks above bind the runtime in-process and
+// cannot see that. Here a child node process imports each shim from a scratch
+// project whose hooks/protect-important-paths.js is: the real hook (the
+// control), missing, 0 bytes, the installer's fail-closed stub, or the real
+// hook with that stub appended. Only the erasable TypeScript syntax is
+// stripped, by asserted rewrites; the shim's own loading code is the shipped
+// source. Extensionless relative specifiers are retried with `.js`, the way
+// bun resolves them. A runtime that cannot be used must leave a handler that
+// refuses every bash call, and loading it must not end the host.
+// 兩個 TypeScript shim，照宿主載入的方式「載入」，而且 guard runtime 是壞的。OpenCode v1.19.3
+// 在 try/catch 裡匯入每個外掛，匯入丟錯時發出 "Failed to load plugin" 然後不帶它繼續。靜態匯入
+// runtime 的 shim 那時已經沒有任何程式碼可以拒絕，bash 就在沒有守衛的情況下執行。上面幾段在
+// 行程內綁定 runtime，看不到這一點。這裡由子 node 行程從暫存專案匯入每個 shim，該專案的
+// hooks/protect-important-paths.js 依序是：真的 hook（對照）、不存在、0 byte、安裝程式的
+// fail-closed stub、真的 hook 後面接著 stub。只去掉可抹除的 TypeScript 語法（改寫逐一斷言），
+// shim 自己的載入程式碼就是出貨的原始碼。沒有副檔名的相對路徑照 bun 的方式補 `.js` 再解析。
+// 用不了的 runtime 必須留下一個拒絕所有 bash 呼叫的 handler，而且載入它不得結束宿主。
+// ---------------------------------------------------------------------------
+let shimLoadChecks = 0;
+withScratchDir('better-rm-shim-load-', (scratch) => {
+  const resolver = 'export async function resolve(specifier, context, nextResolve) {\n'
+    + '  try { return await nextResolve(specifier, context); } catch (error) {\n'
+    + "    if (/^\\.{1,2}\\//.test(specifier) && !/\\.[cm]?js$/.test(specifier)) return nextResolve(`${specifier}.js`, context);\n"
+    + '    throw error;\n  }\n}\n';
+  const host = `${scratch}/shim-host.mjs`;
+  fs.writeFileSync(host, [
+    "import { register } from 'node:module';",
+    "import { pathToFileURL } from 'node:url';",
+    `register('data:text/javascript,' + encodeURIComponent(${JSON.stringify(resolver)}));`,
+    'const [kind, shimFile, ...commands] = process.argv.slice(2);',
+    'const out = { loaded: false, handler: false, results: [] };',
+    'let mod;',
+    'try { mod = await import(pathToFileURL(shimFile).href); out.loaded = true; }',
+    'catch (error) { out.loadError = String(error && error.message); }',
+    'let handler = null;',
+    "if (out.loaded && kind === 'opencode') {",
+    "  try { const hooks = await mod.default({ directory: '/workspace/project' }); handler = hooks && hooks['tool.execute.before']; }",
+    '  catch (error) { out.factoryError = String(error && error.message); }',
+    "} else if (out.loaded && kind === 'omp') {",
+    '  const registered = [];',
+    '  try { mod.default({ on: (name, fn) => registered.push({ name, fn }) }); } catch (error) { out.factoryError = String(error && error.message); }',
+    "  const entry = registered.find((r) => r.name === 'tool_call'); handler = entry ? entry.fn : null;",
+    '}',
+    "out.handler = typeof handler === 'function';",
+    'for (const command of out.handler ? commands : []) {',
+    "  if (kind === 'opencode') {",
+    "    try { await handler({ tool: 'bash' }, { args: { command } }); out.results.push('allow'); } catch (error) { out.results.push('deny'); }",
+    '  } else {',
+    "    const r = await handler({ toolName: 'bash', input: { command } }, { cwd: '/workspace/project' });",
+    "    out.results.push(r && r.block === true ? 'deny' : 'allow');",
+    '  }',
+    '}',
+    'process.stdout.write(JSON.stringify(out));',
+  ].join('\n'));
+
+  const stripTypes = (label, source, rewrites) => {
+    let text = source;
+    for (const [pattern, replacement] of rewrites) {
+      assert.match(text, pattern, `the ${label} no longer matches ${pattern}; update this loader`);
+      text = text.replace(pattern, replacement);
+    }
+    return text;
+  };
+  const shims = [
+    {
+      kind: 'opencode',
+      relative: '.opencode/plugins/protect-important-paths.mjs',
+      source: stripTypes('OpenCode plugin', fs.readFileSync(pluginPath, 'utf8'), [
+        [/^import type \{ Plugin \} from "@opencode-ai\/plugin";$/m, ''],
+        [/: Plugin\b/, ''],
+        [/\(ctx as any\)/g, 'ctx'],
+      ]),
+    },
+    {
+      kind: 'omp',
+      relative: '.omp/hooks/pre/protect-important-paths.mjs',
+      source: stripTypes('oh-my-pi hook', fs.readFileSync(ompHookPath, 'utf8'), [
+        [/^import type \{ HookAPI \} from "@oh-my-pi\/pi-coding-agent\/extensibility\/hooks";$/m, ''],
+        [/^export default function hook\(pi: HookAPI\): void \{$/m, 'export default function hook(pi) {'],
+        [/\(ctx as any\)/g, 'ctx'],
+        [/ as string;/g, ';'],
+      ]),
+    },
+  ];
+
+  const realHookBytes = fs.readFileSync(`${__dirname}/hooks/protect-important-paths.js`);
+  const stubFile = `${scratch}/stub.js`;
+  const stubWrite = spawnSync('bash', [
+    '-c',
+    'eval "$(sed -n "/^write_fail_closed_hook_stub()/,/^}/p" "$1")"; write_fail_closed_hook_stub "$2"',
+    'extract-stub', `${__dirname}/install-hooks.sh`, stubFile,
+  ], { encoding: 'utf8' });
+  assert.equal(stubWrite.status, 0, `extracting the installer's stub writer failed: ${stubWrite.stderr}`);
+  const stubBytes = fs.readFileSync(stubFile);
+  assert.ok(stubBytes.length > 0, "the installer's stub must not be empty");
+  const runtimeCases = [
+    ['real hook', realHookBytes],
+    ['missing', null],
+    ['0 bytes', Buffer.alloc(0)],
+    ['installer stub', stubBytes],
+    ['real hook + stub', Buffer.concat([realHookBytes, stubBytes])],
+  ];
+
+  const outcomes = {};
+  const expected = {};
+  for (const shim of shims) {
+    for (const [label, bytes] of runtimeCases) {
+      const project = `${scratch}/${shim.kind}-${label.replace(/[^a-z0-9]+/g, '-')}`;
+      const shimFile = `${project}/${shim.relative}`;
+      fs.mkdirSync(require('path').dirname(shimFile), { recursive: true });
+      fs.mkdirSync(`${project}/hooks`, { recursive: true });
+      fs.writeFileSync(shimFile, shim.source);
+      if (bytes !== null) fs.writeFileSync(`${project}/hooks/protect-important-paths.js`, bytes);
+      const child = spawnSync(process.execPath, [host, shim.kind, shimFile, 'rm -rf /etc', 'ls -la'], {
+        cwd: project, encoding: 'utf8', timeout: 60000, env: { ...process.env, ...env },
+      });
+      let parsed = null;
+      try { parsed = JSON.parse(child.stdout); } catch { parsed = null; }
+      const key = `${shim.kind} / ${label}`;
+      outcomes[key] = {
+        hostStatus: child.status,
+        loaded: parsed ? parsed.loaded : false,
+        handler: parsed ? parsed.handler : false,
+        rmEtc: parsed && parsed.results[0] ? parsed.results[0] : 'none',
+        ls: parsed && parsed.results[1] ? parsed.results[1] : 'none',
+      };
+      // The control judges normally. A runtime that cannot be used leaves a
+      // handler that refuses everything, `ls -la` included. The real hook with
+      // the stub appended does not parse under node (the stub's `#!` line ends
+      // up mid-file); `ls` is not pinned for it, only that /etc is refused.
+      // 對照組照常判定。用不了的 runtime 留下的 handler 什麼都拒絕，`ls -la` 也一樣。真的 hook
+      // 接上 stub 那一個在 node 下無法解析（stub 的 `#!` 那一行落在檔案中間）；它只釘 /etc 被拒，不釘 `ls`。
+      expected[key] = {
+        hostStatus: 0,
+        loaded: true,
+        handler: true,
+        rmEtc: 'deny',
+        ls: label === 'real hook' ? 'allow' : label === 'real hook + stub' ? outcomes[key].ls : 'deny',
+      };
+      shimLoadChecks += 1;
+    }
+  }
+  assert.deepStrictEqual(outcomes, expected,
+    'a TypeScript shim whose guard runtime is missing, empty, the installer stub or a stub-appended copy '
+    + 'must still load, register its handler and refuse bash calls, and loading it must not end the host');
+});
 
 // ---------------------------------------------------------------------------
 // RUN TO COMPLETION: every timing group reached its expected number of checks,
@@ -8516,7 +8669,7 @@ process.exitCode = 1;
 runOpenCodePluginChecks().then(async (pluginChecks) => {
   const ompChecks = await runOmpHookChecks();
   const stdinStreamChecks = await runStdinStreamErrorChecks();
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + heredocSplitTimingChecks + heredocOracleChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + ompChecks + stdinStreamChecks}`);
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + heredocSplitTimingChecks + heredocOracleChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + ompChecks + stdinStreamChecks + shimLoadChecks}`);
   // A missed wall-clock budget fails the run, named, after everything else ran.
   // 牆鐘預算沒達到時，整次執行在其餘全部跑完之後指名失敗。
   if (TIMING_MISSES.length > 0) {
