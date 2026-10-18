@@ -1935,6 +1935,15 @@ install_pi_hooks() {
     result=$(HOOK_TARGET="$HOOK_TARGET" merge_json_settings)
 
     report_json_result "Pi" "$result"
+    # .pi/hooks.json is read by a hooks-capable extension such as pi-hooks
+    # (README's Pi section, 方式 B), so "Created Pi hook settings" alone told a
+    # stock pi user the guard was on. Say so on every run, and name the native
+    # hook README recommends (方式 A), which this installer does not write.
+    # .pi/hooks.json 是由支援 hooks 的擴充套件（例如 pi-hooks）讀取（README Pi 章節方式 B），只印
+    # 「已建立 Pi hook 設定」會讓沒有擴充套件的使用者以為守衛已啟用。每次都講明，並寫出 README
+    # 推薦、但本安裝程式不會寫入的原生 hook（方式 A）。
+    warning ".pi/hooks.json 需要支援 hooks 的 Pi 擴充套件（例如 pi-hooks）來讀取（README Pi 章節方式 B）；沒有這種擴充套件時，請改用 README 推薦的原生 hook .omp/hooks/pre/protect-important-paths.ts（本安裝程式不會寫入它）"
+    warning ".pi/hooks.json needs a hooks-capable Pi extension such as pi-hooks to read it (README Pi section, option B); without one, use the native hook README recommends, .omp/hooks/pre/protect-important-paths.ts (this installer does not write it)"
 }
 
 # 安裝 Grok Build hook (Install Grok Build hook)

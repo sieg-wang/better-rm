@@ -2797,6 +2797,23 @@ else
     fail "the probe executes the held bytes as a file"
 fi
 
+# `-a pi` writes .pi/hooks.json, which only a hooks-capable extension such as
+# pi-hooks reads (README's Pi section, 方式 B). A plain "Created Pi hook
+# settings" told a stock pi user the guard was on. The output has to name that
+# condition and the native hook README recommends (方式 A), every run.
+# `-a pi` 寫的是 .pi/hooks.json，只有像 pi-hooks 這種支援 hooks 的擴充套件會讀（README Pi 章節
+# 方式 B）。只印「已建立 Pi hook 設定」會讓沒有擴充套件的使用者以為守衛已啟用。輸出必須寫出這個
+# 條件與 README 推薦的原生 hook（方式 A），每次執行都要。
+PI_PROJECT="$TMP_ROOT/pi-caveat-project"
+make_repo "$PI_PROJECT"
+for pi_run in first repeat; do
+    PI_OUTPUT=$(cd "$PI_PROJECT" && "$INSTALLER" -a pi 2>&1)
+    assert_contains "-a pi ($pi_run run) says .pi/hooks.json needs a hooks extension such as pi-hooks" \
+        "$PI_OUTPUT" "pi-hooks"
+    assert_contains "-a pi ($pi_run run) points to the native hook" \
+        "$PI_OUTPUT" ".omp/hooks/pre/protect-important-paths.ts"
+done
+
 echo ""
 echo "========================================"
 echo "Passed: $PASSED"

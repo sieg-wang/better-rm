@@ -944,7 +944,7 @@ curl -sSL https://raw.githubusercontent.com/sieg-wang/better-rm/main/install-hoo
 專案模式可從 Git 儲存庫內的任何子目錄執行。`--global` 目前僅 Claude Code 支援；其他 Agent 僅可在專案模式。
 Claude Code 的全域模式會寫入
 `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json`，且不要求目前目錄是 Git
-儲存庫。其他 Agent 會寫入專案根目錄對應設定檔：`.claude/settings.json`（claude）、`.codex/hooks.json`（codex）、`.cursor/hooks.json`（cursor）、`.github/hooks/better-rm.json`（copilot）、`.agents/hooks.json`（antigravity）、`.qoder/settings.json`（qoder）、`.pi/hooks.json`（pi）、`.opencode/plugins/protect-important-paths.ts`（opencode）與`.grok/hooks/better-rm.json`（grok）。
+儲存庫。其他 Agent 會寫入專案根目錄對應設定檔：`.claude/settings.json`（claude）、`.codex/hooks.json`（codex）、`.cursor/hooks.json`（cursor）、`.github/hooks/better-rm.json`（copilot）、`.agents/hooks.json`（antigravity）、`.qoder/settings.json`（qoder）、`.pi/hooks.json`（pi；要由支援 hooks 的 Pi 擴充套件，例如 pi-hooks，讀取，見 Pi 章節方式 B）、`.opencode/plugins/protect-important-paths.ts`（opencode）與`.grok/hooks/better-rm.json`（grok）。
 安裝程式會保留其他設定與 hooks，只新增或更新目標 hook；修改既有檔案前會建立時間戳備份，重複執行時不會加入重複項目或重寫已是最新狀態的檔案。
 
 自動安裝的 hook 會放在設定檔同目錄，例如
