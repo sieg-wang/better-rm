@@ -414,6 +414,39 @@ function heredocBodyEnd(input, start, delimiter, stripTabs, parenClose = false) 
   return { lines, end: position, terminated: false };
 }
 
+// bash 5.3's reading at a `DELIM)` close with later pending heredocs (R7-a),
+// built from where shellWords recorded it. The remaining bodies are here-data:
+// they are read to their delimiters and skipped. The text is the deferred
+// `)`-tail of that line, the tail of any later body that also ends on a
+// `DELIM)` line, then everything after the last of those bodies; a later body
+// that never closes runs to the end of the input and leaves nothing after it.
+// Only commandTargetsScanOneReading calls this, and only for a reading the
+// budget has already counted, because one call can read to the end of the
+// input: built for every construct, the readings of copies whose later heredoc
+// never closes would cost in proportion to copies x length, before any budget.
+// R7-a 在 `DELIM)` 收尾且後面還有 heredoc 時 bash 5.3 的讀法，由 shellWords 記下的位置建出來。其餘內文是 here-data：
+// 讀到各自的結束標記後略過。文字是那一行延後的 `)` 尾段、同樣以 `DELIM)` 行結束的後段內文的那一行尾段，再接最後一段
+// 內文之後的全部文字；從不收尾的後段內文一路讀到輸入結尾，其後什麼都不剩。只有 commandTargetsScanOneReading 會呼叫它，
+// 而且只為預算已經計入的讀法呼叫，因為一次呼叫就可能讀到輸入結尾：每個寫法都建的話，後段 heredoc 從不收尾的串接寫法
+// 在任何預算之前就要花與「份數 x 長度」成正比的成本。
+function alternateReadingText({ input, resumeAt, end, later }) {
+  const altTails = [input.slice(resumeAt, Math.min(end - 1, input.length))];
+  let altPos = end;
+  let runsToEnd = false;
+  for (const pending of later) {
+    const laterRead = heredocBodyEnd(
+      input, Math.min(altPos, input.length), pending.delimiter, pending.stripTabs, true,
+    );
+    if (!laterRead.terminated) { runsToEnd = true; break; }
+    if (laterRead.resumeAt !== undefined) {
+      altTails.push(input.slice(laterRead.resumeAt, Math.min(laterRead.end - 1, input.length)));
+    }
+    altPos = laterRead.end;
+  }
+  const altAfter = runsToEnd ? '' : input.slice(Math.min(altPos, input.length));
+  return `${altTails.join('\n')}\n${altAfter}`;
+}
+
 // How many substitution reads inside a double quote may FAIL before the three
 // readers below stop being called at all. A read that fails scans to end of input
 // and the caller then advances ONE character, so N unbalanced openers cost
@@ -465,11 +498,12 @@ function shellWords(command) {
   // Alternate whole-command readings this tokenizer could not represent in one
   // pass, recorded for commandTargets to scan and UNION (R7-a). At a `DELIM)`
   // close with LATER pending heredocs the two bashes diverge: this pass takes
-  // bash 3.2's reading, and each entry here is bash 5.3's reading of the same
-  // bytes. Unioning can only ADD targets, so the 3.2 verdict is never weakened.
+  // bash 3.2's reading, and each entry here records where bash 5.3's reading of
+  // the same bytes starts (alternateReadingText builds it). Unioning can only
+  // ADD targets, so the 3.2 verdict is never weakened.
   // 這個 tokenizer 一趟表示不了的「整條命令的另一種讀法」，記下來給 commandTargets 掃描並取聯集（R7-a）。
-  // 在 `DELIM)` 收尾且後面還有 heredoc 時兩個 bash 分歧：本趟取 3.2 讀法，這裡每一筆是同一串位元組的 5.3 讀法。
-  // 取聯集只會「增加」目標，所以 3.2 的判定不會被削弱。
+  // 在 `DELIM)` 收尾且後面還有 heredoc 時兩個 bash 分歧：本趟取 3.2 讀法，這裡每一筆記的是同一串位元組的 5.3 讀法
+  // 從哪裡開始（文字由 alternateReadingText 建）。取聯集只會「增加」目標，所以 3.2 的判定不會被削弱。
   const alternateReadings = [];
   // The '(' operators still open, by kind: 'substitution' for the opener of a
   // "<( )"/">( )" and of a "$(" read character by character, 'group' for any
@@ -874,34 +908,23 @@ function shellWords(command) {
         if (read.resumeAt !== undefined) {
           // bash 5.3 does NOT stop here: it reads the remaining pending bodies
           // as here-data and runs what follows them, deferring this line's
-          // `)`-tail until after them. Record that reading as one command so the
-          // union above can refuse a removal it runs but the 3.2 reading (which
-          // tokenises those later body lines as commands, and can hide a removal
-          // behind an unmatched quote or a heredoc operator in them) does not
-          // surface -- KNOWN-RESIDUALS.md R7-a. Parse-only: this builds text,
-          // runs nothing. Only when later pending heredocs remain; on the LAST
+          // `)`-tail until after them. Record that reading so the union above
+          // can refuse a removal it runs but the 3.2 reading (which tokenises
+          // those later body lines as commands, and can hide a removal behind an
+          // unmatched quote or a heredoc operator in them) does not surface --
+          // KNOWN-RESIDUALS.md R7-a. Only where it starts is recorded here;
+          // alternateReadingText builds its text when commandTargets is about to
+          // scan it, after the reading budget has counted it. Parse-only: runs
+          // nothing. Only when later pending heredocs remain; on the LAST
           // pending body the two readings agree and resumeAt already handles it.
           // bash 5.3 不在這裡停：它把後面還沒讀的內文當 here-data 讀完、再跑其後的命令，這一行的 `)` 尾段延到它們之後。
-          // 把那個讀法記成一條命令，讓上面的聯集能擋下「它會跑、但 3.2 讀法（把後段內文行當命令、可能被其中不成對的
-          // 引號或 heredoc 運算子藏住刪除）表面看不到」的刪除——KNOWN-RESIDUALS.md R7-a。只建文字、不執行。
+          // 把那個讀法記下來，讓上面的聯集能擋下「它會跑、但 3.2 讀法（把後段內文行當命令、可能被其中不成對的
+          // 引號或 heredoc 運算子藏住刪除）表面看不到」的刪除——KNOWN-RESIDUALS.md R7-a。這裡只記它從哪裡開始；
+          // 文字由 alternateReadingText 在 commandTargets 要掃它、而且讀法預算已經計入之後才建。只讀、不執行。
           if (p < pendingHeredocs.length - 1) {
-            const tailEnd = Math.min(read.end - 1, input.length);
-            const altTails = [input.slice(read.resumeAt, tailEnd)];
-            let altPos = read.end;
-            let runsToEnd = false;
-            for (let q = p + 1; q < pendingHeredocs.length; q += 1) {
-              const later = pendingHeredocs[q];
-              const laterRead = heredocBodyEnd(
-                input, Math.min(altPos, input.length), later.delimiter, later.stripTabs, true,
-              );
-              if (!laterRead.terminated) { runsToEnd = true; break; }
-              if (laterRead.resumeAt !== undefined) {
-                altTails.push(input.slice(laterRead.resumeAt, Math.min(laterRead.end - 1, input.length)));
-              }
-              altPos = laterRead.end;
-            }
-            const altAfter = runsToEnd ? '' : input.slice(Math.min(altPos, input.length));
-            alternateReadings.push(`${altTails.join('\n')}\n${altAfter}`);
+            alternateReadings.push({
+              input, resumeAt: read.resumeAt, end: read.end, later: pendingHeredocs.slice(p + 1),
+            });
           }
           break;
         }
@@ -2115,28 +2138,31 @@ const SUBSTITUTION_BUDGET_EXHAUSTED = '\u0000substitution-budget:';
 // The second readings of R7-a ran past their budget (round 4b). Its own sentinel
 // for the reason the one above has its own: what went unread is not a path or a
 // script, it is a reading of the command. At a `DELIM)` close with later
-// pending heredocs, shellWords records bash 5.3's reading of the rest of the
-// command as one alternate, and commandTargetsScanOneReading scans it. An
-// alternate holds everything after its construct, and the scan of an alternate
-// records the alternates of the constructs after it, so chained copies multiply
-// the work. Measured with this budget taken out: 13 KB of chained copies
+// pending heredocs, shellWords records where bash 5.3's reading of the rest of
+// the command starts, and commandTargetsScanOneReading builds that alternate
+// (alternateReadingText) and scans it. An alternate holds everything after its
+// construct, and the scan of an alternate records the alternates of the
+// constructs after it, so chained copies multiply the work. Measured with this budget taken out: 13 KB of chained copies
 // overflowed the stack (the hook then exits 2) when each later body held an
 // unmatched quote, and gave no answer within 20 s when the later bodies were
 // plain words and nothing was removed; the round-4 tip, which had no
 // alternates, answered both in about 0.1 s. A hook past the live 5,000 ms
 // timeout makes no decision. So every alternate is counted against one budget
-// per invocation BEFORE it is scanned -- MAX_ALTERNATE_READINGS readings,
-// MAX_ALTERNATE_READING_LENGTH characters of their text (String length) -- and
+// per invocation BEFORE its text is built (building reads each later body to
+// its delimiter, or to the end of the input when the body never closes) or
+// scanned -- MAX_ALTERNATE_READINGS readings, MAX_ALTERNATE_READING_LENGTH
+// characters of their text (String length) -- and
 // past it the command is refused rather than read, the fail-closed rule the
 // substitution budget above follows. Within the budget nothing changes: no row
 // of the heredoc corpora in test-hooks.js needs more than one reading.
 // R7-a 的第二種讀法超過了預算（round 4b）。它自成一個 sentinel，理由與上面那個相同：讀不到的不是路徑、
-// 也不是腳本，而是這條命令的一種讀法。在 `DELIM)` 收尾且後面還有 heredoc 時，shellWords 把 bash 5.3
-// 對其後整段命令的讀法記成一段另讀，由 commandTargetsScanOneReading 掃描。一段另讀含有它那個寫法之後的
-// 全部文字，而掃描一段另讀又會記下其後各個寫法的另讀，所以串接的寫法會讓成本相乘。拿掉這份預算實測：
+// 也不是腳本，而是這條命令的一種讀法。在 `DELIM)` 收尾且後面還有 heredoc 時，shellWords 記下 bash 5.3
+// 對其後整段命令的讀法從哪裡開始，由 commandTargetsScanOneReading 建出這段另讀（alternateReadingText）
+// 再掃描。一段另讀含有它那個寫法之後的全部文字，而掃描一段另讀又會記下其後各個寫法的另讀，所以串接的寫法會讓成本相乘。拿掉這份預算實測：
 // 13 KB 的串接寫法在每段後段內文都有不成對引號時堆疊溢位（hook 因此以 2 結束），後段內文是單字且沒有刪除時
 // 20 秒內沒有回答；沒有另讀的 round-4 tip 兩者都約 0.1 秒回答。跑贏 live 5,000 ms 逾時的 hook 不做任何裁決。
-// 所以每一段另讀都在「掃描之前」計入單次呼叫的同一份預算——MAX_ALTERNATE_READINGS 段、合計
+// 所以每一段另讀都在「建出文字（要把每段後段內文讀到結束標記，從不收尾的就讀到輸入結尾）與掃描之前」
+// 計入單次呼叫的同一份預算——MAX_ALTERNATE_READINGS 段、合計
 // MAX_ALTERNATE_READING_LENGTH 個字元（String 長度）——超過就拒絕整條命令而不去讀，與上面的替換預算
 // 同一條 fail-closed 規則。預算之內什麼都不變：test-hooks.js 的 heredoc 語料沒有一列需要超過一段另讀。
 const ALTERNATE_READING_BUDGET_EXHAUSTED = '\u0000heredoc-readings:';
@@ -6669,29 +6695,32 @@ function commandTargetsScanOneReading(
     }
   }
   // R7-a: a `DELIM)` close with later pending heredocs reads two ways. The scan
-  // above took bash 3.2's; shellWords recorded bash 5.3's as an alternate whole
-  // command, where the later bodies are here-data and the removal after them
-  // runs. Union its targets so a removal either bash runs is refused. Additive:
-  // this only adds, so every target the 3.2 reading found above is kept.
-  // R7-a：`DELIM)` 收尾且後面還有 heredoc 時有兩種讀法。上面取 3.2；shellWords 把 5.3 記成另一條整命令
+  // above took bash 3.2's; shellWords recorded where bash 5.3's starts, an
+  // alternate whole command in which the later bodies are here-data and the
+  // removal after them runs. Union its targets so a removal either bash runs is
+  // refused. Additive: this only adds, so every target the 3.2 reading found
+  // above is kept.
+  // R7-a：`DELIM)` 收尾且後面還有 heredoc 時有兩種讀法。上面取 3.2；shellWords 記下 5.3 讀法從哪裡開始，那是另一條整命令
   // （後段內文是 here-data、其後的刪除會跑）。對它的目標取聯集，任一 bash 會跑的刪除都擋。相加性：只增不減。
-  // Each alternate is counted against the per-invocation budget BEFORE it is
-  // scanned (ALTERNATE_READING_BUDGET_EXHAUSTED), so an alternate past the budget
-  // is refused without being read.
-  // 每一段另讀在掃描「之前」先計入單次呼叫的預算（ALTERNATE_READING_BUDGET_EXHAUSTED），超過預算的那一段
+  // Each alternate is counted against the per-invocation budget BEFORE its text
+  // is built or scanned (ALTERNATE_READING_BUDGET_EXHAUSTED), so an alternate
+  // past the budget is refused without being read.
+  // 每一段另讀在建出文字與掃描「之前」先計入單次呼叫的預算（ALTERNATE_READING_BUDGET_EXHAUSTED），超過預算的那一段
   // 不讀就拒絕。
   const alternateBudget = nestedScanMemo || { alternateReadings: 0, alternateLength: 0 };
   for (const alternate of (words.alternateReadings || [])) {
     alternateBudget.alternateReadings += 1;
-    alternateBudget.alternateLength += alternate.length;
-    if (
-      alternateBudget.alternateReadings > MAX_ALTERNATE_READINGS
-      || alternateBudget.alternateLength > MAX_ALTERNATE_READING_LENGTH
-    ) {
+    if (alternateBudget.alternateReadings > MAX_ALTERNATE_READINGS) {
       targets.push(ALTERNATE_READING_BUDGET_EXHAUSTED);
       break;
     }
-    targets.push(...nestedScan(alternate, depth + 1, bodiesAreCodeFromCaller, expansionEnv));
+    const text = alternateReadingText(alternate);
+    alternateBudget.alternateLength += text.length;
+    if (alternateBudget.alternateLength > MAX_ALTERNATE_READING_LENGTH) {
+      targets.push(ALTERNATE_READING_BUDGET_EXHAUSTED);
+      break;
+    }
+    targets.push(...nestedScan(text, depth + 1, bodiesAreCodeFromCaller, expansionEnv));
   }
   Object.defineProperty(targets, 'ampersandRedirectionSeen', { value: ampersandRedirectionSeen });
   return targets;

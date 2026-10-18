@@ -4051,13 +4051,17 @@ async function runStdinStreamErrorChecks() {
 // agent actually uses; `evaluate()` alone cannot prove the deployed path works.
 // 命令字必須展開後才知道是什麼（`CMD=rm; $CMD -rf /`），shell 執行時仍是 rm，
 // 因此 hook 必須失敗關閉；此處走真正的 stdin JSON 契約。
-function runHookOverStdin(payload) {
+// `timeout` (ms) kills a hook that does not answer, so a timing row cannot hang
+// the file; without it spawnSync waits as long as the hook runs.
+// `timeout`（毫秒）會殺掉不回答的 hook，讓計時列不會把整個檔案卡住；沒給時 spawnSync 會一直等。
+function runHookOverStdin(payload, timeout = undefined) {
   const child = spawnSync('node', [`${__dirname}/hooks/protect-important-paths.js`], {
     input: JSON.stringify(payload),
     encoding: 'utf8',
     env: { ...process.env, ...env },
+    timeout,
   });
-  return { status: child.status, stdout: child.stdout };
+  return { status: child.status, stdout: child.stdout, signal: child.signal };
 }
 
 const dynamicExecutableBlocked = [
@@ -5244,12 +5248,14 @@ for (const command of heredocDelimiterUnreadable) {
 // has to know: readParenthesized, which must skip a heredoc body to find the `)`
 // of `$( … )`. It does not get a reader of its own -- it calls the SAME two
 // functions as the tokenizer's `<<` arm and newline arm: heredocDelimiter (1
-// definition + 2 calls) and heredocBodyEnd (1 definition + 2 calls). This
-// assertion pins both counts, so a third reader, or a copy of the body loop,
-// cannot drift away from these in silence.
+// definition + 2 calls) and heredocBodyEnd (1 definition + 2 calls, and a third
+// since round 4b: alternateReadingText, which builds the R7-a second reading).
+// This assertion pins both counts, so another reader, or a copy of the body
+// loop, cannot drift away from these in silence.
 // 這個檔案裡「決定 heredoc 內文在哪裡結束」的只有標記 reader 與內文結尾函式。BR2-2 加了唯一另一個
 // 必須知道的地方：readParenthesized（要跳過內文才找得到 `$( … )` 的 `)`）。它不另寫讀法，而是
-// 呼叫與 tokenizer 相同的兩個函式。斷言把兩者的次數都釘住。
+// 呼叫與 tokenizer 相同的兩個函式（round 4b 起 heredocBodyEnd 多了第三個呼叫端：建 R7-a 第二種讀法的
+// alternateReadingText）。斷言把兩者的次數都釘住。
 {
   const hookSource = require('fs').readFileSync(require('path').join(__dirname, 'hooks', 'protect-important-paths.js'), 'utf8');
   const readerCalls = hookSource.match(/heredocDelimiter\(/g) || [];
@@ -5262,7 +5268,7 @@ for (const command of heredocDelimiterUnreadable) {
   assert.equal(
     bodyEndCalls.length,
     4,
-    `heredocBodyEnd must have exactly one definition and three callers -- the tokenizer's pending-heredoc loop, its R7-a alternate-reading loop (which reads the remaining bodies as bash 5.3 here-data), and readParenthesized (found ${bodyEndCalls.length} occurrences of 'heredocBodyEnd('); a copy of the body loop is a sibling that will drift`,
+    `heredocBodyEnd must have exactly one definition and three callers -- the tokenizer's pending-heredoc loop, alternateReadingText (which builds the R7-a second reading, reading the remaining bodies as bash 5.3 here-data), and readParenthesized (found ${bodyEndCalls.length} occurrences of 'heredocBodyEnd('); a copy of the body loop is a sibling that will drift`,
   );
 }
 
@@ -6336,7 +6342,13 @@ let heredocLaterBodyChecks = 0;
 // and a hook past the live 5,000 ms timeout makes no decision. The first rows
 // send chained and nested copies of about 13 KB, 96 KB, 420 KB and 1 MB through
 // the real stdin entry point, the way the live hook runs: each must exit 0 with
-// a deny, inside a 2,000 ms budget scaled by hostFactor(). The rows after them
+// a deny, inside a 2,000 ms budget scaled by hostFactor(). In five of those
+// shapes a later heredoc is never closed, or is closed once at the end, so
+// building one copy's second reading reads that body to the end of the input,
+// or to its one delimiter there. 54b5d49 built every copy's reading in the
+// tokenizer, before the budget counted any: there each of the five took longer
+// than the 2,000 ms budget at 420 KB and none answered within 30 s at 1 MB
+// (measured through stdin). The rows after them
 // are in-process: the budget's two edges (64 readings; 262144 characters of
 // them), the refusal's wording, a protected path that still names itself, the
 // benign later-body shapes the corpus above cannot show (it has no must-allow
@@ -6346,7 +6358,10 @@ let heredocLaterBodyChecks = 0;
 // 所以串接會讓成本相乘：拿掉預算時，13 KB 的串接寫法堆疊溢位（exit 2）或 20 秒內沒有回答，而跑贏 live
 // 5,000 ms 逾時的 hook 不做任何裁決。前面幾列把約 13 KB、96 KB、420 KB、1 MB 的串接與巢狀寫法送進真正的
 // stdin 入口（live hook 就是這樣跑的）：每一列都必須以 0 結束並拒絕，且在依 hostFactor() 放大的 2,000 ms
-// 預算之內。後面幾列在行程內：預算的兩個邊（64 段；合計 262144 個字元）、拒絕的措辭、受保護路徑仍以自己
+// 預算之內。其中五種寫法的後段 heredoc 從不收尾、或只在最後收尾一次，建一份另讀就要把那段內文讀到輸入結尾、
+// 或讀到結尾那唯一一個結束標記；54b5d49 在 tokenizer 裡就把每一份的另讀都建出來、在預算計入任何一段之前：那裡這五種
+// 在 420 KB 都超過 2,000 ms 預算，在 1 MB 沒有一種在 30 秒內回答（經 stdin 實測）。後面幾列在行程內：
+// 預算的兩個邊（64 段；合計 262144 個字元）、拒絕的措辭、受保護路徑仍以自己
 // 為由被拒、上面語料看不到的良性 later-body 寫法（它沒有必須放行的列），以及拒絕訊息建議的出路。
 let alternateReadingBudgetChecks = 0;
 {
@@ -6358,6 +6373,7 @@ let alternateReadingBudgetChecks = 0;
     for (let i = 0; i < k; i += 1) text = `x=$(cat <<A <<B\nA)\n${body}\nB\n${text}\n)`;
     return text;
   };
+  const copies = (unit, last) => (k) => `${Array.from({ length: k }, () => unit).join('\n')}\n${last}`;
   // The smallest copy count whose text reaches `length` characters.
   // 文字長度達到 `length` 的最小份數。
   const atLength = (make, length) => {
@@ -6382,16 +6398,35 @@ let alternateReadingBudgetChecks = 0;
       (length) => chained(60, 'p'.repeat(Math.max(1, Math.floor(length / 60) - 30)), '', 'rm -rf /etc')],
     ['nested copies, a removal at the core',
       (length) => atLength((k) => nested(k, 'b', 'rm -rf /etc'), length)],
+    // A later heredoc that is never closed, or closed once at the very end:
+    // building one copy's second reading reads that body to the end of the
+    // input, or to its one delimiter there.
+    // 後段 heredoc 從不收尾、或只在最後收尾一次：建一份另讀就要把那段內文讀到輸入結尾，或讀到結尾那唯一一個結束標記。
+    ['copies whose later heredoc is never closed, `$( )`, one removal at the end',
+      (length) => atLength(copies('x=$(cat <<A <<B\nA)', 'rm -rf /etc'), length)],
+    ['copies whose later heredoc is never closed, `<( )`, one removal at the end',
+      (length) => atLength(copies('diff <(cat <<A <<B\nA) f', 'rm -rf /etc'), length)],
+    ['copies with `<<-` delimiters whose later heredoc is never closed, one removal at the end',
+      (length) => atLength(copies('x=$(cat <<-A <<-B\n\tA)', 'rm -rf /etc'), length)],
+    ['copies with three heredocs whose later two are never closed, one removal at the end',
+      (length) => atLength(copies('diff <(cat <<A <<B <<C\nA) f', 'rm -rf /etc'), length)],
+    ['copies whose later heredoc is closed once, at the end, before one removal',
+      (length) => atLength(copies('x=$(cat <<A <<B\nA)', 'B\nrm -rf /etc'), length)],
   ];
   const alternateBudgetMs = 2000 * hostFactor();
+  // A hang guard, not a budget: a hook that has not answered in 30 s has failed
+  // the row whatever the host, and this keeps that failure from stalling the file.
+  // 防卡住而不是預算：30 秒還沒回答的 hook 不論主機快慢都已經失敗，這只是不讓它拖住整個檔案。
+  const hangGuardMs = 30000;
   for (const length of [13, 96, 420, 1024].map((kb) => kb * 1024)) {
     for (const [label, make] of shapes) {
       const command = make(length);
       const started = process.hrtime.bigint();
-      const { status, stdout } = runHookOverStdin(claude(command));
+      const { status, signal, stdout } = runHookOverStdin(claude(command), hangGuardMs);
       const run = { ms: Number(process.hrtime.bigint() - started) / 1e6 };
       assert.equal(status, 0,
-        `${label} (${command.length} characters): the hook must answer through stdin, not exit ${status}`);
+        `${label} (${command.length} characters): the hook must answer through stdin, not exit ${status}`
+        + (signal ? ` (${signal}, after ${run.ms.toFixed(0)}ms)` : ''));
       assert.match(stdout || '', /"permissionDecision":"deny"/,
         `${label} (${command.length} characters): must be denied through stdin`);
       timingBudget(
@@ -8799,7 +8834,7 @@ const PINNED_TIMING_COUNTERS = [
   ['heredocOracleChecks', heredocOracleChecks, 238],
   ['findClauseTimingChecks', findClauseTimingChecks, 48],
   ['targetLimitChecks', targetLimitChecks, 9],
-  ['alternateReadingBudgetChecks', alternateReadingBudgetChecks, 64],
+  ['alternateReadingBudgetChecks', alternateReadingBudgetChecks, 124],
 ];
 for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {
   assert.equal(actual, expected,
