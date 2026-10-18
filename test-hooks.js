@@ -8201,6 +8201,7 @@ withScratchDir('better-rm-hook-device-', (scratchDir) => {
 const pluginPath = `${__dirname}/.opencode/plugins/protect-important-paths.ts`;
 const pluginRewrites = [
   [/^import type \{ Plugin \} from "@opencode-ai\/plugin";$/m, ''],
+  [/^import path from "node:path";$/m, 'const path = nodePath;'],
   [/^\/\/ @ts-ignore$/m, ''],
   [
     /^import \{ evaluate \} from "\.\.\/\.\.\/hooks\/protect-important-paths";$/m,
@@ -8222,8 +8223,9 @@ for (const [pattern, replacement] of pluginRewrites) {
 }
 const pluginFactory = new Function(
   'hookModule',
+  'nodePath',
   `${pluginBody}\nreturn ProtectImportantPathsPlugin;`
-)({ evaluate });
+)({ evaluate }, require('path'));
 
 const pluginDenied = ['rm -rf /', 'rm -rf /etc', 'rm -rf .git', 'CMD=rm; $CMD -rf /'];
 const pluginAllowed = ['rm -rf build', 'ls -la /etc', 'echo rm -rf /'];
@@ -8285,6 +8287,52 @@ async function runOpenCodePluginChecks() {
     }
     assert.ok(thrown, 'the OpenCode plugin must pass ctx.directory to evaluate as cwd');
     pluginChecks += 1;
+  } finally {
+    if (previousExtraDirs === undefined) delete process.env.BETTER_RM_PROTECTED_DIRS;
+    else process.env.BETTER_RM_PROTECTED_DIRS = previousExtraDirs;
+  }
+
+  // OpenCode's bash tool takes a per-call `workdir` and runs the command there:
+  // path.resolve(ctx.directory, workdir) (OpenCode v1.19.3 tool/shell.ts), and
+  // its schema tells the model to use workdir instead of `cd`. That directory is
+  // the cwd the gate must judge relative paths and $PWD against; judging against
+  // ctx.directory moved every relative decision to the wrong place. A workdir
+  // that is present but not a string is refused rather than guessed at.
+  // OpenCode 的 bash 工具每次呼叫可帶 `workdir`，命令就在 path.resolve(ctx.directory, workdir)
+  // 執行，它的 schema 也要模型用 workdir 取代 `cd`。相對路徑與 $PWD 必須對著那個目錄判定；
+  // 對著 ctx.directory 判定會把所有相對判斷放錯地方。有 workdir 但不是字串時直接拒絕，不猜。
+  const refusesWith = async (args, label) => {
+    let thrown = null;
+    try {
+      await before({ tool: 'bash' }, { args });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown, `the OpenCode plugin must refuse ${label}: ${JSON.stringify(args)}`);
+    assert.match(thrown.message, REFUSAL_WORDING, `the OpenCode refusal must name the reason: ${label}`);
+    pluginChecks += 1;
+  };
+  const allowsWith = async (args, label) => {
+    try {
+      await before({ tool: 'bash' }, { args });
+    } catch (error) {
+      assert.fail(`the OpenCode plugin must not refuse ${label}: ${JSON.stringify(args)} (${error.message})`);
+    }
+    pluginChecks += 1;
+  };
+  await refusesWith({ command: 'rm -rf objects', workdir: '.git' }, 'a relative removal in a relative workdir inside .git');
+  await refusesWith({ command: 'rm -rf objects', workdir: '/workspace/project/.git' }, 'a relative removal in an absolute workdir inside .git');
+  await refusesWith({ command: 'rm -rf "$PWD"', workdir: '/etc' }, '"$PWD" in an absolute workdir');
+  await refusesWith({ command: 'rm -rf etc', workdir: '../..' }, 'a relative removal in a relative workdir resolved against ctx.directory');
+  await refusesWith({ command: 'rm -rf etc', workdir: 123 }, 'a workdir that is not a string');
+  await allowsWith({ command: 'rm -rf objects', workdir: 'src' }, 'the same relative removal outside .git');
+  await allowsWith({ command: 'rm -rf build', workdir: '..' }, 'an ordinary relative removal in a relative workdir');
+  await allowsWith({ command: 'ls -la', workdir: '/etc' }, 'a command that removes nothing');
+  await allowsWith({ command: 'rm -rf build' }, 'no workdir at all');
+  process.env.BETTER_RM_PROTECTED_DIRS = '/workspace/project/data';
+  try {
+    await refusesWith({ command: 'rm -rf ../data', workdir: 'src' }, 'a declared directory reached from a relative workdir');
+    await allowsWith({ command: 'rm -rf ../data2', workdir: 'src' }, 'its undeclared neighbour from the same workdir');
   } finally {
     if (previousExtraDirs === undefined) delete process.env.BETTER_RM_PROTECTED_DIRS;
     else process.env.BETTER_RM_PROTECTED_DIRS = previousExtraDirs;
