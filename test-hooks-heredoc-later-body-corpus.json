@@ -1,0 +1,728 @@
+{
+ "purpose": "R7-a later-heredoc-body differential corpus (round 4b, 2026-10-17). A substitution opens 2-3 heredocs on one line; an earlier one closes by `DELIM)`. runs53/runs32 were measured with bash 5.3.20 and bash 3.2.57 by `bash -n` plus a `;;` command-position differential on a never-called function wrapping the shape with a harmless stand-in (NEVER executed); regenerate with test/heredoc-later-body/generate.js and label.sh. A shape with runs53 OR runs32 true is one at least one bash runs the removal on, so the guard must DENY it. The gate reads both bash readings and unions their targets (KNOWN-RESIDUALS.md R7-a).",
+ "generated": "2026-10-18",
+ "shapes": 120,
+ "mustDeny": 120,
+ "rows": [
+  {
+   "id": "a-dollar-n2-plain-c0-apos",
+   "cmd": "x=$(cat <<A <<B\nb0\nA)\nit's here\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n2-plain-c0-dquote",
+   "cmd": "x=$(cat <<A <<B\nb0\nA)\nsay \"hi\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n2-plain-c0-heredocop",
+   "cmd": "x=$(cat <<A <<B\nb0\nA)\nsee <<EOF\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n2-plain-c0-backtick",
+   "cmd": "x=$(cat <<A <<B\nb0\nA)\ntick `echo\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n2-plain-c0-plain",
+   "cmd": "x=$(cat <<A <<B\nb0\nA)\nplain body\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-dollar-n2-quoted-c0-apos",
+   "cmd": "x=$(cat <<'A' <<'B'\nb0\nA)\nit's here\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n2-quoted-c0-dquote",
+   "cmd": "x=$(cat <<'A' <<'B'\nb0\nA)\nsay \"hi\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n2-quoted-c0-heredocop",
+   "cmd": "x=$(cat <<'A' <<'B'\nb0\nA)\nsee <<EOF\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n2-quoted-c0-backtick",
+   "cmd": "x=$(cat <<'A' <<'B'\nb0\nA)\ntick `echo\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n2-quoted-c0-plain",
+   "cmd": "x=$(cat <<'A' <<'B'\nb0\nA)\nplain body\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-dollar-n3-plain-c0-apos",
+   "cmd": "x=$(cat <<A <<B <<C\nb0\nA)\nit's here\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-plain-c0-dquote",
+   "cmd": "x=$(cat <<A <<B <<C\nb0\nA)\nsay \"hi\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-plain-c0-heredocop",
+   "cmd": "x=$(cat <<A <<B <<C\nb0\nA)\nsee <<EOF\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-plain-c0-backtick",
+   "cmd": "x=$(cat <<A <<B <<C\nb0\nA)\ntick `echo\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-plain-c0-plain",
+   "cmd": "x=$(cat <<A <<B <<C\nb0\nA)\nplain body\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-dollar-n3-plain-c1-apos",
+   "cmd": "x=$(cat <<A <<B <<C\nb0\nA\nb1\nB)\nit's here\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-plain-c1-dquote",
+   "cmd": "x=$(cat <<A <<B <<C\nb0\nA\nb1\nB)\nsay \"hi\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-plain-c1-heredocop",
+   "cmd": "x=$(cat <<A <<B <<C\nb0\nA\nb1\nB)\nsee <<EOF\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-plain-c1-backtick",
+   "cmd": "x=$(cat <<A <<B <<C\nb0\nA\nb1\nB)\ntick `echo\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-plain-c1-plain",
+   "cmd": "x=$(cat <<A <<B <<C\nb0\nA\nb1\nB)\nplain body\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-dollar-n3-quoted-c0-apos",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nb0\nA)\nit's here\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-quoted-c0-dquote",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nb0\nA)\nsay \"hi\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-quoted-c0-heredocop",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nb0\nA)\nsee <<EOF\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-quoted-c0-backtick",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nb0\nA)\ntick `echo\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-quoted-c0-plain",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nb0\nA)\nplain body\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-dollar-n3-quoted-c1-apos",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\nit's here\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-quoted-c1-dquote",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\nsay \"hi\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-quoted-c1-heredocop",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\nsee <<EOF\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-quoted-c1-backtick",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\ntick `echo\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dollar-n3-quoted-c1-plain",
+   "cmd": "x=$(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\nplain body\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-dq-n2-plain-c0-apos",
+   "cmd": "x=\"$(cat <<A <<B\nb0\nA)\"\nit's here\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n2-plain-c0-dquote",
+   "cmd": "x=\"$(cat <<A <<B\nb0\nA)\"\nsay \"hi\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n2-plain-c0-heredocop",
+   "cmd": "x=\"$(cat <<A <<B\nb0\nA)\"\nsee <<EOF\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n2-plain-c0-backtick",
+   "cmd": "x=\"$(cat <<A <<B\nb0\nA)\"\ntick `echo\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n2-plain-c0-plain",
+   "cmd": "x=\"$(cat <<A <<B\nb0\nA)\"\nplain body\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-dq-n2-quoted-c0-apos",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nb0\nA)\"\nit's here\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n2-quoted-c0-dquote",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nb0\nA)\"\nsay \"hi\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n2-quoted-c0-heredocop",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nb0\nA)\"\nsee <<EOF\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n2-quoted-c0-backtick",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nb0\nA)\"\ntick `echo\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n2-quoted-c0-plain",
+   "cmd": "x=\"$(cat <<'A' <<'B'\nb0\nA)\"\nplain body\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-dq-n3-plain-c0-apos",
+   "cmd": "x=\"$(cat <<A <<B <<C\nb0\nA)\"\nit's here\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-plain-c0-dquote",
+   "cmd": "x=\"$(cat <<A <<B <<C\nb0\nA)\"\nsay \"hi\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-plain-c0-heredocop",
+   "cmd": "x=\"$(cat <<A <<B <<C\nb0\nA)\"\nsee <<EOF\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-plain-c0-backtick",
+   "cmd": "x=\"$(cat <<A <<B <<C\nb0\nA)\"\ntick `echo\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-plain-c0-plain",
+   "cmd": "x=\"$(cat <<A <<B <<C\nb0\nA)\"\nplain body\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-dq-n3-plain-c1-apos",
+   "cmd": "x=\"$(cat <<A <<B <<C\nb0\nA\nb1\nB)\"\nit's here\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-plain-c1-dquote",
+   "cmd": "x=\"$(cat <<A <<B <<C\nb0\nA\nb1\nB)\"\nsay \"hi\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-plain-c1-heredocop",
+   "cmd": "x=\"$(cat <<A <<B <<C\nb0\nA\nb1\nB)\"\nsee <<EOF\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-plain-c1-backtick",
+   "cmd": "x=\"$(cat <<A <<B <<C\nb0\nA\nb1\nB)\"\ntick `echo\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-plain-c1-plain",
+   "cmd": "x=\"$(cat <<A <<B <<C\nb0\nA\nb1\nB)\"\nplain body\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-dq-n3-quoted-c0-apos",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nb0\nA)\"\nit's here\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-quoted-c0-dquote",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nb0\nA)\"\nsay \"hi\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-quoted-c0-heredocop",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nb0\nA)\"\nsee <<EOF\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-quoted-c0-backtick",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nb0\nA)\"\ntick `echo\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-quoted-c0-plain",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nb0\nA)\"\nplain body\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-dq-n3-quoted-c1-apos",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\"\nit's here\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-quoted-c1-dquote",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\"\nsay \"hi\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-quoted-c1-heredocop",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\"\nsee <<EOF\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-quoted-c1-backtick",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\"\ntick `echo\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-dq-n3-quoted-c1-plain",
+   "cmd": "x=\"$(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\"\nplain body\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-procsub-n2-plain-c0-apos",
+   "cmd": "diff <(cat <<A <<B\nb0\nA) z.txt\nit's here\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n2-plain-c0-dquote",
+   "cmd": "diff <(cat <<A <<B\nb0\nA) z.txt\nsay \"hi\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n2-plain-c0-heredocop",
+   "cmd": "diff <(cat <<A <<B\nb0\nA) z.txt\nsee <<EOF\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n2-plain-c0-backtick",
+   "cmd": "diff <(cat <<A <<B\nb0\nA) z.txt\ntick `echo\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n2-plain-c0-plain",
+   "cmd": "diff <(cat <<A <<B\nb0\nA) z.txt\nplain body\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-procsub-n2-quoted-c0-apos",
+   "cmd": "diff <(cat <<'A' <<'B'\nb0\nA) z.txt\nit's here\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n2-quoted-c0-dquote",
+   "cmd": "diff <(cat <<'A' <<'B'\nb0\nA) z.txt\nsay \"hi\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n2-quoted-c0-heredocop",
+   "cmd": "diff <(cat <<'A' <<'B'\nb0\nA) z.txt\nsee <<EOF\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n2-quoted-c0-backtick",
+   "cmd": "diff <(cat <<'A' <<'B'\nb0\nA) z.txt\ntick `echo\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n2-quoted-c0-plain",
+   "cmd": "diff <(cat <<'A' <<'B'\nb0\nA) z.txt\nplain body\nB\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-procsub-n3-plain-c0-apos",
+   "cmd": "diff <(cat <<A <<B <<C\nb0\nA) z.txt\nit's here\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-plain-c0-dquote",
+   "cmd": "diff <(cat <<A <<B <<C\nb0\nA) z.txt\nsay \"hi\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-plain-c0-heredocop",
+   "cmd": "diff <(cat <<A <<B <<C\nb0\nA) z.txt\nsee <<EOF\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-plain-c0-backtick",
+   "cmd": "diff <(cat <<A <<B <<C\nb0\nA) z.txt\ntick `echo\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-plain-c0-plain",
+   "cmd": "diff <(cat <<A <<B <<C\nb0\nA) z.txt\nplain body\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-procsub-n3-plain-c1-apos",
+   "cmd": "diff <(cat <<A <<B <<C\nb0\nA\nb1\nB) z.txt\nit's here\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-plain-c1-dquote",
+   "cmd": "diff <(cat <<A <<B <<C\nb0\nA\nb1\nB) z.txt\nsay \"hi\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-plain-c1-heredocop",
+   "cmd": "diff <(cat <<A <<B <<C\nb0\nA\nb1\nB) z.txt\nsee <<EOF\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-plain-c1-backtick",
+   "cmd": "diff <(cat <<A <<B <<C\nb0\nA\nb1\nB) z.txt\ntick `echo\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-plain-c1-plain",
+   "cmd": "diff <(cat <<A <<B <<C\nb0\nA\nb1\nB) z.txt\nplain body\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-procsub-n3-quoted-c0-apos",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nb0\nA) z.txt\nit's here\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-quoted-c0-dquote",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nb0\nA) z.txt\nsay \"hi\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-quoted-c0-heredocop",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nb0\nA) z.txt\nsee <<EOF\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-quoted-c0-backtick",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nb0\nA) z.txt\ntick `echo\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-quoted-c0-plain",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nb0\nA) z.txt\nplain body\nB\nb2\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-procsub-n3-quoted-c1-apos",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB) z.txt\nit's here\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-quoted-c1-dquote",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB) z.txt\nsay \"hi\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-quoted-c1-heredocop",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB) z.txt\nsee <<EOF\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-quoted-c1-backtick",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB) z.txt\ntick `echo\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-procsub-n3-quoted-c1-plain",
+   "cmd": "diff <(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB) z.txt\nplain body\nC\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-nested-n2-plain-c0-apos",
+   "cmd": "x=$(echo $(cat <<A <<B\nb0\nA)\nit's here\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n2-plain-c0-dquote",
+   "cmd": "x=$(echo $(cat <<A <<B\nb0\nA)\nsay \"hi\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n2-plain-c0-heredocop",
+   "cmd": "x=$(echo $(cat <<A <<B\nb0\nA)\nsee <<EOF\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-nested-n2-plain-c0-backtick",
+   "cmd": "x=$(echo $(cat <<A <<B\nb0\nA)\ntick `echo\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n2-plain-c0-plain",
+   "cmd": "x=$(echo $(cat <<A <<B\nb0\nA)\nplain body\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-nested-n2-quoted-c0-apos",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nb0\nA)\nit's here\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n2-quoted-c0-dquote",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nb0\nA)\nsay \"hi\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n2-quoted-c0-heredocop",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nb0\nA)\nsee <<EOF\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-nested-n2-quoted-c0-backtick",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nb0\nA)\ntick `echo\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n2-quoted-c0-plain",
+   "cmd": "x=$(echo $(cat <<'A' <<'B'\nb0\nA)\nplain body\nB\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-nested-n3-plain-c0-apos",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nb0\nA)\nit's here\nB\nb2\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n3-plain-c0-dquote",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nb0\nA)\nsay \"hi\nB\nb2\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n3-plain-c0-heredocop",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nb0\nA)\nsee <<EOF\nB\nb2\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-nested-n3-plain-c0-backtick",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nb0\nA)\ntick `echo\nB\nb2\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n3-plain-c0-plain",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nb0\nA)\nplain body\nB\nb2\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-nested-n3-plain-c1-apos",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nb0\nA\nb1\nB)\nit's here\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n3-plain-c1-dquote",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nb0\nA\nb1\nB)\nsay \"hi\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n3-plain-c1-heredocop",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nb0\nA\nb1\nB)\nsee <<EOF\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-nested-n3-plain-c1-backtick",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nb0\nA\nb1\nB)\ntick `echo\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n3-plain-c1-plain",
+   "cmd": "x=$(echo $(cat <<A <<B <<C\nb0\nA\nb1\nB)\nplain body\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-nested-n3-quoted-c0-apos",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nb0\nA)\nit's here\nB\nb2\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n3-quoted-c0-dquote",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nb0\nA)\nsay \"hi\nB\nb2\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n3-quoted-c0-heredocop",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nb0\nA)\nsee <<EOF\nB\nb2\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-nested-n3-quoted-c0-backtick",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nb0\nA)\ntick `echo\nB\nb2\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n3-quoted-c0-plain",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nb0\nA)\nplain body\nB\nb2\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-nested-n3-quoted-c1-apos",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\nit's here\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n3-quoted-c1-dquote",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\nsay \"hi\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n3-quoted-c1-heredocop",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\nsee <<EOF\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  },
+  {
+   "id": "a-nested-n3-quoted-c1-backtick",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\ntick `echo\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": false
+  },
+  {
+   "id": "a-nested-n3-quoted-c1-plain",
+   "cmd": "x=$(echo $(cat <<'A' <<'B' <<'C'\nb0\nA\nb1\nB)\nplain body\nC\n)\nrm -rf /etc",
+   "runs53": true,
+   "runs32": true
+  }
+ ]
+}

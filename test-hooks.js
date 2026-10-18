@@ -5261,8 +5261,8 @@ for (const command of heredocDelimiterUnreadable) {
   const bodyEndCalls = hookSource.match(/heredocBodyEnd\(/g) || [];
   assert.equal(
     bodyEndCalls.length,
-    3,
-    `heredocBodyEnd must have exactly one definition and two callers, the tokenizer and readParenthesized (found ${bodyEndCalls.length} occurrences of 'heredocBodyEnd('); a copy of the body loop is a sibling that will drift`,
+    4,
+    `heredocBodyEnd must have exactly one definition and three callers -- the tokenizer's pending-heredoc loop, its R7-a alternate-reading loop (which reads the remaining bodies as bash 5.3 here-data), and readParenthesized (found ${bodyEndCalls.length} occurrences of 'heredocBodyEnd('); a copy of the body loop is a sibling that will drift`,
   );
 }
 
@@ -6240,19 +6240,20 @@ let heredocSplitTimingChecks = 0;
 // MUST be denied here -- this is the regression guard the 7,391-payload corpus
 // and the everyday list could not be (they hold no `DELIM)` shape). What it does
 // NOT cover: every heredoc body in it is a plain word (body0, body1, ebody), so
-// a later body holding a quote or a heredoc operator (KNOWN-RESIDUALS.md R7-a)
-// is outside it; and its 20 backquote rows (o-backtick, asserted below) all close
-// the substitution after an exact delimiter line, so a heredoc whose delimiter
-// line carries the closing backquote (`A` + backquote, R7-b) is outside it too.
-// Both are open and not asserted either way here. This loop fails if any
-// must-deny shape is allowed or if the corpus is silently shrunk.
+// a later body holding a quote or a heredoc operator is outside it -- that is
+// the separate later-body corpus below (R7-a, closed in round 4b); and its 20
+// backquote rows (o-backtick, asserted below) all close the substitution after
+// an exact delimiter line, so a heredoc whose delimiter line carries the closing
+// backquote (`A` + backquote, R7-b) is outside it too. R7-b is still open
+// (KNOWN-RESIDUALS.md). This loop fails if any must-deny shape is allowed or if
+// the corpus is silently shrunk.
 // 差分 oracle 語料（BR2-2-REG3）：heredoc 在 $()/<()/反引號 裡的形狀，依 heredoc 數、標記樣式、哪些以 `DELIM)`
 // 收尾、stand-in 位置、容器組合而成。每個形狀「bash 5.3 與 3.2 會不會把 stand-in 當命令跑」是用 bash -n 加 `;;`
 // 命令位置差分量出來的（never-called 函式，從不執行）；產生器與 bash 的執行不在本 repo（在 2026-10-17 審查活動的私有目錄），
 // 下面的 runs53/runs32 是那次凍結的量測。任一 bash 會跑刪除的形狀都必須在這裡被拒。它「沒有」涵蓋的：語料裡的內文都是單字
-// （body0、body1、ebody），所以含引號或 heredoc 運算子的後段內文（KNOWN-RESIDUALS.md R7-a）不在裡面；語料的 20 個反引號列
-// （o-backtick，下面有斷言）都在一行剛好是標記之後才關掉替換，所以標記行本身帶著結尾反引號的 heredoc（R7-b）也不在裡面。
-// 兩者都還沒修，這裡不對它們做任何斷言。
+// （body0、body1、ebody），所以含引號或 heredoc 運算子的後段內文由下面獨立的 later-body 語料涵蓋（R7-a，round 4b 已修）；
+// 語料的 20 個反引號列（o-backtick，下面有斷言）都在一行剛好是標記之後才關掉替換，所以標記行本身帶著結尾反引號的
+// heredoc（R7-b）不在裡面，R7-b 仍未修（KNOWN-RESIDUALS.md）。
 let heredocOracleChecks = 0;
 {
   const oracle = JSON.parse(fs.readFileSync(`${__dirname}/test-hooks-heredoc-corpus.json`, 'utf8'));
@@ -6270,6 +6271,182 @@ let heredocOracleChecks = 0;
   assert.equal(mustDeny, oracle.mustDeny,
     `counted ${mustDeny} must-deny rows but the corpus header says ${oracle.mustDeny}`);
   heredocOracleChecks += 1;
+}
+
+// R7-a (round 4b): the later-heredoc-body corpus. A substitution opens 2-3
+// heredocs on one line, an earlier one closed by `DELIM)`; bash 3.2 reads the
+// following lines as commands, bash 5.3 reads the remaining bodies as here-data
+// and runs what follows them. The gate reads BOTH and unions the targets, so a
+// removal either bash runs is refused. The rows are re-derived from the checked-in
+// generator (test/heredoc-later-body/generate.js) and must match the corpus file
+// exactly, so the frozen labels belong to that list; every row at least one bash
+// runs the removal on must be DENIED (some `"$( )"` rows fail closed as unreadable
+// rather than naming /etc -- still a deny).
+// R7-a（round 4b）：後段 heredoc 內文語料。替換在一行開 2-3 個 heredoc、較早一個以 `DELIM)` 收尾；
+// 3.2 把其後各行當命令、5.3 把其餘內文當 here-data 再跑其後的刪除。閘門兩種都讀、目標取聯集，任一 bash 會跑的刪除都擋。
+// 列由已簽入的產生器重新推導，必須與語料檔完全一致；任一 bash 會跑刪除的列都必須被拒（部分 `"$( )"` 列以「讀不到」fail-closed，仍是拒絕）。
+let heredocLaterBodyChecks = 0;
+{
+  const corpus = JSON.parse(fs.readFileSync(`${__dirname}/test-hooks-heredoc-later-body-corpus.json`, 'utf8'));
+  const generated = require(`${__dirname}/test/heredoc-later-body/generate.js`).shapes();
+  assert.equal(corpus.rows.length, generated.length,
+    `the later-body corpus has ${corpus.rows.length} rows but the generator emits ${generated.length}`);
+  for (let i = 0; i < generated.length; i += 1) {
+    assert.equal(corpus.rows[i].id, generated[i].id,
+      `later-body corpus row ${i} is ${corpus.rows[i].id}, not the generator's ${generated[i].id}`);
+    assert.equal(corpus.rows[i].cmd, generated[i].cmd,
+      `later-body corpus row ${corpus.rows[i].id} command drifted from the generator`);
+  }
+  assert.ok(corpus.rows.length >= 120 && corpus.mustDeny >= 120,
+    `the later-body corpus was shrunk: ${corpus.rows.length} rows, ${corpus.mustDeny} must-deny`);
+  let mustDeny = 0;
+  for (const row of corpus.rows) {
+    if (!row.runs53 && !row.runs32) continue;
+    mustDeny += 1;
+    const out = evaluate(claude(row.cmd), env)?.hookSpecificOutput;
+    assert.equal(out?.permissionDecision, 'deny',
+      `later-body ${row.id} (bash 5.3 runs=${row.runs53}, 3.2 runs=${row.runs32}) must be denied: ${JSON.stringify(row.cmd)}`);
+    heredocLaterBodyChecks += 1;
+  }
+  assert.equal(mustDeny, corpus.mustDeny,
+    `counted ${mustDeny} must-deny later-body rows but the corpus header says ${corpus.mustDeny}`);
+  heredocLaterBodyChecks += 1;
+}
+
+// THE R7-a READING BUDGET (round 4b). At a `DELIM)` close with later pending
+// heredocs the gate also scans bash 5.3's reading of the rest of the command
+// (the corpus block above). An alternate holds everything after its construct,
+// and the scan of an alternate records the alternates of the constructs after
+// it, so chained copies multiply the work: with the budget taken out, 13 KB of
+// chained copies overflowed the stack (exit 2) or did not answer within 20 s,
+// and a hook past the live 5,000 ms timeout makes no decision. The first rows
+// send chained and nested copies of about 13 KB, 96 KB, 420 KB and 1 MB through
+// the real stdin entry point, the way the live hook runs: each must exit 0 with
+// a deny, inside a 2,000 ms budget scaled by hostFactor(). The rows after them
+// are in-process: the budget's two edges (64 readings; 262144 characters of
+// them), the refusal's wording, a protected path that still names itself, the
+// benign later-body shapes the corpus above cannot show (it has no must-allow
+// row), and the way out the refusal suggests.
+// R7-a 第二種讀法的預算（round 4b）。在 `DELIM)` 收尾且後面還有 heredoc 時，閘門也掃 bash 5.3 對其後整段
+// 命令的讀法（上面的語料區塊）。一段另讀含有它那個寫法之後的全部文字，掃描它又會記下其後各個寫法的另讀，
+// 所以串接會讓成本相乘：拿掉預算時，13 KB 的串接寫法堆疊溢位（exit 2）或 20 秒內沒有回答，而跑贏 live
+// 5,000 ms 逾時的 hook 不做任何裁決。前面幾列把約 13 KB、96 KB、420 KB、1 MB 的串接與巢狀寫法送進真正的
+// stdin 入口（live hook 就是這樣跑的）：每一列都必須以 0 結束並拒絕，且在依 hostFactor() 放大的 2,000 ms
+// 預算之內。後面幾列在行程內：預算的兩個邊（64 段；合計 262144 個字元）、拒絕的措辭、受保護路徑仍以自己
+// 為由被拒、上面語料看不到的良性 later-body 寫法（它沒有必須放行的列），以及拒絕訊息建議的出路。
+let alternateReadingBudgetChecks = 0;
+{
+  const group = (body) => `v=$(cat <<A <<B\nA)\n${body}\nB`;
+  const chained = (k, body, each, last) => Array.from({ length: k }, () => (each ? `${group(body)}\n${each}` : group(body)))
+    .join('\n') + (last ? `\n${last}` : '');
+  const nested = (k, body, core) => {
+    let text = core;
+    for (let i = 0; i < k; i += 1) text = `x=$(cat <<A <<B\nA)\n${body}\nB\n${text}\n)`;
+    return text;
+  };
+  // The smallest copy count whose text reaches `length` characters.
+  // 文字長度達到 `length` 的最小份數。
+  const atLength = (make, length) => {
+    let low = 1;
+    let high = 1;
+    while (make(high).length < length) high *= 2;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (make(mid).length < length) low = mid + 1; else high = mid;
+    }
+    return make(low);
+  };
+  const shapes = [
+    ['chained copies, an unmatched quote in each later body, a removal after each',
+      (length) => atLength((k) => chained(k, "it's here", 'rm -rf /etc', ''), length)],
+    ['chained copies, plain later bodies, one removal at the end',
+      (length) => atLength((k) => chained(k, 'b', '', 'rm -rf /etc'), length)],
+    // 60 copies stay under the failed-read budget of 64 `$(` reads, so the
+    // tokenizer's own budget never refuses them; the bodies carry the length.
+    // 60 份在 64 次 `$(` 讀取失敗的預算之下，tokenizer 自己的預算不會拒絕它們；長度由內文撐起來。
+    ['60 chained copies with long later bodies, one removal at the end',
+      (length) => chained(60, 'p'.repeat(Math.max(1, Math.floor(length / 60) - 30)), '', 'rm -rf /etc')],
+    ['nested copies, a removal at the core',
+      (length) => atLength((k) => nested(k, 'b', 'rm -rf /etc'), length)],
+  ];
+  const alternateBudgetMs = 2000 * hostFactor();
+  for (const length of [13, 96, 420, 1024].map((kb) => kb * 1024)) {
+    for (const [label, make] of shapes) {
+      const command = make(length);
+      const started = process.hrtime.bigint();
+      const { status, stdout } = runHookOverStdin(claude(command));
+      const run = { ms: Number(process.hrtime.bigint() - started) / 1e6 };
+      assert.equal(status, 0,
+        `${label} (${command.length} characters): the hook must answer through stdin, not exit ${status}`);
+      assert.match(stdout || '', /"permissionDecision":"deny"/,
+        `${label} (${command.length} characters): must be denied through stdin`);
+      timingBudget(
+        run.ms < alternateBudgetMs,
+        `${label} (${command.length} characters) took ${run.ms.toFixed(0)}ms through stdin against a `
+        + `${alternateBudgetMs.toFixed(0)}ms budget: the second readings are not bounded`,
+      );
+      alternateReadingBudgetChecks += 3;
+    }
+  }
+  const verdictOf = (command) => evaluate(claude(command), env)?.hookSpecificOutput;
+  const budgetRule = /Rule: heredoc reading budget exhausted\./;
+  // THE COUNT EDGE. Each `bash -c` string is a nested scan of its own holding one
+  // construct, so each needs exactly one second reading: 64 are read and the 65th
+  // is refused unread. The bodies differ, so the scan memo cannot fold them.
+  // 次數的邊：每個 `bash -c` 字串是各自的巢狀掃描、各有一個寫法，所以各要剛好一段另讀：64 段會讀，第 65 段
+  // 不讀就拒絕。內文各不相同，掃描的 memo 才不會把它們併成一段。
+  const bashC = (count) => Array.from({ length: count },
+    (_, i) => `bash -c 'x=$(cat <<A <<B\nA)\nb${i}\nB'`).join('\n');
+  assert.equal(verdictOf(bashC(64)), undefined, '64 second readings are inside the budget: allowed');
+  const overCount = verdictOf(bashC(65));
+  assert.equal(overCount?.permissionDecision, 'deny', 'a 65th second reading is past the budget: refused');
+  const overCountReason = overCount?.permissionDecisionReason || '';
+  assert.match(overCountReason, budgetRule, 'the count edge is refused by the reading budget');
+  assert.match(overCountReason, /\(64 readings, or 262144 characters of them in all\)/,
+    'the refusal names both limits');
+  assert.match(overCountReason, /write each heredoc delimiter on a line of its own and the `\)` on the next line/,
+    'the refusal names the way out');
+  // THE LENGTH EDGE: one construct, so one second reading, whose text is the rest
+  // of the command -- about 200 KiB after it is read, about 300 KiB is refused.
+  // 長度的邊：一個寫法、一段另讀，另讀的文字就是命令其後的部分——其後約 200 KiB 會讀，約 300 KiB 不讀就拒絕。
+  const oneConstruct = (kib) => `${group('b')}\n${'echo ok\n'.repeat(Math.ceil((kib * 1024) / 8))}`;
+  assert.equal(verdictOf(oneConstruct(200)), undefined,
+    'one second reading of about 200 KiB is inside the budget: allowed');
+  const overLength = verdictOf(oneConstruct(300));
+  assert.equal(overLength?.permissionDecision, 'deny',
+    'one second reading of about 300 KiB is past the budget: refused');
+  assert.match(overLength?.permissionDecisionReason || '', budgetRule,
+    'the length edge is refused by the reading budget');
+  // A protected path the scan found still names itself, whether it comes before
+  // or after the readings past the budget.
+  // 掃描找到的受保護路徑仍以自己為由被拒，不論它在超過預算的那些讀法之前或之後。
+  for (const command of [`rm -rf /etc\n${bashC(65)}`, `${bashC(65)}\nrm -rf /etc`]) {
+    assert.match(verdictOf(command)?.permissionDecisionReason || '', /\/etc/,
+      'a protected path found within the budget names itself in the refusal');
+  }
+  // Benign later-body shapes, which neither reading refuses.
+  // 良性的 later-body 寫法，兩種讀法都不拒絕。
+  for (const command of [
+    `${group("it's here")}\necho done`,
+    `${group('echo "open')}\nrm -rf ./build`,
+    `${group('read <<MARK')}\necho done`,
+    `diff <(cat <<A <<B\nA)\nit's here\nB\n) /dev/null\necho done`,
+  ]) {
+    assert.equal(verdictOf(command), undefined,
+      `a benign later-body shape must stay allowed: ${JSON.stringify(command)}`);
+  }
+  // The way out the refusal names: with each delimiter alone on its line and the
+  // `)` on the next, the gate records no second reading, so 300 such constructs
+  // are allowed.
+  // 拒絕訊息指的出路：結束標記獨佔一行、`)` 在下一行，閘門就不記第二種讀法，所以 300 個這樣的寫法會放行。
+  const wayOut = `${Array.from({ length: 300 }, (_, i) => `x=$(cat <<A <<B\nA\nb${i}\nB\n)`).join('\n')}\nrm -rf ./build`;
+  assert.equal(verdictOf(wayOut), undefined, 'the way out the refusal names is allowed');
+  // The fail-closed side: 60 benign chained copies need more than 64 readings
+  // and are refused unread.
+  // fail-closed 的那一側：60 份良性的串接寫法需要超過 64 段另讀，不讀就拒絕。
+  assert.match(verdictOf(chained(60, 'p'.repeat(200), '', 'rm -rf ./build'))?.permissionDecisionReason || '',
+    budgetRule, '60 benign chained copies are past the budget: refused unread');
+  alternateReadingBudgetChecks += 16;
 }
 
 // A find with many -exec clauses must be answered in bounded time, for the same
@@ -8608,6 +8785,7 @@ const PINNED_TIMING_COUNTERS = [
   ['heredocOracleChecks', heredocOracleChecks, 237],
   ['findClauseTimingChecks', findClauseTimingChecks, 48],
   ['targetLimitChecks', targetLimitChecks, 9],
+  ['alternateReadingBudgetChecks', alternateReadingBudgetChecks, 64],
 ];
 for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {
   assert.equal(actual, expected,
@@ -8636,8 +8814,8 @@ for (const [name, actual, expected] of PINNED_TIMING_COUNTERS) {
 // 用 __filename 而不是用 __dirname 組出來的路徑：清查必須讀「它自己」這個檔案。
 const ownSource = require('fs').readFileSync(__filename, 'utf8');
 const wallClockRows = ownSource.match(/\.ms\s*[<>]=?\s*[A-Za-z0-9_.]+/g) || [];
-assert.equal(wallClockRows.length, 9,
-  `this file holds ${wallClockRows.length} wall-clock comparisons, not the 9 pinned here: `
+assert.equal(wallClockRows.length, 10,
+  `this file holds ${wallClockRows.length} wall-clock comparisons, not the 10 pinned here: `
   + `${wallClockRows.join(', ')}. A new one needs a scaled budget and a pinned counter, `
   + 'which is what this number is for');
 const constantBudgetRows = wallClockRows.filter((row) => /[<>]=?\s*[0-9]/.test(row));
@@ -8652,12 +8830,12 @@ for (const [name] of PINNED_TIMING_COUNTERS) {
   assert.ok(new RegExp(`\\['${name}',`).test(ownSource),
     `${name} is not in PINNED_TIMING_COUNTERS, so nothing verifies that its block ran`);
 }
-// Every wall-clock row -- the 9 ceilings and the 1 ratio counted above -- reports
+// Every wall-clock row -- the 10 ceilings and the 1 ratio counted above -- reports
 // through the recorder defined next to hostFactor(), because an assert that
 // throws on a missed budget ends the file there and leaves the rest unread
 // (2026-10-17: the 120,000-symlink row did that). A row put back on an ordinary
 // assert lowers this count; a new row raises the counts above first.
-// 上面數到的每一個牆鐘列（9 個上限、1 個比值）都必須經過 hostFactor() 旁邊那個記錄器：預算
+// 上面數到的每一個牆鐘列（10 個上限、1 個比值）都必須經過 hostFactor() 旁邊那個記錄器：預算
 // 一沒達到就丟例外的 assert 會讓檔案停在那裡、其餘不讀（2026-10-17 那一列 120,000 個
 // symlink 就是這樣）。改回一般 assert 的列會讓這個數字變小。
 const deferredTimingRows = ownSource.match(/^\s*timingBudget\(/gm) || [];
@@ -8679,7 +8857,7 @@ process.exitCode = 1;
 runOpenCodePluginChecks().then(async (pluginChecks) => {
   const ompChecks = await runOmpHookChecks();
   const stdinStreamChecks = await runStdinStreamErrorChecks();
-  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + heredocSplitTimingChecks + heredocOracleChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + ompChecks + stdinStreamChecks + shimLoadChecks}`);
+  console.log(`Hooks 測試通過 / Hook tests passed: ${blocked.length * 4 + allowed.length * 4 + 2 + errorPathChecks + stdinChecks + hookShapeChecks + resolutionChecks + deviceChecks + globTimingChecks + heredocSplitTimingChecks + heredocOracleChecks + findClauseTimingChecks + timingInventoryChecks + wrapperModelChecks + tildeChecks + extglobChecks + carrierGridCells + tokenizerBudgetChecks + substitutionScanBudgetChecks + variableResolutionChecks + targetLimitChecks + nestedScanCostChecks + envSplitStringChecks + pipedScriptChecks + pluginChecks + ompChecks + stdinStreamChecks + shimLoadChecks + heredocLaterBodyChecks + alternateReadingBudgetChecks}`);
   // A missed wall-clock budget fails the run, named, after everything else ran.
   // 牆鐘預算沒達到時，整次執行在其餘全部跑完之後指名失敗。
   if (TIMING_MISSES.length > 0) {

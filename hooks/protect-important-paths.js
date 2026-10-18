@@ -462,6 +462,15 @@ function shellWords(command) {
   // 雙引號裡找不到收尾 `)` 的 `$(` 個數（BR2-2），與上面的清單一樣掛在 words 上。
   let unreadableQuotedSubstitutions = 0;
   const pendingHeredocs = [];
+  // Alternate whole-command readings this tokenizer could not represent in one
+  // pass, recorded for commandTargets to scan and UNION (R7-a). At a `DELIM)`
+  // close with LATER pending heredocs the two bashes diverge: this pass takes
+  // bash 3.2's reading, and each entry here is bash 5.3's reading of the same
+  // bytes. Unioning can only ADD targets, so the 3.2 verdict is never weakened.
+  // 這個 tokenizer 一趟表示不了的「整條命令的另一種讀法」，記下來給 commandTargets 掃描並取聯集（R7-a）。
+  // 在 `DELIM)` 收尾且後面還有 heredoc 時兩個 bash 分歧：本趟取 3.2 讀法，這裡每一筆是同一串位元組的 5.3 讀法。
+  // 取聯集只會「增加」目標，所以 3.2 的判定不會被削弱。
+  const alternateReadings = [];
   // The '(' operators still open, by kind: 'substitution' for the opener of a
   // "<( )"/">( )" and of a "$(" read character by character, 'group' for any
   // other. A heredoc opened inside a substitution may end on a `DELIM)` line
@@ -834,19 +843,20 @@ function shellWords(command) {
         // the first body that ends on a `DELIM)` line, `position` becomes that
         // line's resumeAt (just past the delimiter, where the line's `)`-tail
         // starts; the tail is tokenised again), the later pending heredocs are
-        // abandoned, and their body lines are tokenised as commands. That is NOT
-        // a union of both readings: a later body that bash 5.3 reads as data but
-        // that holds an unmatched quote or a heredoc operator, tokenised as
-        // commands, can hide a removal after it that bash 5.3 runs -- e.g.
-        // `x=$(cat <<A <<B` / `A)` / `it's here` / `B` / `rm -rf /etc`. That gap
-        // is pre-existing at 6a3edb1 and recorded in KNOWN-RESIDUALS.md R7-a.
+        // abandoned, and their body lines are tokenised as commands. That is bash
+        // 3.2's reading. bash 5.3 reads those later bodies as here-data and runs
+        // what follows them, so a later body holding an unmatched quote or a
+        // heredoc operator -- `x=$(cat <<A <<B` / `A)` / `it's here` / `B` /
+        // `rm -rf /etc` -- hides the removal in the 3.2 reading but runs it under
+        // 5.3. The 5.3 reading is recorded in `alternateReadings` just below
+        // (R7-a, round 4b), and commandTargets scans it too and unions the
+        // targets, so a removal either bash runs is refused.
         // 在逐字讀的替換裡（"<( )"，或讀取失敗的 "$("），任何一段內文（不只是最後一段）都可能在 `DELIM)` 行結束
         // （BR2-2-REG3，見 heredocBodyEnd）。這裡兩個 bash 不一樣：3.2 在標記處結束該段內文、`)` 當場關掉替換，之後
         // 各行（包括原本是後面幾段內文的那些行）都是命令；5.3 仍把後面幾段內文當 here-data 從下面各行讀進來，讀完才關替換。
-        // 這個 tokenizer 照 3.2：停在第一段以 `DELIM)` 結束的內文，position 設為那一行的 resumeAt（標記之後、`)` 尾段開始處，
-        // 尾段會再斷詞一次），後面還沒讀的 heredoc 放掉，它們的內文行當命令斷詞。這「不是」兩種讀法的聯集：5.3 當成資料、
-        // 但含有不成對引號或 heredoc 運算子的後段內文，被當命令斷詞後，可能把它後面一條 5.3 會執行的刪除藏起來（例如
-        // `x=$(cat <<A <<B` / `A)` / `it's here` / `B` / `rm -rf /etc`）。這個缺口在 6a3edb1 就有，記在 KNOWN-RESIDUALS.md R7-a。
+        // 這個 tokenizer 本趟照 3.2；5.3 的讀法記在下面的 alternateReadings（R7-a，round 4b），commandTargets 也會掃它、
+        // 目標取聯集，所以含有不成對引號或 heredoc 運算子的後段內文（例如 `x=$(cat <<A <<B` / `A)` / `it's here` /
+        // `B` / `rm -rf /etc`：3.2 藏住、5.3 會跑的刪除）任一 bash 會跑的都被擋。
         const read = heredocBodyEnd(
           input, position, pending.delimiter, pending.stripTabs,
           pending.inSubstitution,
@@ -861,7 +871,40 @@ function shellWords(command) {
           bodyStart,
           bodyEnd: Math.min(position, input.length),
         });
-        if (read.resumeAt !== undefined) break;
+        if (read.resumeAt !== undefined) {
+          // bash 5.3 does NOT stop here: it reads the remaining pending bodies
+          // as here-data and runs what follows them, deferring this line's
+          // `)`-tail until after them. Record that reading as one command so the
+          // union above can refuse a removal it runs but the 3.2 reading (which
+          // tokenises those later body lines as commands, and can hide a removal
+          // behind an unmatched quote or a heredoc operator in them) does not
+          // surface -- KNOWN-RESIDUALS.md R7-a. Parse-only: this builds text,
+          // runs nothing. Only when later pending heredocs remain; on the LAST
+          // pending body the two readings agree and resumeAt already handles it.
+          // bash 5.3 不在這裡停：它把後面還沒讀的內文當 here-data 讀完、再跑其後的命令，這一行的 `)` 尾段延到它們之後。
+          // 把那個讀法記成一條命令，讓上面的聯集能擋下「它會跑、但 3.2 讀法（把後段內文行當命令、可能被其中不成對的
+          // 引號或 heredoc 運算子藏住刪除）表面看不到」的刪除——KNOWN-RESIDUALS.md R7-a。只建文字、不執行。
+          if (p < pendingHeredocs.length - 1) {
+            const tailEnd = Math.min(read.end - 1, input.length);
+            const altTails = [input.slice(read.resumeAt, tailEnd)];
+            let altPos = read.end;
+            let runsToEnd = false;
+            for (let q = p + 1; q < pendingHeredocs.length; q += 1) {
+              const later = pendingHeredocs[q];
+              const laterRead = heredocBodyEnd(
+                input, Math.min(altPos, input.length), later.delimiter, later.stripTabs, true,
+              );
+              if (!laterRead.terminated) { runsToEnd = true; break; }
+              if (laterRead.resumeAt !== undefined) {
+                altTails.push(input.slice(laterRead.resumeAt, Math.min(laterRead.end - 1, input.length)));
+              }
+              altPos = laterRead.end;
+            }
+            const altAfter = runsToEnd ? '' : input.slice(Math.min(altPos, input.length));
+            alternateReadings.push(`${altTails.join('\n')}\n${altAfter}`);
+          }
+          break;
+        }
       }
       pendingHeredocs.length = 0;
       pushWord('\n', true);
@@ -1049,6 +1092,10 @@ function shellWords(command) {
   Object.defineProperty(
     words, 'unreadableQuotedSubstitutions', { value: unreadableQuotedSubstitutions },
   );
+  // Read by commandTargets, which scans each alternate reading and unions the
+  // targets (R7-a); non-enumerable, like the lists above.
+  // 由 commandTargets 讀取並對每一種另讀法取聯集（R7-a）；與上面幾個清單一樣不可列舉。
+  Object.defineProperty(words, 'alternateReadings', { value: alternateReadings });
   return words;
 }
 
@@ -1360,15 +1407,15 @@ function readParenthesized(input, openIndex) {
         // (all 46 nested must-deny rows are refused for their target; none of the
         // 110 nested rows is refused as unreadable). Inside double quotes the
         // failed read is the UNREADABLE_QUOTED_SUBSTITUTION refusal instead.
-        // bash 5.3's reading of the later bodies as here-data is not modelled:
-        // KNOWN-RESIDUALS.md R7-a.
+        // bash 5.3's reading of the later bodies as here-data is handled by the
+        // tokenizer's `alternateReadings` union (R7-a, round 4b), not here.
         // 呼叫 readParenthesized 的地方都開了一個替換（`$(`，或 commandSubstitutions 的 `<(` / `>(` 分支），所以 `DELIM)`
         // 適用於每一段還沒讀的內文。最後一段的 `)` 乾淨地結束這個替換（記下 split point 後停）。「非最後一段」時兩個 bash
         // 會分歧（5.3 把 `)` 尾段延到其餘內文讀完，可能把命令帶到外層 `)` 之外；3.2 當場關），一趟式的 reader 放不準那個尾段，
         // 所以回 null，由呼叫端逐字照 bash 3.2 的讀法斷詞：關閉之後的刪除在那裡被斷出來，除非被放掉的後段內文裡的文字把它藏住，
         // 否則以它自己的目標被拒（在 oracle 語料上實測，巢狀的 `$( … $( … ) … )` 也一樣：46 列必須拒絕的巢狀形狀都以目標被拒，
         // 110 列巢狀形狀沒有一列以「讀不到」被拒）。在雙引號裡則是 UNREADABLE_QUOTED_SUBSTITUTION 的拒絕。5.3 把後段內文當
-        // here-data 的讀法沒有模型化：KNOWN-RESIDUALS.md R7-a。
+        // here-data 的讀法由 tokenizer 的 alternateReadings 聯集處理（R7-a，round 4b），不在這裡。
         const read = heredocBodyEnd(
           input, position, pending.delimiter, pending.stripTabs, true,
         );
@@ -2064,6 +2111,37 @@ const UNREADABLE_QUOTED_SUBSTITUTION = '\u0000quoted-substitution:';
 // 層計數器記下來。test-hooks.js 有釘住這一點——那是本檔案自己 reader 的實測性質，不是對
 // shell 的臆測。
 const SUBSTITUTION_BUDGET_EXHAUSTED = '\u0000substitution-budget:';
+
+// The second readings of R7-a ran past their budget (round 4b). Its own sentinel
+// for the reason the one above has its own: what went unread is not a path or a
+// script, it is a reading of the command. At a `DELIM)` close with later
+// pending heredocs, shellWords records bash 5.3's reading of the rest of the
+// command as one alternate, and commandTargetsScanOneReading scans it. An
+// alternate holds everything after its construct, and the scan of an alternate
+// records the alternates of the constructs after it, so chained copies multiply
+// the work. Measured with this budget taken out: 13 KB of chained copies
+// overflowed the stack (the hook then exits 2) when each later body held an
+// unmatched quote, and gave no answer within 20 s when the later bodies were
+// plain words and nothing was removed; the round-4 tip, which had no
+// alternates, answered both in about 0.1 s. A hook past the live 5,000 ms
+// timeout makes no decision. So every alternate is counted against one budget
+// per invocation BEFORE it is scanned -- MAX_ALTERNATE_READINGS readings,
+// MAX_ALTERNATE_READING_LENGTH characters of their text (String length) -- and
+// past it the command is refused rather than read, the fail-closed rule the
+// substitution budget above follows. Within the budget nothing changes: no row
+// of the heredoc corpora in test-hooks.js needs more than one reading.
+// R7-a 的第二種讀法超過了預算（round 4b）。它自成一個 sentinel，理由與上面那個相同：讀不到的不是路徑、
+// 也不是腳本，而是這條命令的一種讀法。在 `DELIM)` 收尾且後面還有 heredoc 時，shellWords 把 bash 5.3
+// 對其後整段命令的讀法記成一段另讀，由 commandTargetsScanOneReading 掃描。一段另讀含有它那個寫法之後的
+// 全部文字，而掃描一段另讀又會記下其後各個寫法的另讀，所以串接的寫法會讓成本相乘。拿掉這份預算實測：
+// 13 KB 的串接寫法在每段後段內文都有不成對引號時堆疊溢位（hook 因此以 2 結束），後段內文是單字且沒有刪除時
+// 20 秒內沒有回答；沒有另讀的 round-4 tip 兩者都約 0.1 秒回答。跑贏 live 5,000 ms 逾時的 hook 不做任何裁決。
+// 所以每一段另讀都在「掃描之前」計入單次呼叫的同一份預算——MAX_ALTERNATE_READINGS 段、合計
+// MAX_ALTERNATE_READING_LENGTH 個字元（String 長度）——超過就拒絕整條命令而不去讀，與上面的替換預算
+// 同一條 fail-closed 規則。預算之內什麼都不變：test-hooks.js 的 heredoc 語料沒有一列需要超過一段另讀。
+const ALTERNATE_READING_BUDGET_EXHAUSTED = '\u0000heredoc-readings:';
+const MAX_ALTERNATE_READINGS = 64;
+const MAX_ALTERNATE_READING_LENGTH = 262144;
 
 // The install routes exempted from the rule above, as raw URL text prefixes.
 // Every entry is scheme + host + owner/repo and MUST end with '/': a bare host
@@ -3672,7 +3750,12 @@ const wrapperCommands = new Set([
 
 function commandTargets(command, depth = 0, bodiesAreCodeFromCaller = false, expansionEnv = null) {
   const owned = nestedScanMemo === null;
-  if (owned) nestedScanMemo = { expansionEnv, scanned: new Set(), applyBuilt: new Set(), applyBytes: 0 };
+  if (owned) {
+    nestedScanMemo = {
+      expansionEnv, scanned: new Set(), applyBuilt: new Set(), applyBytes: 0,
+      alternateReadings: 0, alternateLength: 0,
+    };
+  }
   try {
     return commandTargetsScan(command, depth, bodiesAreCodeFromCaller, expansionEnv);
   } finally {
@@ -6585,6 +6668,31 @@ function commandTargetsScanOneReading(
       i = endOfSimpleCommand(i);
     }
   }
+  // R7-a: a `DELIM)` close with later pending heredocs reads two ways. The scan
+  // above took bash 3.2's; shellWords recorded bash 5.3's as an alternate whole
+  // command, where the later bodies are here-data and the removal after them
+  // runs. Union its targets so a removal either bash runs is refused. Additive:
+  // this only adds, so every target the 3.2 reading found above is kept.
+  // R7-a：`DELIM)` 收尾且後面還有 heredoc 時有兩種讀法。上面取 3.2；shellWords 把 5.3 記成另一條整命令
+  // （後段內文是 here-data、其後的刪除會跑）。對它的目標取聯集，任一 bash 會跑的刪除都擋。相加性：只增不減。
+  // Each alternate is counted against the per-invocation budget BEFORE it is
+  // scanned (ALTERNATE_READING_BUDGET_EXHAUSTED), so an alternate past the budget
+  // is refused without being read.
+  // 每一段另讀在掃描「之前」先計入單次呼叫的預算（ALTERNATE_READING_BUDGET_EXHAUSTED），超過預算的那一段
+  // 不讀就拒絕。
+  const alternateBudget = nestedScanMemo || { alternateReadings: 0, alternateLength: 0 };
+  for (const alternate of (words.alternateReadings || [])) {
+    alternateBudget.alternateReadings += 1;
+    alternateBudget.alternateLength += alternate.length;
+    if (
+      alternateBudget.alternateReadings > MAX_ALTERNATE_READINGS
+      || alternateBudget.alternateLength > MAX_ALTERNATE_READING_LENGTH
+    ) {
+      targets.push(ALTERNATE_READING_BUDGET_EXHAUSTED);
+      break;
+    }
+    targets.push(...nestedScan(alternate, depth + 1, bodiesAreCodeFromCaller, expansionEnv));
+  }
   Object.defineProperty(targets, 'ampersandRedirectionSeen', { value: ampersandRedirectionSeen });
   return targets;
 }
@@ -6905,6 +7013,34 @@ function substitutionBudgetDenial(count, isCopilot, isAntigravity, isCursor, isG
   return denialShape(zh + ' / ' + en, isCopilot, isAntigravity, isCursor, isGrok);
 }
 
+// The refusal for second readings past their budget (R7-a, round 4b; see
+// ALTERNATE_READING_BUDGET_EXHAUSTED). The way out is about the construct: this
+// file records a second reading only where a heredoc body ends on a `DELIM)`
+// line, so a delimiter written alone on its line, with the `)` on the next
+// line, leaves it nothing to record.
+// 「第二種讀法超過預算」的拒絕（R7-a，round 4b；見 ALTERNATE_READING_BUDGET_EXHAUSTED）。出路講的是寫法：
+// 本檔案只在 heredoc 內文結束於 `標記)` 那一行時才記第二種讀法，所以結束標記單獨寫一行、`)` 寫在下一行，
+// 就沒有可記的。
+function alternateReadingBudgetDenial(isCopilot, isAntigravity, isCursor, isGrok) {
+  const zh = '拒絕執行：這條命令在 `$( )` 或 `<( )` 裡有 heredoc 結束在 `標記)` 那一行、後面還有沒讀的'
+    + ' heredoc。bash 3.2 與 bash 5.3 讀這種寫法後面文字的方式不同，這道閘門兩種都讀，而第二種讀法要把它後面的'
+    + '命令再讀一次；這條命令的第二種讀法超過了單次判定的預算（' + MAX_ALTERNATE_READINGS + ' 段，或合計 '
+    + MAX_ALTERNATE_READING_LENGTH + ' 個字元），超過的部分這道閘門沒有讀——包括只有那些讀法才看得到的刪除'
+    + '（這不是說一定有，是說這道閘門沒有讀到）。規則：heredoc reading budget exhausted。'
+    + '繞法：讓每個 heredoc 的結束標記獨佔一行、把 `)` 寫在下一行，或把文字放進檔案再讓命令去讀。';
+  const en = 'Refused to run: this command has a heredoc inside `$( )` or `<( )` that ends on a'
+    + ' `DELIM)` line while later heredocs are still pending. bash 3.2 and bash 5.3 read the text after'
+    + ' such a heredoc differently, and this gate reads it both ways; the second reading re-reads the'
+    + " commands after it, and this command's second readings went past the per-invocation budget ("
+    + MAX_ALTERNATE_READINGS + ' readings, or ' + MAX_ALTERNATE_READING_LENGTH + ' characters of them in'
+    + ' all), so the readings past the budget went unread -- including any deletion only they would show'
+    + ' (this does not say one is there; it says this gate did not read it).'
+    + ' Rule: heredoc reading budget exhausted.'
+    + ' Workaround: write each heredoc delimiter on a line of its own and the `)` on the next line, or'
+    + ' put the text in a file and have the command read it.';
+  return denialShape(zh + ' / ' + en, isCopilot, isAntigravity, isCursor, isGrok);
+}
+
 function denial(reason, isCopilot, isAntigravity, isCursor, isGrok) {
   const message = `拒絕刪除受保護的目錄：${reason} / Refused to remove protected directory: ${reason}`;
   return denialShape(message, isCopilot, isAntigravity, isCursor, isGrok);
@@ -7042,6 +7178,7 @@ function evaluate(payload, env = process.env) {
       || target.startsWith(UNJUDGEABLE_ENV_S)
       || target.startsWith(UNREADABLE_TRAP_ACTION)
       || target.startsWith(SUBSTITUTION_BUDGET_EXHAUSTED)
+      || target.startsWith(ALTERNATE_READING_BUDGET_EXHAUSTED)
       || target.startsWith(UNREADABLE_HEREDOC_DELIMITER)
       || target.startsWith(UNREADABLE_QUOTED_SUBSTITUTION)
     ) continue;
@@ -7088,6 +7225,13 @@ function evaluate(payload, env = process.env) {
       target.slice(SUBSTITUTION_BUDGET_EXHAUSTED.length), isCopilot, isAntigravity, isCursor,
       isGrok,
     );
+  }
+  // Beside the substitution budget refusal and for its reason: part of the
+  // command -- here its second readings (R7-a) -- went unread.
+  // 與替換預算的拒絕並列、理由相同：命令有一部分——這裡是它的第二種讀法（R7-a）——沒有讀到。
+  for (const target of targets) {
+    if (!target.startsWith(ALTERNATE_READING_BUDGET_EXHAUSTED)) continue;
+    return alternateReadingBudgetDenial(isCopilot, isAntigravity, isCursor, isGrok);
   }
   // Beside the budget refusal and above the other three, for the reason recorded
   // there: those three describe something this gate DID read and could not
