@@ -69,9 +69,16 @@ PROTECTED_DIRS=(
     "$HOME"
     "$HOME/"
     # 家目錄底下這兩個目錄本身受保護，裡面的東西不受影響（與 /etc 完全同一套語意）：
-    # `rm -rf ~/.ssh` 擋、`rm -f ~/.ssh/known_hosts.old` 放行。唯一不那麼直觀的是萬用
-    # 字元：父目錄受保護的樣式選中的是整個目錄的內容，所以 `rm -rf ~/.ssh/*` 與
-    # `rm -rf /etc/*` 一樣被擋。
+    # `rm -rf ~/.ssh` 擋、`rm -f ~/.ssh/known_hosts.old` 放行。萬用字元在這裡也不例外：
+    # 呼叫端的 shell 先把 `~/.ssh/*` 展開成一個個子項目，本工具看不到那個樣式，而每個子
+    # 項目都只是一般的刪除目標，所以 `rm -rf ~/.ssh/*` 會把展開出來的那些項目逐一移進垃圾桶
+    # （可用 --restore 取回），不會被擋。拒絕這個樣式的是讀得到命令文字的 agent hook，不是這裡。
+    # Wildcards are no exception on this side: the calling shell expands `~/.ssh/*`
+    # into the child paths before this script runs, so it never sees the pattern and
+    # each child is an ordinary target -- `rm -rf ~/.ssh/*` moves the entries it
+    # expands to into the trash one by one (recoverable with --restore) instead of
+    # being refused. The refusal of that pattern belongs to the agent hook, which reads
+    # the command text.
     # ~/.ssh 是私鑰與 known_hosts，丟了不是重建，而是把每一台主機重新授權一次；
     # ~/.claude 是這台機器的 agent 設定、hooks 與 projects/ 底下的對話記錄，而 agent
     # 路徑上那道 hook 就是從那份設定載入的。
@@ -858,6 +865,64 @@ path_join() {
     PATH_JOIN_RESULT="${1%/}/$2"
 }
 
+# 把含有斜線的 --restore 操作對象，換成刪除端會記下的那種寫法，結果放進
+# RESOLVED_RESTORE_PATH（解析不出來時是空字串）。move_to_trash 記的 ORIGINAL_PATH 是「cd
+# 進來源 parent 之後的 pwd -P」接上最後一段，所以 `..`、結尾斜線、還有路上的每一個符號
+# 連結（macOS 的 /tmp、/var、雲端硬碟的捷徑）都已經被解析掉；還原端原本卻拿使用者打的
+# 字串去比，刪得掉的寫法還原時就回「找不到」。這裡用同一套 cd + pwd -P 解析 parent，最後
+# 一段照打的原樣保留（項目已經不在了，沒有東西可以解析）；parent 也不在時，往上找最近一
+# 個存在的祖先，解析它，再把其餘各段原樣接回去。這只是拼寫的對應：不摺疊大小寫、不做
+# Unicode 正規化——那是在猜卷宗的語意（見 is_protected 結尾的說明）。
+# 回傳走全域變數的理由與 path_split 相同：$(…) 會吃掉結尾換行。
+# Turn a --restore operand that contains a slash into the spelling the delete side
+# records, in RESOLVED_RESTORE_PATH (empty when nothing resolves). move_to_trash logs
+# ORIGINAL_PATH as the pwd -P of the pinned source parent joined with the final
+# component, so `..`, a trailing slash and every symlink on the way (/tmp and /var
+# on macOS, a cloud-drive shortcut) are already resolved away; restore used to
+# compare the typed string, so a spelling that deleted fine answered "not found".
+# The parent is resolved here the same way, with cd + pwd -P, and the final
+# component is kept as typed (the item is gone, there is nothing to resolve); when
+# the parent is gone too, the nearest existing ancestor is resolved and the remaining
+# components are joined back as given. This is a spelling correspondence only: no
+# case folding and no Unicode normalisation, which would guess at the volume's
+# semantics (see the note at the end of is_protected).
+# Returned through a global for the same reason as path_split: $(…) would eat
+# trailing newlines.
+resolve_restore_operand() {
+    local operand="$1"
+    local dir
+    local rest=""
+    local physical=""
+    local final
+    RESOLVED_RESTORE_PATH=""
+    if [[ "$operand" != /* ]]; then
+        operand="$PWD/$operand"
+    fi
+    path_split "$operand"
+    final="$PATH_SPLIT_BASENAME"
+    dir="$PATH_SPLIT_DIRNAME"
+    while :; do
+        if physical=$(cd "$dir" 2>/dev/null && pwd -P 2>/dev/null) && [ -n "$physical" ]; then
+            break
+        fi
+        physical=""
+        [ "$dir" != "/" ] || return 1
+        path_split "$dir"
+        # 往上走不動就停（只有 "." 這種相對寫法會這樣），否則這個迴圈不會結束。
+        # Stop when the walk makes no progress (only a relative "." does that), or
+        # this loop would never end.
+        [ "$PATH_SPLIT_DIRNAME" != "$dir" ] || return 1
+        rest="$PATH_SPLIT_BASENAME${rest:+/$rest}"
+        dir="$PATH_SPLIT_DIRNAME"
+    done
+    if [ -n "$rest" ]; then
+        path_join "$physical" "$rest"
+        physical="$PATH_JOIN_RESULT"
+    fi
+    path_join "$physical" "$final"
+    RESOLVED_RESTORE_PATH="$PATH_JOIN_RESULT"
+}
+
 # 移動檔案至垃圾桶
 # Move file to trash
 move_to_trash() (
@@ -912,6 +977,37 @@ move_to_trash() (
             return 1
         fi
         return 0  # 在強制模式下，忽略不存在的檔案
+    fi
+
+    # 結尾帶斜線、最後一段是符號連結的拼寫（`link/`）：它解析到的是連結指向的目錄，而下面
+    # 釘住 parent 之後 stat 的 ./link 是連結本身，兩個身分永遠對不上，於是每一次
+    # `rm -r link/` 都被當成「固定 parent 前已變更」的競態中止——報的是一件沒有發生的事。
+    # 照樣什麼都不移動，但說清楚是怎麼回事，而且兩種意思都給出寫法：macOS 的 /bin/rm -r link/
+    # 刪的是目標目錄（實測），不是連結，所以不替使用者猜他要哪一個。受保護的目標在上面就已經
+    # 被拒絕，不會走到這裡。
+    # A trailing-slash spelling whose final component is a symlink (`link/`): it
+    # resolves to the directory the link points at, while the ./link stat'ed after the
+    # parent is pinned below is the link itself, so the two identities can never match
+    # and every `rm -r link/` aborted as a "changed before its parent was pinned" race --
+    # a report of something that did not happen. Still nothing is moved, but the message
+    # says what it is and gives both readings their spelling: macOS's /bin/rm -r link/
+    # removes the target directory (measured), not the link, so neither is guessed for
+    # the user.
+    # A protected target is refused above and never reaches this point.
+    local source_unslashed="$source"
+    while [ "$source_unslashed" != "/" ] && [ "${source_unslashed%/}" != "$source_unslashed" ]; do
+        source_unslashed="${source_unslashed%/}"
+    done
+    if [ "$source_unslashed" != "$source" ] && [ -L "$source_unslashed" ]; then
+        local link_target_dir=""
+        link_target_dir=$(cd "$source" 2>/dev/null && pwd -P 2>/dev/null) ||
+            link_target_dir=$(readlink "$source_unslashed" 2>/dev/null) ||
+            link_target_dir="?"
+        error_msg "'$source_label' 經由符號連結 '$source_unslashed' 解析成目錄 '$link_target_dir'；未移動"
+        error_msg "'$source_label' resolves through the symlink '$source_unslashed' to the directory '$link_target_dir'; not moved"
+        error_msg "要刪除連結本身，請寫成不帶結尾斜線的 '$source_unslashed'；要刪除那個目錄，請直接寫它的路徑 '$link_target_dir'"
+        error_msg "To remove the link itself, name it without the trailing slash: '$source_unslashed'; to remove the directory, name the directory itself: '$link_target_dir'"
+        return 1
     fi
 
     # 在任何昂貴的 hash 或垃圾桶準備前記住來源 inode，接著把此函式的
@@ -1059,6 +1155,9 @@ move_to_trash() (
     local failed_move_target=""
     local move_error=""
     local move_status=0
+    # 保留鎖的 mkdir 失敗時它自己說的話（見迴圈尾端）。
+    # What the reservation mkdir said when it failed (see the end of the loop).
+    local reserve_error=""
     # 時間戳記/hash 組合不保證唯一；保留同層 lock 目錄，並以不覆寫模式移動。
     # The timestamp/hash pair is not unique; reserve a sibling lock directory
     # and move without clobbering. A late writer leaves the source in place.
@@ -1082,7 +1181,12 @@ move_to_trash() (
             target="${base_target}__${attempt}_$$"
         fi
         reservation="${target}.reserve"
-        if mkdir "$reservation" 2>/dev/null; then
+        # mkdir 的 stderr 留下來，迴圈尾端要靠它分辨「名稱已被佔用」與其他失敗。LC_ALL=C 讓
+        # 錯誤句不被翻譯，比對才不隨語系改變。
+        # Keep mkdir's stderr: the end of the loop tells "name taken" apart from every
+        # other failure by it. LC_ALL=C keeps that sentence untranslated, so the match
+        # does not depend on the locale.
+        if reserve_error=$(LC_ALL=C mkdir "$reservation" 2>&1); then
             if [ -e "$target" ] || [ -L "$target" ]; then
                 rmdir "$reservation" 2>/dev/null || true
                 reservation=""
@@ -1297,6 +1401,45 @@ move_to_trash() (
             fi
             return 1
         fi
+        # 保留鎖的 mkdir 失敗了。只有 EEXIST（別的行程已經用了這個名字）才是名稱碰撞，換個
+        # suffix 重試才有意義；名稱太長、沒有權限、空間不足、唯讀卷宗之類的失敗，換哪一個
+        # suffix 都一樣，以前卻一律當成碰撞：跑滿 1000 次 mkdir，最後印出一句「無法保留唯一
+        # 的垃圾桶路徑」，真正的原因被丟進 /dev/null（BR2-1 在 mv 那一支修掉的同一種誤判）。
+        # 判斷用 mkdir 自己的錯誤，而不是事後問那個路徑在不在：並行的 better-rm 可能在我們
+        # mkdir 失敗之後、檢查之前就 rmdir 了它自己的保留鎖，把真的碰撞變成假的失敗。
+        # The reservation mkdir failed. Only EEXIST -- another process took the name --
+        # is a name collision that a new suffix can get past; a name that is too long,
+        # no permission, no space or a read-only volume fails the same way under every
+        # suffix, and used to be read as a collision all the same: 1000 mkdir calls and
+        # then "Failed to reserve a unique trash path", with the real reason discarded
+        # (the misreading BR2-1 fixed on the mv branch). The decision is keyed on mkdir's
+        # own error rather than on whether the path exists afterwards: a concurrent
+        # better-rm can rmdir its own reservation between our failed mkdir and such a
+        # test, turning a real collision into a false failure.
+        # mkdir 的訊息以「: <錯誤原因>」結尾（GNU 與 BSD 都是），所以比對結尾：名字裡剛好含有
+        # 那幾個字的路徑不會被誤認。
+        # mkdir's message ends in ": <reason>" (GNU and BSD alike), so the match is on that
+        # ending: a path that happens to contain the words cannot be mistaken for it.
+        case "$reserve_error" in
+            *": File exists")
+                ;;
+            *)
+                error_msg "無法保留垃圾桶路徑；未移動 '$source_label': $reservation"
+                error_msg "Failed to reserve the trash path; '$source_label' was not moved: $reservation"
+                if [ -n "$reserve_error" ]; then
+                    # mkdir 自己的話原樣印出。
+                    # mkdir's own words, verbatim.
+                    printf '%s\n' "$reserve_error" >&2
+                fi
+                case "$reserve_error" in
+                    *": File name too long")
+                        error_msg "垃圾桶裡的名稱是原名加上刪除時間與內容雜湊，'$source_basename' 加上之後超過檔案系統的名稱長度上限；請先把它改成較短的名稱"
+                        error_msg "The trash name is the original name plus the deletion time and a content hash, and for '$source_basename' that exceeds the filesystem's name length limit; rename it to something shorter first"
+                        ;;
+                esac
+                return 1
+                ;;
+        esac
         reservation=""
         attempt=$((attempt + 1))
     done
@@ -1513,6 +1656,46 @@ restore_file() {
     # skipped in silence.
     local needle_legacy
     needle_legacy=$(encode_legacy_log_field "$needle")
+    # 含斜線的操作對象（`../up.txt`、`mydir/`、`/tmp/x.log`、`link/in.txt`）是一條路徑，
+    # 不是單純的名字：除了原本的字面比對，再拿 resolve_restore_operand 解析出來的寫法與
+    # ORIGINAL_PATH 做完全比對。完全比對不會放寬任何東西——a.txt 照樣比不到 data.txt
+    # （BR2-G3），解析出來的路徑也只會等於「它自己」那一筆。
+    # 前置過濾因此改用最後一段：`../up.txt` 這種寫法本身從來不會出現在日誌行裡，而原始
+    # 路徑以 /<最後一段> 結尾的紀錄，整行一定含有那一段的某一種寫法（理由同上）。代價是
+    # 這個過濾與「用名字還原」那一個完全相同：最壞情況下含有這個名字的每一筆紀錄都被解析
+    # 一次，也就是用名字還原卻找不到時的那一次掃描。這個名字也拿來在找不到時給提示：同名
+    # 的紀錄是否存在、用名字還原會拿到哪一筆。
+    # An operand holding a slash (`../up.txt`, `mydir/`, `/tmp/x.log`, `link/in.txt`)
+    # is a path rather than a bare name: besides the literal rules below, the spelling
+    # resolve_restore_operand derives from it is compared EXACTLY with ORIGINAL_PATH.
+    # An exact comparison widens nothing -- a.txt still never matches data.txt
+    # (BR2-G3), and a resolved path equals only the record that is that path.
+    # The pre-filter therefore keys on the final component: a spelling such as
+    # `../up.txt` never occurs in a log line, while a record whose original path ends
+    # in /<final component> always holds one spelling of that component (same argument
+    # as above). The cost: this is exactly the filter a restore by the name uses, so at
+    # worst every record whose line holds that name is parsed once -- the scan a
+    # restore by the name pays when it finds nothing. The same name drives the hint on
+    # a miss: whether a record of that name exists, and which one restoring by the
+    # name would take.
+    local resolved_target=""
+    local restore_name=""
+    local hint_original=""
+    if [[ "$target_name" == */* ]]; then
+        if resolve_restore_operand "$target_name"; then
+            resolved_target="$RESOLVED_RESTORE_PATH"
+        fi
+        path_split "$target_name"
+        case "$PATH_SPLIT_BASENAME" in
+            ""|.|..|/) ;;
+            *)
+                restore_name="$PATH_SPLIT_BASENAME"
+                needle="$restore_name"
+                needle_encoded=$(encode_log_field "$needle")
+                needle_legacy=$(encode_legacy_log_field "$needle")
+                ;;
+        esac
+    fi
     for log_file in "${log_files[@]}"; do
         lines=()
         if ! {
@@ -1605,10 +1788,29 @@ restore_file() {
                     match=1
                 fi
             fi
+            # 3. 含斜線的寫法：解析後的路徑與 original_path 完全相同（見上方說明）
+            # 3. A spelling with a slash: its resolved path equals original_path exactly
+            #    (see the note above the loop)
+            if [ $match -eq 0 ] && [ -n "$resolved_target" ] &&
+               [ "$original_path" = "$resolved_target" ]; then
+                match=1
+            fi
 
             if [ $match -eq 1 ]; then
                 found=1
                 break 2
+            fi
+            # 沒比對到，但「用名字還原」會拿到的就是這一筆：記下最新的那一筆給提示用。
+            # 規則與上面第 2 條相同，掃描順序也相同，所以提示說的正是 `--restore <名字>`
+            # 會還原的那一筆。
+            # No match, but this is the record a restore by the bare name would take:
+            # remember the newest such record for the hint. The rule is rule 2 above and
+            # the scan order is the same, so the hint names exactly the record that
+            # `--restore <name>` would restore.
+            if [ -n "$restore_name" ] && [ -z "$hint_original" ] &&
+               { [ "$original_path" = "/$restore_name" ] ||
+                 [[ "$original_path" = */"$restore_name" ]]; }; then
+                hint_original="$original_path"
             fi
         done
     done
@@ -1616,6 +1818,14 @@ restore_file() {
     if [ $found -eq 0 ]; then
         error_msg "在垃圾桶中找不到符合 '$target_name' 的刪除記錄或檔案本體"
         error_msg "No matching deletion record or file found in trash for '$target_name'"
+        if [ -n "$hint_original" ]; then
+            local hint_spelling="'$restore_name'"
+            case "$restore_name" in
+                -*) hint_spelling="-- '$restore_name'" ;;
+            esac
+            printf '%s\n' "提示：名稱 '$restore_name' 有一筆刪除紀錄（原路徑 '$hint_original'）；rm --restore $hint_spelling 會把它還原到目前資料夾" >&2
+            printf '%s\n' "Hint: a deletion record exists for the name '$restore_name' (originally '$hint_original'); rm --restore $hint_spelling restores it into the current directory" >&2
+        fi
         return 1
     fi
     
@@ -2234,6 +2444,16 @@ main() {
                 return 0
                 ;;
             --restore)
+                # 第二個 --restore 以前會默默蓋掉第一個：`--restore x.txt --restore y.txt`
+                # 只還原 y.txt、不說一句話，而 x.txt 留在垃圾桶裡。--restore 一次只還原一個。
+                # A second --restore used to replace the first in silence:
+                # `--restore x.txt --restore y.txt` restored y.txt alone, said nothing,
+                # and left x.txt in the trash. --restore puts back one item per call.
+                if [ "$restore_mode" = "1" ]; then
+                    error_msg "'--restore' 只能出現一次；未還原任何東西"
+                    error_msg "'--restore' may be given only once; nothing was restored"
+                    return 1
+                fi
                 restore_mode=1
                 shift
                 # -- 之後的那一個引數就是還原目標，即使以破折號開頭。刪除端認得 --
@@ -2394,6 +2614,22 @@ main() {
     # 如果是還原模式
     # If in restore mode
     if [ "$restore_mode" = "1" ]; then
+        # 還原模式只處理 restore_target，files[] 從來不看：沒有 -- 時，--restore 後面多出來
+        # 的檔名、或寫在它前面的檔名，都會落進 files[] 然後被默默丟掉——`rm --restore a.txt
+        # b.txt` 以 0 結束、不說一句話，b.txt 還在垃圾桶；`rm junk.log --restore keep.txt`
+        # 不刪 junk.log。與 -- 那一支同樣處理：拒絕，而且什麼都不做。旗標不會落進 files[]，
+        # 所以 `rm --restore <檔案> -f` 照舊生效。
+        # Restore mode acts on restore_target and never looks at files[]: without --, a
+        # pathname after --restore's operand, or one written before --restore, lands in
+        # files[] and is dropped in silence -- `rm --restore a.txt b.txt` exited 0 with no
+        # output and left b.txt in the trash, and `rm junk.log --restore keep.txt` did
+        # not delete junk.log. Refuse it as the -- branch does, before anything happens.
+        # Flags never land in files[], so `rm --restore <file> -f` keeps working.
+        if [ ${#files[@]} -gt 0 ]; then
+            error_msg "'--restore' 只接受一個路徑，多出來的引數：'${files[0]}'；未刪除也未還原任何東西"
+            error_msg "'--restore' takes exactly one pathname; unexpected extra argument: '${files[0]}'; nothing was deleted or restored"
+            return 1
+        fi
         restore_file "$restore_target" "$force_mode" "$verbose"
         return $?
     fi

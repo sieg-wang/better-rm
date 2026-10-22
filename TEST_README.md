@@ -78,7 +78,8 @@ podman run -v $(pwd):/app:z ubuntu:latest bash /app/test-better-rm.sh
 The rows on the real /, /home and /mnt run behind that fence, each bounded at 15 s, and each requires an empty fence log; if the fence self-check fails, those rows are not run and fail instead. With the refusal regressed, better-rm's find, md5sum and mv reach the shims instead of the real tools (under the root docker run above as well), and a tool the fence does not cover is stopped after 15 s.
 
 ### 測試 10: 快速連續刪除
-- 測試奈秒時間戳記避免檔名衝突
+- 五個不同檔案並行刪除：每一個都在垃圾桶裡留下恰好一筆（不多不少）。檔名各不相同，所以這一列不會產生時間戳記碰撞
+- 同路徑、同內容、同時間戳記的碰撞：以固定時間戳記的 `date` shim 重現，既有的垃圾桶項目與晚到的項目都不得被覆蓋
 
 ### 測試 11: 垃圾桶路徑結構保留
 - 深層目錄結構保留
@@ -93,7 +94,12 @@ The rows on the real /, /home and /mnt run behind that fence, each bounded at 15
 - 已移出垃圾桶項目的再次還原
 - 同名檔案覆蓋確認
 - `-f` 強制覆蓋
+- 同名提示回答 `n` 或沒有回答（stdin 是 `/dev/null`）時什麼都不動，結束碼 0
+- 以刪除時用的路徑寫法還原（`../`、結尾斜線、經過符號連結的 parent），對不到時提示用名稱還原會拿到哪一筆
 - 新日誌沒有符合項目時回退舊版垃圾桶日誌
+
+### 測試 16: README 的垃圾桶清理函式
+- 從 README.md 抽出 `better_rm_purge`，在測試自己的暫存目錄裡造的垃圾桶上跑（`TRASH_DIR` 與 `HOME` 都指進那裡）：清單與 `--delete` 只碰兩筆刪除時間在 2025 年的項目；剛刪的項目（包括長得像項目的目錄裡、舊項目的鏡像目錄裡的）與最上層的 Finder 式項目都不碰，兩個長得像項目的目錄被點名略過
 
 ## 測試結果 (Test Results)
 

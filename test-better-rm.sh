@@ -555,13 +555,24 @@ else
 fi
 
 test_item "日誌記錄符號連結"
+# BR-A-9（2026-10-22）：這一列原本對整份日誌 grep "symlink"，而 fixture 叫 logsymlink.txt——
+# 它自己的兩個路徑欄位就供應了那個字，FILE_TYPE 記成什麼都會綠（實測：把 symlink 那一支
+# 改成記 file，整套結果不變）。現在看的是那一筆紀錄的 FILE_TYPE 欄，fixture 的名字裡也不再
+# 有那個字。
+# BR-A-9 (2026-10-22): this row used to grep the whole log for "symlink" while the
+# fixture was named logsymlink.txt -- its own two path fields supplied the word, so
+# any FILE_TYPE passed (measured: the symlink branch rewritten to log file left the
+# suite's result unchanged). It now reads the FILE_TYPE field of that one record, and
+# the fixture's name no longer carries the word.
 echo "target" > logtarget.txt
-ln -s logtarget.txt logsymlink.txt
-"$BETTER_RM" logsymlink.txt
-if verify_log_entry "symlink"; then
+ln -s logtarget.txt logpointer.txt
+"$BETTER_RM" logpointer.txt
+logpointer_type=$(grep -v '^#' "$TEST_STATE_DIR/deletion.log" 2>/dev/null |
+    awk -F ' \\| ' '$3 ~ /\/logpointer\.txt$/ { type = $6 } END { print type }')
+if [ "$logpointer_type" = "symlink" ]; then
     test_pass "日誌正確記錄符號連結"
 else
-    test_fail "日誌未記錄符號連結"
+    test_fail "日誌沒有把符號連結記成 symlink（FILE_TYPE=${logpointer_type:-找不到紀錄}）"
 fi
 
 test_item "日誌格式正確"
@@ -1230,6 +1241,72 @@ else
     test_fail "--restore -- 的引數範圍不正確"
 fi
 
+test_item "沒有 -- 時，--restore 多出來的檔名、寫在它前面的檔名與第二個 --restore 都要被拒絕"
+# BR-A-3（2026-10-22）：上一列只涵蓋 -- 那一支。沒有 -- 時 --restore 吃掉一個字，解析照常往下
+# 走，其餘的檔名落進 files[]，而還原模式從來不看 files[]：`rm --restore a.txt b.txt` 以 0 結束、
+# 一個字都不說，b.txt 還在垃圾桶；`rm junk.log --restore keep.txt` 還原了 keep.txt，junk.log
+# 沒被刪；`--restore x.txt --restore y.txt` 只還原 y.txt。三種都要以 1 拒絕、什麼都不動，並且
+# 說出是哪一個引數。反套套邏輯：尾隨的旗標不會落進 files[]，`--restore <檔案> -v` 照舊還原；
+# 被拒絕的那幾筆紀錄最後也要證明仍然可用，否則「沒被還原」可能只是根本沒東西可還原。
+# BR-A-3 (2026-10-22): the row above covers the -- branch only. Without --, --restore
+# takes one word and parsing goes on, the other pathnames land in files[], and restore
+# mode never looks at files[]: `rm --restore a.txt b.txt` exited 0 saying nothing and
+# left b.txt in the trash; `rm junk.log --restore keep.txt` restored keep.txt and did
+# not delete junk.log; `--restore x.txt --restore y.txt` restored y.txt alone. All
+# three must be refused with 1, touch nothing, and name the argument. Anti-tautology: a
+# trailing flag never lands in files[], so `--restore <file> -v` still restores, and the
+# records the refusals left alone are proved live at the end -- otherwise "was not
+# restored" could just mean there was nothing to restore.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+for extra_name in extra_a.txt extra_b.txt extra_x.txt extra_y.txt; do
+    printf '%s\n' "TRASHED $extra_name" > "$extra_name"
+    "$BETTER_RM" "$extra_name" >/dev/null 2>&1
+done
+printf '%s\n' "JUNK" > extra_junk.log
+extra_ok=1
+extra_detail=""
+extra_status=0
+extra_out=$("$BETTER_RM" --restore extra_a.txt extra_b.txt 2>&1 </dev/null) || extra_status=$?
+if [ "$extra_status" -ne 1 ] || [ -e extra_a.txt ] || [ -e extra_b.txt ] ||
+   [[ "$extra_out" != *"unexpected extra argument: 'extra_b.txt'"* ]]; then
+    extra_ok=0
+    extra_detail="$extra_detail [--restore a b: exit=$extra_status]"
+fi
+extra_status=0
+extra_out=$("$BETTER_RM" extra_junk.log --restore extra_a.txt 2>&1 </dev/null) || extra_status=$?
+if [ "$extra_status" -ne 1 ] || [ ! -f extra_junk.log ] || [ -e extra_a.txt ] ||
+   [[ "$extra_out" != *"unexpected extra argument: 'extra_junk.log'"* ]]; then
+    extra_ok=0
+    extra_detail="$extra_detail [junk --restore a: exit=$extra_status]"
+fi
+extra_status=0
+extra_out=$("$BETTER_RM" --restore extra_x.txt --restore extra_y.txt 2>&1 </dev/null) || extra_status=$?
+if [ "$extra_status" -ne 1 ] || [ -e extra_x.txt ] || [ -e extra_y.txt ] ||
+   [[ "$extra_out" != *"'--restore' may be given only once"* ]]; then
+    extra_ok=0
+    extra_detail="$extra_detail [--restore x --restore y: exit=$extra_status]"
+fi
+extra_status=0
+"$BETTER_RM" --restore extra_b.txt -v >/dev/null 2>&1 </dev/null || extra_status=$?
+if [ "$extra_status" -ne 0 ] || [ "$(cat extra_b.txt 2>/dev/null)" != "TRASHED extra_b.txt" ]; then
+    extra_ok=0
+    extra_detail="$extra_detail [--restore b -v: exit=$extra_status]"
+fi
+for extra_name in extra_a.txt extra_x.txt extra_y.txt; do
+    extra_status=0
+    "$BETTER_RM" --restore "$extra_name" >/dev/null 2>&1 </dev/null || extra_status=$?
+    if [ "$extra_status" -ne 0 ] || [ "$(cat "$extra_name" 2>/dev/null)" != "TRASHED $extra_name" ]; then
+        extra_ok=0
+        extra_detail="$extra_detail [$extra_name 的紀錄不可用 / record not live: exit=$extra_status]"
+    fi
+done
+if [ "$extra_ok" -eq 1 ]; then
+    test_pass "多出來的檔名、前面的檔名與第二個 --restore 都以 1 拒絕且不動任何東西，尾隨旗標照舊生效"
+else
+    test_fail "--restore 默默丟掉或錯收了引數:${extra_detail}"
+fi
+
 # ============================================================================
 # 測試 9: 受保護目錄 (Test 9: Protected Directories)
 # ============================================================================
@@ -1493,12 +1570,24 @@ fi
 # ============================================================================
 # 測試 10: 快速連續刪除 (Test 10: Rapid Successive Deletions)
 # ============================================================================
-test_title "測試 10: 快速連續刪除（測試奈秒時間戳記）"
+test_title "測試 10: 快速連續刪除（並行刪除與垃圾桶名稱碰撞）"
 
 setup
 cd "$TEST_WORK_DIR"
 
 test_item "快速連續刪除多個檔案"
+# BR-A-11（2026-10-22）：五個並行的刪除各自要在垃圾桶裡留下恰好一筆。這一列原本在「來源都
+# 不見了、垃圾桶卻不是 5 筆」時也判通過（elif 那一支呼叫的是 test_pass），搬丟或搬成兩份都
+# 抓不到。它也測不到時間戳記的碰撞：rapid1..5.txt 的路徑與內容都不同，垃圾桶名稱本來就不會
+# 撞，所以原本那句「奈秒時間戳記正常工作」說的是這一列驗不到的事。同路徑、同內容、同時間
+# 戳記的碰撞由下面固定時間戳記的那幾列釘住。
+# BR-A-11 (2026-10-22): five concurrent deletions must leave exactly one trash entry
+# each. The row used to pass even when every source was gone but the trash did not
+# hold 5 entries (its elif branch called test_pass), so a lost or doubled entry went
+# unseen. It cannot exercise a timestamp collision either: rapid1..5.txt differ in
+# path and content, so their trash names never collide, and its old "nanosecond
+# timestamps work" message claimed what it could not test. A same-path,
+# same-content, same-timestamp collision is pinned by the fixed-timestamp rows below.
 for i in {1..5}; do
     echo "content $i" > "rapid$i.txt"
 done
@@ -1508,23 +1597,24 @@ for i in {1..5}; do
 done
 wait
 
-# 檢查所有檔案是否都成功刪除
 all_deleted=true
+rapid_exact=true
+rapid_counts=""
 for i in {1..5}; do
     if [ -e "rapid$i.txt" ]; then
         all_deleted=false
     fi
+    rapid_entries=$(find "$TEST_TRASH_DIR" -name "rapid$i.txt__*" 2>/dev/null | wc -l | tr -d ' ')
+    rapid_counts="$rapid_counts rapid$i=$rapid_entries"
+    if [ "$rapid_entries" != "1" ]; then
+        rapid_exact=false
+    fi
 done
 
-# 檢查是否有檔名衝突
-trash_files=$(find "$TEST_TRASH_DIR" -name "rapid*.txt__*" 2>/dev/null | wc -l)
-
-if $all_deleted && [ "$trash_files" -eq 5 ]; then
-    test_pass "快速連續刪除成功，無檔名衝突（奈秒時間戳記正常工作）"
-elif $all_deleted; then
-    test_pass "快速連續刪除成功，但找到 $trash_files 個檔案（預期 5 個）"
+if $all_deleted && $rapid_exact; then
+    test_pass "五個並行刪除各自在垃圾桶裡留下恰好一筆"
 else
-    test_fail "快速連續刪除失敗"
+    test_fail "並行刪除搬丟或搬重了項目（來源都已移走=${all_deleted}；各自的垃圾桶項目數:${rapid_counts}）"
 fi
 
 test_item "來源 parent 在 hash 期間被替換時不會移動替身檔案"
@@ -2106,6 +2196,109 @@ if [ "$suffix_status" -eq 1 ] &&
     test_pass "a.txt 不會比對到 data.txt，sub/a.txt 照樣還原"
 else
     test_fail "--restore 的最後一段比對不對（a.txt=${suffix_status}；twin=${suffix_twin_status}；訊息=${suffix_output}）"
+fi
+
+test_item "--restore 認得刪除時用的路徑寫法：../、經過符號連結的 parent（相對與絕對）、結尾斜線"
+# BR-A-2（2026-10-22）：刪除端記下的是「cd 進 parent 之後的 pwd -P」接上最後一段，所以 ..、
+# 結尾斜線與路上的每一個符號連結都被解析掉；還原端原本拿打的字串去比，於是 `rm ../up.txt`
+# 之後的 `rm --restore ../up.txt`、`rm -rf mydir/` 之後的 `rm --restore mydir/`、經過連結的
+# parent（macOS 的 /tmp、/var 本身就是連結）都回「找不到」，而紀錄與垃圾桶項目明明都在。
+# 每一種都要還原到目前資料夾。這裡的連結是自己建的，所以不論工作目錄是不是在 /tmp 底下都測
+# 得到。
+# BR-A-2 (2026-10-22): the delete side records the pwd -P of the parent joined with the
+# final component, so .., a trailing slash and every symlink on the way are resolved
+# away; restore used to compare the typed string, so `rm --restore ../up.txt` after
+# `rm ../up.txt`, `rm --restore mydir/` after `rm -rf mydir/`, and a parent reached
+# through a link (macOS's /tmp and /var are links) all answered "not found" while the
+# record and the trash entry both existed. Each must restore into the current
+# directory. The link here is made by the row itself, so it is exercised whether or
+# not the work directory sits under /tmp.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+spell_root="$TEST_WORK_DIR/spell"
+mkdir -p "$spell_root/sub" "$spell_root/real" "$spell_root/mydir"
+printf '%s\n' "UP CONTENT" > "$spell_root/up.txt"
+printf '%s\n' "LINKED CONTENT" > "$spell_root/real/in.txt"
+printf '%s\n' "ABSOLUTE CONTENT" > "$spell_root/real/abs.txt"
+printf '%s\n' "DIR CONTENT" > "$spell_root/mydir/f.txt"
+ln -s real "$spell_root/link"
+spell_ok=1
+spell_detail=""
+(cd "$spell_root/sub" && "$BETTER_RM" ../up.txt >/dev/null 2>&1)
+spell_status=0
+(cd "$spell_root/sub" && "$BETTER_RM" --restore ../up.txt >/dev/null 2>&1 </dev/null) || spell_status=$?
+if [ "$spell_status" -ne 0 ] || [ "$(cat "$spell_root/sub/up.txt" 2>/dev/null)" != "UP CONTENT" ]; then
+    spell_ok=0
+    spell_detail="$spell_detail [../up.txt: exit=$spell_status]"
+fi
+(cd "$spell_root" && "$BETTER_RM" link/in.txt >/dev/null 2>&1)
+spell_status=0
+(cd "$spell_root" && "$BETTER_RM" --restore link/in.txt >/dev/null 2>&1 </dev/null) || spell_status=$?
+if [ "$spell_status" -ne 0 ] || [ "$(cat "$spell_root/in.txt" 2>/dev/null)" != "LINKED CONTENT" ]; then
+    spell_ok=0
+    spell_detail="$spell_detail [link/in.txt: exit=$spell_status]"
+fi
+"$BETTER_RM" "$spell_root/link/abs.txt" >/dev/null 2>&1
+spell_status=0
+(cd "$spell_root/sub" && "$BETTER_RM" --restore "$spell_root/link/abs.txt" >/dev/null 2>&1 </dev/null) ||
+    spell_status=$?
+if [ "$spell_status" -ne 0 ] || [ "$(cat "$spell_root/sub/abs.txt" 2>/dev/null)" != "ABSOLUTE CONTENT" ]; then
+    spell_ok=0
+    spell_detail="$spell_detail [<abs>/link/abs.txt: exit=$spell_status]"
+fi
+(cd "$spell_root" && "$BETTER_RM" -rf mydir/ >/dev/null 2>&1)
+spell_status=0
+(cd "$spell_root" && "$BETTER_RM" --restore mydir/ >/dev/null 2>&1 </dev/null) || spell_status=$?
+if [ "$spell_status" -ne 0 ] || [ "$(cat "$spell_root/mydir/f.txt" 2>/dev/null)" != "DIR CONTENT" ]; then
+    spell_ok=0
+    spell_detail="$spell_detail [mydir/: exit=$spell_status]"
+fi
+if [ "$spell_ok" -eq 1 ]; then
+    test_pass "../、經過連結的相對與絕對寫法、結尾斜線都還原成功"
+else
+    test_fail "刪除時用的路徑寫法還原不回來:${spell_detail}"
+fi
+
+test_item "--restore 的路徑寫法對不到時不會改還原別的東西，並提示用名字還原會拿到哪一筆"
+# BR-A-2 的另一半：解析之後做的是完全比對，不是放寬。目錄部分不同的寫法（other/hint.txt 對上
+# spell2/ 底下的紀錄）必須照舊「找不到」、什麼都不動（與 BR2-G3 同一個精神：a.txt 比不到
+# data.txt，other/hint.txt 也比不到 spell2/hint.txt）。但使用者此刻多半正在撤銷一次刪除，所以
+# 訊息要說「用名字還原」存在、會拿到哪一筆；名字對不到任何紀錄時，不能有這句提示。
+# The other half of BR-A-2: resolving leads to an exact comparison, not a looser one.
+# A spelling whose directory part differs (other/hint.txt against a record under
+# spell2/) must still answer "not found" and touch nothing (the spirit of BR2-G3:
+# a.txt never matches data.txt, and other/hint.txt never matches spell2/hint.txt).
+# The user is most likely undoing a deletion at that moment, though, so the message
+# says that a restore by the name exists and which record it would take; a name with
+# no record must not get the hint.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+mkdir -p spell2 other
+printf '%s\n' "HINT CONTENT" > spell2/hint.txt
+hint_physical="$(cd spell2 && pwd -P)/hint.txt"
+"$BETTER_RM" spell2/hint.txt >/dev/null 2>&1
+hint_status=0
+hint_out=$("$BETTER_RM" --restore other/hint.txt 2>&1 </dev/null) || hint_status=$?
+nohint_status=0
+nohint_out=$("$BETTER_RM" --restore other/never-deleted.txt 2>&1 </dev/null) || nohint_status=$?
+hint_restored_early=no
+if [ -e hint.txt ] || [ -e other/hint.txt ]; then
+    hint_restored_early=yes
+fi
+byname_status=0
+"$BETTER_RM" --restore hint.txt >/dev/null 2>&1 </dev/null || byname_status=$?
+if [ "$hint_status" -eq 1 ] &&
+   [[ "$hint_out" == *"No matching deletion record"* ]] &&
+   [[ "$hint_out" == *"rm --restore 'hint.txt'"* ]] &&
+   [[ "$hint_out" == *"$hint_physical"* ]] &&
+   [ "$hint_restored_early" = no ] &&
+   [ "$nohint_status" -eq 1 ] &&
+   [[ "$nohint_out" == *"No matching deletion record"* ]] &&
+   [[ "$nohint_out" != *"Hint:"* ]] &&
+   [ "$byname_status" -eq 0 ] && [ "$(cat hint.txt 2>/dev/null)" = "HINT CONTENT" ]; then
+    test_pass "對不到的路徑寫法照舊找不到、什麼都沒動，提示的那一筆正是用名字還原得到的那一筆"
+else
+    test_fail "路徑寫法對不到時的行為不對（exit=${hint_status}；提前還原=${hint_restored_early}；無紀錄名稱 exit=${nohint_status}；用名字還原 exit=${byname_status}；訊息=$(printf '%s' "$hint_out" | tr -d '\033' | tr '\n' ' ')）"
 fi
 
 test_item "同名檔案存在時的覆蓋確認 - 選擇否 (n)"
@@ -4070,16 +4263,27 @@ printf '%s\n' "PROMPT RESTORED" > prompt.txt
 printf '%s\n' "PROMPT OCCUPANT" > prompt.txt
 promptn_status=0
 echo "n" | "$BETTER_RM" --restore prompt.txt >/dev/null 2>&1 || promptn_status=$?
+# 完全沒有回答（stdin 是 /dev/null，腳本與 agent shell 裡就是這樣）也算拒絕：同樣什麼都不動、
+# 在 stderr 說「操作已取消」，同樣以 0 結束。0 是刻意的契約（BR-A-1）：mv -i 與 rm -i 拒絕或
+# 讀到 EOF 時都回 0（實測），README 與 AGENTS.md 的結束碼一節也照這樣寫。
+# No answer at all (stdin is /dev/null, as in scripts and agent shells) is a decline
+# too: nothing is touched, "Operation cancelled" goes to stderr, and the exit is 0.
+# The 0 is the deliberate contract (BR-A-1): mv -i and rm -i return 0 on a decline
+# and on EOF (measured), and the exit-code sections of README and AGENTS.md say so.
+prompteof_status=0
+prompteof_out=$("$BETTER_RM" --restore prompt.txt 2>&1 </dev/null) || prompteof_status=$?
 promptn_entries=$(find "$TEST_TRASH_DIR" -maxdepth 6 -name 'prompt.txt__*' 2>/dev/null | wc -l | tr -d ' ')
 promptn_litter=$(find "$TEST_WORK_DIR" -maxdepth 1 -name 'prompt.txt.better-rm-*' 2>/dev/null | wc -l | tr -d ' ')
 
 if [ "$promptn_status" -eq 0 ] && \
+   [ "$prompteof_status" -eq 0 ] && \
+   [[ "$prompteof_out" == *"Operation cancelled"* ]] && \
    [ "$(cat prompt.txt)" = "PROMPT OCCUPANT" ] && \
    [ "$promptn_entries" -eq 1 ] && \
    [ "$promptn_litter" -eq 0 ]; then
-    test_pass "回答 n 時還原沒有發生，兩邊都原封不動"
+    test_pass "回答 n 或沒有回答時還原沒有發生，兩邊都原封不動，結束碼 0"
 else
-    test_fail "回答 n 時仍動了目的地或垃圾桶 (status=$promptn_status, entries=$promptn_entries, litter=$promptn_litter)"
+    test_fail "回答 n 或沒有回答時仍動了目的地或垃圾桶，或結束碼不是 0 (n=$promptn_status, EOF=$prompteof_status, entries=$promptn_entries, litter=$promptn_litter)"
 fi
 
 test_item "還原：互動確認回答 y 時，被覆蓋的目的地同樣要進垃圾桶"
@@ -4522,6 +4726,63 @@ if [ ! -e reserve-mutex.txt ] && [ ! -f "$mutex_base_target" ] && [ "$mutex_suff
     test_pass "保留鎖互斥使刪除改用 suffixed 目標，未佔用被保留的 base_target"
 else
     test_fail "保留鎖互斥失效：寫入了被保留的 base_target 或未產生 suffixed 項目（suffixed=$mutex_suffixed）"
+fi
+
+test_item "保留鎖的 mkdir 不是因為名稱已被佔用而失敗時，不重試，並印出 mkdir 自己的原因"
+# BR-A-4（2026-10-22）：保留鎖 mkdir 的任何失敗原本都被當成名稱碰撞。名字加上時間戳記與雜湊
+# 之後太長、垃圾桶鏡像目錄寫不進去、空間不足，換哪一個 suffix 都一樣，卻照樣跑滿 1000 次
+# mkdir，最後印出「無法保留唯一的垃圾桶路徑」，真正的原因被丟進 /dev/null。名字太長是這裡
+# 在任何使用者、任何平台上都重現得出來的那一種（root 會穿過權限，所以不拿權限來測）：240 個
+# 字元的名字本身合法，加上垃圾桶的後綴就超過上限。shim 只記下保留鎖那幾次 mkdir，每一次都
+# 交給真的 mkdir。真正的名稱碰撞（EEXIST）照舊重試，由上一列釘住。
+# BR-A-4 (2026-10-22): every failure of the reservation mkdir used to be read as a
+# name collision. A name that is too long once the timestamp and hash are appended, an
+# unwritable trash mirror directory, no space: no suffix changes any of them, yet the
+# loop ran all 1000 mkdir calls and ended with "Failed to reserve a unique trash path",
+# the real reason sent to /dev/null. Too long a name is the shape that reproduces for
+# any user on any platform (root walks past permissions, so they are not used here):
+# a 240-character name is legal by itself and over the limit with the trash suffix.
+# The shim only records the reservation mkdirs and hands every call to the real mkdir.
+# A real collision (EEXIST) still retries, pinned by the row above.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+longname_bin="$TEST_WORK_DIR/longname-mkdir-bin"
+longname_calls="$TEST_WORK_DIR/longname-mkdir.calls"
+mkdir -p "$longname_bin"
+cat > "$longname_bin/mkdir" <<'EOF'
+#!/bin/sh
+last=""
+for arg in "$@"; do last="$arg"; done
+case "$last" in
+    *.reserve) printf '%s\n' "$last" >> "$BETTER_RM_LONGNAME_CALLS" ;;
+esac
+exec "$BETTER_RM_REAL_MKDIR" "$@"
+EOF
+chmod +x "$longname_bin/mkdir"
+longname="L"
+while [ ${#longname} -lt 236 ]; do
+    longname="${longname}L"
+done
+longname="${longname}.txt"
+printf '%s\n' "LONG NAME CONTENT" > "$longname"
+longname_status=0
+longname_out=$(BETTER_RM_LONGNAME_CALLS="$longname_calls" \
+    BETTER_RM_REAL_MKDIR="$(command -v mkdir)" \
+    PATH="$longname_bin:$PATH" "$BETTER_RM" "$longname" 2>&1) || longname_status=$?
+longname_reserve_calls=$(wc -l < "$longname_calls" 2>/dev/null | tr -d ' ')
+longname_reserves_left=$(find "$TEST_TRASH_DIR" -name '*.reserve' 2>/dev/null | wc -l | tr -d ' ')
+longname_records=$(grep -v '^#' "$TEST_STATE_DIR/deletion.log" 2>/dev/null | grep -c 'LLLL')
+if [ "$longname_status" -eq 1 ] &&
+   [ "${#longname}" -eq 240 ] &&
+   [ "$(cat "$longname" 2>/dev/null)" = "LONG NAME CONTENT" ] &&
+   [ "$longname_reserve_calls" = "1" ] &&
+   [[ "$longname_out" == *"File name too long"* ]] &&
+   [[ "$longname_out" != *"Failed to reserve a unique trash path"* ]] &&
+   [ "$longname_reserves_left" = "0" ] &&
+   [ "$longname_records" = "0" ]; then
+    test_pass "名字太長時只試一次 mkdir 就停，印出 mkdir 的原因，檔案留在原處"
+else
+    test_fail "保留鎖的非碰撞失敗被當成碰撞重試（exit=${longname_status}；保留鎖 mkdir 次數=${longname_reserve_calls}；殘留保留鎖=${longname_reserves_left}；訊息=$(printf '%s' "$longname_out" | tr -d '\033' | tr '\n' ' ' | head -c 400)）"
 fi
 
 test_item "同裝置 mv 因目標被別人佔走而失敗時，改用 suffixed 目標重試，兩邊都保留"
@@ -6212,6 +6473,62 @@ else
     test_fail "結尾斜線的拼寫未被拒絕（連結存在=$([ -L homelink ] && echo yes || echo no)；marker=$(cat "$slashlink_home/keep/marker.txt" 2>/dev/null)；訊息=${slashlink_output}）"
 fi
 
+test_item "結尾斜線的連結拼寫指到一般目錄時，照實說那是連結並給出兩種寫法，不謊報競態"
+# BR-A-12（2026-10-22）：`dirlink/` 解析到的是連結指向的目錄，釘住 parent 之後 stat 的
+# ./dirlink 卻是連結本身，兩個身分永遠對不上，於是每一次 `rm -r dirlink/` 都以「在固定 parent
+# 前已變更」中止——一場沒有發生的競態，使用者也看不出是不是有東西在動他的路徑。照樣什麼都不
+# 移動（比 macOS 的 /bin/rm 安全：它會把目標目錄刪掉），但訊息要說出那是一條連結，並同時給
+# 「刪連結」與「刪目錄」兩種寫法。上一列（目標受保護）在 is_protected 就被拒絕，不受影響。
+# 反套套邏輯：不帶斜線的 `dirlink` 照舊刪得掉，進垃圾桶的是連結本身。
+# BR-A-12 (2026-10-22): `dirlink/` resolves to the directory the link points at while
+# the ./dirlink stat'ed after the parent is pinned is the link itself, so the
+# identities can never match and every `rm -r dirlink/` aborted with "changed before
+# its parent was pinned" -- a race that did not happen, leaving the user unable to
+# tell whether something was tampering with the path. Still nothing moves (safer than
+# macOS's /bin/rm, which deletes the target directory), but the message must say it
+# is a link and give both spellings, the link's and the directory's. The row above (a
+# protected target) is refused by is_protected first and is unaffected.
+# Anti-tautology: the plain `dirlink` still removes the link itself.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+mkdir -p slashlink-target/keep
+printf 'KEEP\n' > slashlink-target/keep/marker.txt
+ln -s slashlink-target dirlink
+dirlink_physical=$(cd slashlink-target && pwd -P)
+dirlink_ok=1
+dirlink_detail=""
+for dirlink_flags in -r -rf; do
+    dirlink_status=0
+    dirlink_out=$("$BETTER_RM" "$dirlink_flags" dirlink/ 2>&1 </dev/null) || dirlink_status=$?
+    if [ "$dirlink_status" -ne 1 ] ||
+       [[ "$dirlink_out" == *"changed before its parent was pinned"* ]] ||
+       [[ "$dirlink_out" != *"without the trailing slash: 'dirlink'"* ]] ||
+       [[ "$dirlink_out" != *"name the directory itself: '$dirlink_physical'"* ]]; then
+        dirlink_ok=0
+        dirlink_detail="$dirlink_detail [${dirlink_flags}: exit=${dirlink_status}; $(printf '%s' "$dirlink_out" | tr -d '\033' | tr '\n' ' ' | head -c 300)]"
+    fi
+done
+dirlink_trashed=$(find "$TEST_TRASH_DIR" \( -name 'dirlink*' -o -name 'slashlink-target*' \) 2>/dev/null |
+    wc -l | tr -d ' ')
+if [ "$dirlink_trashed" != "0" ] || [ ! -L dirlink ] ||
+   [ "$(cat slashlink-target/keep/marker.txt 2>/dev/null)" != "KEEP" ]; then
+    dirlink_ok=0
+    dirlink_detail="$dirlink_detail [被拒絕的呼叫動了東西 / a refused call moved something: trash=$dirlink_trashed]"
+fi
+dirlink_plain_status=0
+"$BETTER_RM" dirlink >/dev/null 2>&1 </dev/null || dirlink_plain_status=$?
+if [ "$dirlink_plain_status" -ne 0 ] || [ -L dirlink ] ||
+   [ "$(cat slashlink-target/keep/marker.txt 2>/dev/null)" != "KEEP" ] ||
+   ! find "$TEST_TRASH_DIR" -type l -name 'dirlink__*' 2>/dev/null | grep -q .; then
+    dirlink_ok=0
+    dirlink_detail="$dirlink_detail [不帶斜線的 dirlink / plain dirlink: exit=$dirlink_plain_status]"
+fi
+if [ "$dirlink_ok" -eq 1 ]; then
+    test_pass "dirlink/ 照實說是連結、給出兩種寫法且什麼都沒動，不帶斜線的 dirlink 照舊只刪連結"
+else
+    test_fail "結尾斜線的連結拼寫處理不對:${dirlink_detail}"
+fi
+
 test_item "還原：目的地被指向 \$HOME 的連結佔著時，讓位仍走垃圾桶而不是整個中止"
 # is_protected 說「受保護」時 --restore 不讓位也不覆蓋，直接中止；於是目的地只要被一條
 # 指向受保護目錄的連結佔著，那筆還原就永遠做不成，即使那條連結刪掉完全無害。
@@ -6242,6 +6559,120 @@ if [ "$restorelink_status" -eq 0 ] &&
     test_pass "佔位的連結移入垃圾桶讓位，還原完成且 \$HOME 內容原封不動"
 else
     test_fail "還原未完成或佔位連結未進垃圾桶（exit=${restorelink_status}；垃圾桶連結=${restorelink_trashed}；訊息=${restorelink_output}）"
+fi
+
+# ============================================================================
+# 測試 16: README 的垃圾桶清理函式 (Test 16: README's trash cleanup function)
+# ============================================================================
+test_title "測試 16: README 的垃圾桶清理函式"
+
+test_item "README 的 better_rm_purge 只挑舊的 better-rm 項目：剛刪的、長得像項目的目錄裡的、頂層的都不碰"
+# BR-A-5：這個函式會永久刪除，所以 README 裡的那段文字就是受測的程式碼——這一列直接從
+# README.md 抽出 better_rm_purge 來跑，抽不到就算失敗。它的第一版用 `find -name <時間戳記>
+# -prune`，把「名字裡有那串數字的任何目錄」都當成一整個項目：名字長得像垃圾桶項目的一般目錄
+# （例如手動還原時保留了垃圾桶名稱）連同幾秒前才從裡面刪掉的檔案一起被刪；從舊項目裡面再刪
+# 東西時，CLI 為它建的鏡像目錄也帶著那個舊時間戳記，裡面那一筆新的跟著走；名字剛好帶那串
+# 數字的 Finder 頂層項目也被選中（驗收時實測，三者都被 --delete 永久刪除）。
+# 這裡在測試自己的暫存目錄裡造一個垃圾桶（HOME 也指進來，函式萬一退回 $HOME/.Trash 也碰不到
+# 真的那一個），用真正的 better-rm 刪出兩筆舊項目（date 被 shim 成 2025 年）與四筆新的：內容
+# 很舊的檔案、內容很舊的目錄、從長得像項目的目錄裡刪掉的檔案、從舊目錄項目裡刪掉的檔案；再放
+# 兩個 Finder 式的頂層項目。要求：清單恰好是那兩筆舊的、兩個長得像項目的目錄被點名略過、
+# --delete 只刪那兩筆，新的與頂層的都還在。函式用 PATH 上的 bash 跑（與 is_protected_says_yes
+# 相同），所以 3.2 shim 模式下跑的就是 3.2。
+# BR-A-5: this function deletes permanently, so its README text is the code under test
+# -- the row extracts better_rm_purge from README.md itself and fails if it cannot. Its
+# first version used `find -name <stamp> -prune`, which took ANY directory whose name
+# holds the stamp-like run for a whole entry: an ordinary directory named like a trash
+# entry (say, one restored by hand under its trash name) went together with a file
+# trashed from it seconds earlier; the mirror directory the CLI creates when something
+# is deleted from inside an old entry carries the old stamp too, and the fresh entry in
+# it went along; and a top-level Finder item whose name happened to hold such a run was
+# selected as well (measured at acceptance: all three removed by --delete).
+# A trash is built in the test's own temp directory (HOME points in there too, so a
+# fallback to $HOME/.Trash cannot reach the real one), with two old entries made by the
+# real better-rm under a 2025 `date` shim, four recent ones -- a file and a directory
+# with old content, a file deleted from inside a look-alike directory, a file deleted
+# from inside the old directory entry -- and two Finder-style top-level items.
+# Required: the list is exactly the two old entries, both look-alike directories are
+# named as skipped, --delete removes only those two, and every recent and top-level
+# item survives. The function runs under bash from PATH (as is_protected_says_yes
+# does), so the 3.2 shim mode runs it under 3.2.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+purge_func_file="$TEST_WORK_DIR/purge-func.sh"
+sed -n '/^better_rm_purge() {$/,/^}$/p' "$SCRIPT_DIR/README.md" > "$purge_func_file"
+purge_root="$TEST_WORK_DIR/purge"
+purge_trash="$purge_root/trash"
+purge_home="$purge_root/home"
+purge_src="$purge_root/src"
+purge_shim="$purge_root/old-date-bin"
+mkdir -p "$purge_home" "$purge_src" "$purge_shim"
+cat > "$purge_shim/date" <<'EOF'
+#!/bin/sh
+printf '%s\n' '20250101_120000_000000000'
+EOF
+chmod +x "$purge_shim/date"
+purge_rm() {
+    TRASH_DIR="$purge_trash" HOME="$purge_home" "$BETTER_RM" "$@" >/dev/null 2>&1
+}
+purge_run() {
+    TRASH_DIR="$purge_trash" HOME="$purge_home" \
+        bash -c '. "$1" && better_rm_purge "$2" ${3:+"$3"}' purge "$purge_func_file" "$@"
+}
+purge_recent_count() {
+    find "$purge_trash" \( -name 'recent-oldcontent.txt__*' -o -name 'recent-dir__*' \
+        -o -name 'file.txt__*' -o -name 'c.txt__*' \) -prune -print 2>/dev/null |
+        wc -l | tr -d ' '
+}
+cd "$purge_src" || exit 1
+purge_phys=$(pwd -P)
+printf '%s\n' "OLD FILE" > old-file.txt
+mkdir -p old-dir/sub
+printf '%s\n' "OLD C" > old-dir/sub/c.txt
+printf '%s\n' "OLD KEEP" > old-dir/sub/keep.txt
+PATH="$purge_shim:$PATH" purge_rm old-file.txt
+PATH="$purge_shim:$PATH" purge_rm -r old-dir
+purge_old_file=$(find "$purge_trash$purge_phys" -maxdepth 1 -name 'old-file.txt__20250101_*' -print 2>/dev/null | head -n 1)
+purge_old_dir=$(find "$purge_trash$purge_phys" -maxdepth 1 -name 'old-dir__20250101_*' -print 2>/dev/null | head -n 1)
+printf '%s\n' "RECENT OLD CONTENT" > recent-oldcontent.txt
+touch -t 202501010000 recent-oldcontent.txt
+purge_rm recent-oldcontent.txt
+mkdir -p recent-dir
+printf '%s\n' "RECENT DIR" > recent-dir/inner.txt
+touch -t 202501010000 recent-dir/inner.txt recent-dir
+purge_rm -r recent-dir
+purge_lookalike="proj__20250101_120000_123456789__abc"
+mkdir -p "$purge_lookalike"
+printf '%s\n' "RECENT IN LOOKALIKE" > "$purge_lookalike/file.txt"
+purge_rm "$purge_lookalike/file.txt"
+if [ -n "$purge_old_dir" ]; then
+    purge_rm "$purge_old_dir/sub/c.txt"
+fi
+printf '%s\n' "FINDER" > "$purge_trash/Screenshot 2025-01-01.png"
+mkdir -p "$purge_trash/export__20240101_101010_final"
+cd "$TEST_WORK_DIR" || exit 1
+purge_recent_before=$(purge_recent_count)
+purge_expected=$(printf '%s\n' "$purge_old_file" "$purge_old_dir" | sort)
+purge_list_status=0
+purge_list=$(purge_run 30 2>"$TEST_WORK_DIR/purge-list.err") || purge_list_status=$?
+purge_skipped=$(grep -c 'skipped, holds other trash entries' "$TEST_WORK_DIR/purge-list.err" 2>/dev/null)
+purge_delete_status=0
+purge_deleted=$(purge_run 30 --delete 2>/dev/null) || purge_delete_status=$?
+purge_recent_after=$(purge_recent_count)
+if [ -s "$purge_func_file" ] &&
+   [ -n "$purge_old_file" ] && [ -n "$purge_old_dir" ] &&
+   [ "$purge_recent_before" = "4" ] &&
+   [ "$purge_list_status" -eq 0 ] && [ "$purge_delete_status" -eq 0 ] &&
+   [ "$(printf '%s\n' "$purge_list" | sort)" = "$purge_expected" ] &&
+   [ "$(printf '%s\n' "$purge_deleted" | sort)" = "$purge_expected" ] &&
+   [ "$purge_skipped" = "2" ] &&
+   [ ! -e "$purge_old_file" ] && [ ! -e "$purge_old_dir" ] &&
+   [ "$purge_recent_after" = "4" ] &&
+   [ -f "$purge_trash/Screenshot 2025-01-01.png" ] &&
+   [ -d "$purge_trash/export__20240101_101010_final" ]; then
+    test_pass "清單與 --delete 都只有那兩筆舊項目，長得像項目的目錄被略過，新的與頂層的都還在"
+else
+    test_fail "README 的清理函式挑錯了（抽取=$([ -s "$purge_func_file" ] && echo ok || echo 空的)；新項目 ${purge_recent_before}→${purge_recent_after}；略過=${purge_skipped}；清單=$(printf '%s' "$purge_list" | sed "s#$purge_trash#<trash>#g" | tr '\n' ' ')）"
 fi
 
 # ============================================================================

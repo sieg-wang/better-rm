@@ -305,17 +305,30 @@ The two paragraphs above this one predate `60c2efa` and describe a narrower
 clearing rule than the code has had since: every occupant is set aside now, not
 only the shapes `rename` could not replace.
 
-Exit contract, because "partially successful" must not read as success:
-`0` = restored and nothing unintended was touched — a destination that was
-renamed away by the kernel, moved into the trash, or set aside in place is not
-"unintended", and every one of those is said out loud, including the case where
-the set-aside reached the trash but its deletion-log record did not (there the
-message must not repeat the `rm --restore <name>` instruction, which would answer
-"no deletion record found"); `1` = the restore did not happen and the error names
+Exit contract, because "partially successful" must not read as success (the
+README's exit-code list says the same):
+`0` = restored and nothing is left for the user to clean up. An occupant moved
+into the trash to make room is not a leftover — it is recoverable with
+`rm --restore <name>` — and the message says so, including the case where it
+reached the trash but its deletion-log record did not (there the message must not
+repeat the `rm --restore <name>` instruction, which would answer "no deletion
+record found"). A declined overwrite prompt also exits `0`: an answer that does
+not start with `y`/`Y`, an empty line, or no answer at all (EOF — stdin from
+`/dev/null`, a script, an agent shell) prints `Operation cancelled` on stderr and
+touches nothing. That `0` is deliberate, not an oversight: it is what `mv -i` and
+`rm -i` return on a decline and on EOF (measured), and a caller that must tell a
+decline from a restore checks that the destination is free first or passes `-f`.
+`1` = the restore did not happen (a declined prompt aside) and the error names
 anything that could not be put back — including a cross-device copy that already
-consumed the trash source, whose staging path is printed outright; `2` = the item
-*was* restored but a leftover could not be cleaned up, and the leftover path is
-printed.
+consumed the trash source, whose staging path is printed outright; no matching
+record and a refused argument list (an extra pathname, a second `--restore`) are
+`1` too. `2` = the item *was* restored but left a named residue outside the trash
+that `rm --restore` cannot reach: the old destination set aside in place
+(`<name>.better-rm-displaced-XXXXXX`, printed on stdout as well as stderr), or a
+staging directory that could not be removed. Nothing is "renamed away by the
+kernel" any more: since `60c2efa` every occupant is set aside before the publish,
+since `d9a2dd7` that publish is always `-n`, and since `40650d4` the in-place
+set-aside exits `2`, not `0`.
 
 ### Cross-device restores
 
@@ -414,15 +427,23 @@ entry added on one guard and forgotten on the other goes red.
   allowed, and the second one matters, because `~/.claude/projects` is a
   multi-gigabyte session lake that gets pruned.
 - A pattern whose PARENT is a protected directory selects that directory's whole
-  contents, so `rm -rf ~/.ssh/*` and `rm -rf ~/.claude/*` are refused for the
-  same reason `rm -rf /etc/*` is. `rm -rf ~/.claude/projects/*` has an
-  unprotected parent and stays allowed.
+  contents, so the agent hook — which reads the command text — refuses
+  `rm -rf ~/.ssh/*` and `rm -rf ~/.claude/*` for the same reason it refuses
+  `rm -rf /etc/*`. `better-rm` itself never sees a pattern: the calling shell
+  expands `~/.ssh/*` into the child paths before the script runs, and each child is
+  an ordinary target, so through the `rm` alias (an interactive shell, no hook) the
+  entries the pattern expands to go into the trash one by one with exit 0 —
+  recoverable, not refused. `rm -rf ~/.claude/projects/*` has an unprotected
+  parent and is allowed by both guards.
 - Matching is on whole path components, not on a prefix: `~/.claude-backup` and
   `~/.sshfoo` are untouched.
 - The spelling does not change the answer. `~/.ssh`, `"$HOME/.ssh"`,
   `$HOME/.ssh`, `"${HOME}/.ssh"`, `/Users/<you>/.ssh` and `~/.ssh/` all reach the
   same check, as do the wrapper and carrier forms (`sudo rm -rf`, `find … -delete`,
-  `… | xargs rm -rf`, `bash -c '…'`, an unquoted heredoc body).
+  `… | xargs rm -rf`, `bash -c '…'`, an unquoted heredoc body). The `sudo`,
+  `find`, `xargs` and `bash -c` forms are judged by the agent hook only: they run
+  the `rm` or `find` found on `PATH`, not the shell's `rm` alias, so `better-rm`
+  is never asked.
 
 **`~/Library` is deliberately NOT on the list.** Clearing `~/Library/Caches/<tool>`
 is routine, and the list protects a directory rather than its contents, so adding
@@ -622,37 +643,47 @@ decision is pinned by allow rows in the suite: adding `~/Library` turns them red
 When implementing new features, ensure comprehensive testing:
 
 ```bash
-# Create test environment
+# Create test environment. Run this from the repository root, so that BETTER_RM
+# names the script in this checkout (calling it by path depends neither on PATH nor
+# on what `rm` is aliased to). Both variables are EXPORTED: a bare `TRASH_DIR=...`
+# line sets a shell variable the better-rm child never sees, and every "test"
+# deletion then lands in the live ~/.Trash and the live deletion log, where a later
+# `rm --restore file.txt` can pick the test file over your own.
+BETTER_RM="$(pwd)/better-rm"
 mkdir -p /tmp/test-better-rm
 cd /tmp/test-better-rm
-TRASH_DIR=/tmp/test-trash
+export TRASH_DIR=/tmp/test-trash
+export BETTER_RM_STATE_DIR=/tmp/test-state
 
 # Test scenarios
 # 1. Regular files
 echo "content" > file.txt
-better-rm -v file.txt
+"$BETTER_RM" -v file.txt
 
 # 2. Empty files/directories
 touch empty.txt
 mkdir emptydir
-better-rm -v empty.txt
-better-rm -rv emptydir
+"$BETTER_RM" -v empty.txt
+"$BETTER_RM" -rv emptydir
 
 # 3. Special characters
 touch "file with spaces.txt"
-better-rm -v "file with spaces.txt"
+"$BETTER_RM" -v "file with spaces.txt"
 
 # 4. Rapid deletions
 for i in {1..10}; do echo "$i" > "file$i.txt"; done
-better-rm -v file*.txt
+"$BETTER_RM" -v file*.txt
 
 # 5. Large directories
 mkdir largedir
 for i in {1..1000}; do echo "content $i" > "largedir/file$i.txt"; done
-better-rm -rv largedir
+"$BETTER_RM" -rv largedir
 
-# Clean up
-rm -rf /tmp/test-better-rm /tmp/test-trash
+# Clean up with the real rm: through the rm alias this would itself be a
+# better-rm deletion. Then drop the two variables from this shell.
+cd /
+/bin/rm -rf /tmp/test-better-rm /tmp/test-trash /tmp/test-state
+unset TRASH_DIR BETTER_RM_STATE_DIR
 ```
 
 ## Contributing

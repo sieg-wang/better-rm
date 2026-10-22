@@ -186,6 +186,8 @@ rm -- -dash.txt
 
 兩邊的範圍不一樣：刪除可以接任意多個檔名，`--restore` 只還原一個，因此 `rm --restore -- <檔案>` 後面再多出任何引數都會被拒絕（結束碼 1，不動任何檔案）。這是刻意的——多出來的引數若被當成旗標，`rm --restore -- victim.txt -f` 就會無提示地覆蓋目的地而且不留垃圾桶紀錄。要強制覆蓋請把旗標寫在前面：`rm -f --restore -- <檔案>`。
 
+沒有 `--` 時也一樣只收一個：`rm --restore a.txt b.txt`、寫在 `--restore` 前面的檔名（`rm junk.log --restore keep.txt`）與第二個 `--restore` 都會被拒絕（結束碼 1，什麼都不刪、什麼都不還原），錯誤訊息會指出是哪一個引數。這些寫法以前會被默默丟掉、以 0 結束。尾隨的旗標不受影響：`rm --restore <檔案> -f` 照舊生效。
+
 #### 使用自訂垃圾桶目錄
 
 ```bash
@@ -375,15 +377,21 @@ export BETTER_RM_PROTECTED_DIRS="$HOME/work/secrets:$HOME/vault"
 
 這兩項與清單上其他項目**完全相同**的語意：保護的是那個目錄本身，不是它底下的東西。
 `rm -rf ~/.ssh` 被拒絕，`rm -f ~/.ssh/known_hosts.old`、`rm -rf ~/.claude/projects/<session>`
-照舊放行——後者是會長到數 GB、本來就會定期清理的對話記錄。唯一不那麼直觀的地方是萬用
-字元：父目錄受保護的樣式選中的是**整個目錄的內容**，所以 `rm -rf ~/.ssh/*` 與
-`rm -rf ~/.claude/*` 會被拒絕，理由與 `rm -rf /etc/*` 相同；`rm -rf ~/.claude/projects/*`
-的父目錄沒受保護，照舊放行。名字只是「以它開頭」的鄰居不受影響（`~/.claude-backup`、
+照舊放行——後者是會長到數 GB、本來就會定期清理的對話記錄。萬用字元要分兩道守衛來講：
+coding agent 的 PreToolUse hook 讀的是命令文字，看得到 `~/.ssh/*` 這個樣式；父目錄受保護
+的樣式選中的是**整個目錄的內容**，所以 hook 拒絕 `rm -rf ~/.ssh/*` 與 `rm -rf ~/.claude/*`，
+理由與 `rm -rf /etc/*` 相同。`rm` 替身（本工具）看不到樣式：`*` 是呼叫端的 shell 在執行前
+展開的，better-rm 收到的是一個個子項目，而每一個子項目都只是一般的刪除目標——所以在你自己
+的終端機裡（`rm` 是本工具的 alias、沒有 hook），`rm -rf ~/.ssh/*` 會把展開出來的項目逐一
+移進垃圾桶、以 0 結束，可以用 `rm --restore` 取回，但**不會被拒絕**。`rm -rf ~/.claude/projects/*`
+的父目錄沒受保護，兩道守衛都放行。名字只是「以它開頭」的鄰居不受影響（`~/.claude-backup`、
 `~/.sshfoo`）——比對的是完整路徑元件，不是前綴。
 
 寫法不影響判定：`~/.ssh`、`"$HOME/.ssh"`、`$HOME/.ssh`、`"${HOME}/.ssh"`、`/Users/<you>/.ssh`
 與結尾多一條斜線的 `~/.ssh/` 全部得到同一個答案，包裝與載體（`sudo rm -rf ~/.ssh`、
-`find "$HOME/.ssh" -delete`、`echo ~/.ssh | xargs rm -rf`、`bash -c 'rm -rf ~/.ssh'`）也是。
+`find "$HOME/.ssh" -delete`、`echo ~/.ssh | xargs rm -rf`、`bash -c 'rm -rf ~/.ssh'`）也是——
+括號裡這幾種只有 agent hook 判得到：它們執行的是 `PATH` 上的 `rm` 或 `find`，不是 shell 的
+`rm` alias，根本不會經過 `rm` 替身。
 在此之前，只有「解不開的變數」這個意外讓 `rm -rf "$HOME/.ssh"` 看起來被擋住（而且拒絕訊息
 報的是一個沒人寫過的 `/`），字面的 `rm -rf ~/.ssh` 一直都是放行的。
 
@@ -1304,7 +1312,11 @@ rm --restore LICENSE
 ```
 
 - **名稱以破折號開頭時要用 `--`**：`rm --restore -- -dash.txt`，而且 `--` 之後只接受這一個路徑。與刪除端一樣，沒有 `--` 的破折號開頭引數會被視為「`--restore` 缺少引數」，以免把誤打的 `rm --restore -f` 默默當成要還原的檔名；`--` 之後再多出來的引數則直接被拒絕，因為那個位置的引數若被當成旗標，`rm --restore -- victim.txt -f` 會無提示地覆蓋目的地、而且不留垃圾桶紀錄。旗標寫在 `--restore` 前面（`rm -f --restore -- <檔案>`）照舊生效。
-- **重名保護機制**：若目前資料夾已存在同名檔案或目錄，`better-rm` 會提示您是否確認覆蓋（`y/N`）。回答 `y` 與 `-f` 走的是同一條路——被覆蓋的那一個先進垃圾桶（見下）；回答 `n`（或直接按 Enter）則什麼都不做，目的地與垃圾桶項目都原封不動。
+- **一次只還原一個**：`--restore` 只收一個路徑。多出來的檔名、寫在 `--restore` 前面的檔名、第二個 `--restore` 都會被拒絕（結束碼 `1`，什麼都不刪也不還原），不會被默默丟掉。
+- **也認得刪除時用的路徑寫法**：除了名稱，`--restore` 也接受含斜線的路徑——`rm --restore ../notes.txt`、`rm --restore build/`、`rm --restore /tmp/x.log`、經過符號連結的 parent（macOS 的 `/tmp`、`/var` 本身就是連結）。刪除時記下的是 parent 的實體路徑，所以這裡先用同樣的方式（`cd` + `pwd -P`）把 parent 解析成實體路徑，再與紀錄的原路徑做完整比對。原本的字面比對照舊先用：相對寫法（例如 `sub/a.txt`）也會比到任何原路徑以 `/sub/a.txt` 結尾的紀錄，包括從別的目錄刪掉的，而且最新的一筆優先；要確定是這個目錄底下的那一筆，請寫絕對路徑（例如 `rm --restore "$PWD/sub/a.txt"`）。比對以完整路徑元件為單位，所以 `a.txt` 不會比到 `data.txt`。還原一律回到目前資料夾，這一點與用名稱還原相同。
+  - 路徑對不到、但同名的紀錄存在時，訊息會多一行提示：那一筆的原路徑，以及 `rm --restore <名稱>` 會把它還原到目前資料夾。
+  - 大小寫或 Unicode 正規化（NFC／NFD）不同的拼寫**不會**被當成同一個名字，即使 APFS 把它們視為同一個檔案：比對的是刪除時記下的那串字，而用字串規則去摺疊等於在猜卷宗分不分大小寫。請用刪除時的寫法。
+- **重名保護機制**：若目前資料夾已存在同名檔案或目錄，`better-rm` 會提示您是否確認覆蓋（`y/N`）。回答 `y` 與 `-f` 走的是同一條路——被覆蓋的那一個先進垃圾桶（見下）；回答 `n`、直接按 Enter，或根本沒有回答（stdin 是 `/dev/null`，例如在腳本或 coding agent 的 shell 裡）則什麼都不做，目的地與垃圾桶項目都原封不動，stderr 印出 `操作已取消 / Operation cancelled`，**結束碼是 `0`**——與 `mv -i`、`rm -i` 拒絕時相同（實測）。腳本若需要分辨「拒絕了」與「還原了」，請先確認目的地不存在，或明確加上 `-f`。
 - **強制覆蓋**：如果您希望直接覆蓋而不顯示提示，可以加上 `-f` 參數：
   ```bash
   rm -f --restore LICENSE
@@ -1326,8 +1338,8 @@ rm --restore LICENSE
   - `V1` **沒有遺失**，它仍然完整躺在垃圾桶裡（本例是 `$TRASH_DIR/<原路徑>__<時間戳>__<hash>`），只是 `--restore` 這個入口到不了它。要拿回更舊的版本，請照下面的「手動還原」直接用 `mv` 從垃圾桶搬回，或先把目前資料夾裡的同名檔案改名再還原。
   - 這是「被覆蓋的目的地一律進垃圾桶」換來的代價：舊版的做法是把被覆蓋的那一個直接銷毀，所以連續 `--restore` 確實會一路往回翻——代價是每翻一次就永久毀掉一份。這一輪不改變這個行為，只是把它寫下來。
 - **`--restore` 的結束碼**：
-  - `0` — 還原完成，收尾也乾淨，沒有留下任何要你處理的東西。被移進垃圾桶的舊目的地不算（訊息會講，而且 `rm --restore` 取得回來）。
-  - `1` — 還原沒有發生。錯誤訊息會直接指出任何無法放回原位的東西實際在哪裡；跨裝置複製若已經消耗掉垃圾桶來源，訊息會印出資料目前所在的暫存路徑。
+  - `0` — 還原完成，收尾也乾淨，沒有留下任何要你處理的東西。被移進垃圾桶的舊目的地不算（訊息會講，而且 `rm --restore` 取得回來）。**拒絕覆蓋也是 `0`**：同名提示回答 `n`、直接按 Enter 或沒有回答時，什麼都沒動，stderr 印出 `操作已取消 / Operation cancelled`（見上方「重名保護機制」）。
+  - `1` — 還原沒有發生（上面那種拒絕覆蓋除外）。錯誤訊息會直接指出任何無法放回原位的東西實際在哪裡；跨裝置複製若已經消耗掉垃圾桶來源，訊息會印出資料目前所在的暫存路徑。找不到紀錄、引數不合規定（例如多出來的檔名）也是 `1`。
   - `2` — **部分成功**：項目確實還原了，但留下了一個需要你處理的殘留物，而且它**不在垃圾桶裡**、`rm --restore` 取不回。目前有兩種：舊目的地走了「就地讓位」那條退路，或收尾（移除暫存目錄）沒能完成。殘留物的完整路徑會印出來，前者同時印在 stdout 與 stderr。這兩種情況絕不會回傳 `0`。
 
 #### 2. 手動還原
@@ -1460,11 +1472,47 @@ rm -rf /   # 刪除整個系統！
 
 **解決方法：**
 
-定期清理垃圾桶：
+依「刪除時間」清理，而不是依檔案的時間戳記。better-rm 用 `mv` 把東西移進垃圾桶（同一個檔案系統上就是一次 rename），項目原本的 mtime 會被保留，所以 `find ~/.Trash -mtime +30 -delete` 選中的是「內容 30 天沒改過」的東西——五分鐘前才刪掉的舊檔案、剛刪掉的目錄裡的舊檔案都在其中，而 `-delete` 是永久刪除，正好刪掉 better-rm 要留給你反悔的那一段。ctime 也不是刪除時間：之後任何 `chmod`、xattr 變更都會改掉它。刪除時間寫在每一個 better-rm 垃圾桶項目的名稱裡（`<名稱>__YYYYMMDD_HHMMSS_…__<hash>`）。下面這個函式只挑名稱帶有這個時間戳記、而且早於 N 天前的項目，以整個項目為單位（不會進到被刪掉的目錄裡面一個個挑檔案），預設只列出來，加上 `--delete` 才會邊列邊永久刪除：
+
 ```bash
-# 清理 30 天前的檔案
-find ~/.Trash -mtime +30 -delete
+# 列出（加上 --delete 才永久刪除）刪除時間早於 N 天前的 better-rm 垃圾桶項目
+# List (and only with --delete, permanently remove) better-rm trash entries deleted more than N days ago
+better_rm_purge() {
+    local days="${1:?usage: better_rm_purge <days> [--delete]}"
+    local action="${2:-list}"
+    local cutoff
+    cutoff=$(date -v-"${days}"d +%Y%m%d%H%M%S 2>/dev/null ||
+        date -d "${days} days ago" +%Y%m%d%H%M%S) || return 1
+    find "${TRASH_DIR:-$HOME/.Trash}" -mindepth 2 \
+        -name '*__[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]_*' \
+        -prune -exec sh -c '
+            action=$1 cutoff=$2
+            shift 2
+            for entry do
+                stamp=$(printf "%s\n" "${entry##*/}" |
+                    sed -n -E "s/.*__([0-9]{8})_([0-9]{6})_.*/\1\2/p")
+                [ -n "$stamp" ] && [ "$stamp" -lt "$cutoff" ] || continue
+                if [ -d "$entry" ] && [ ! -L "$entry" ] &&
+                   [ -n "$(find "$entry" -mindepth 1 -name "*__[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]_*" -print 2>/dev/null | head -n 1)" ]; then
+                    printf "skipped, holds other trash entries: %s\n" "$entry" >&2
+                    continue
+                fi
+                printf "%s\n" "$entry"
+                if [ "$action" = --delete ]; then
+                    /bin/rm -rf -- "$entry"
+                fi
+            done' sh "$action" "$cutoff" {} +
+}
+
+better_rm_purge 30            # 1. 先看清單
+better_rm_purge 30 --delete   # 2. 確認無誤才刪（/bin/rm，不經過 better-rm，刪了就沒了）
 ```
+
+- `~/.Trash` 也是 Finder 的垃圾桶，而 Finder 把它的項目放在最上層；better-rm 的項目則在原本絕對路徑的鏡像底下。所以這個函式從第二層才開始找，最上層的東西一律不碰（直接刪在 `/` 底下的 better-rm 項目也落在最上層，同樣不會被選中）。Finder 的項目請用 Finder 的「清空垃圾桶」。
+- 名字帶有這種時間戳記、裡面卻還裝著別的垃圾桶項目的目錄會被略過，並在 stderr 點名（`skipped, holds other trash entries: <路徑>`）。那可能是名字長得像垃圾桶項目的一般目錄、裡面有剛刪掉的東西，也可能是從舊項目裡面再刪東西時留下的鏡像目錄。
+- 更深的地方，名字本身帶有這種數字串的其他東西仍然會被選中——所以 `--delete` 之前一定要先看過清單。
+- 項目被刪掉之後，`deletion.log` 裡對應的紀錄還在，但 `--restore` 會跳過垃圾桶本體已經不在的紀錄。
+- 時間戳記是 better-rm 執行時的本機時間；macOS（BSD `date -v`）與 Linux（GNU `date -d`）都適用。
 
 ### 問題：想要使用原生的 rm 命令
 
