@@ -4,7 +4,8 @@
     "beforeShellExecution": [
       {
         "command": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\"",
-        "matcher": ".*"
+        "matcher": ".*",
+        "failClosed": true
       }
     ]
   }

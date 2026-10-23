@@ -138,6 +138,7 @@ case "$1" in
     tag)
         case "$2" in
             --sort=-creatordate) exit 0 ;;   # no tags -> empty stdout
+            --merged) exit 0 ;;              # no tag reachable from HEAD -> empty stdout
             -a) exit 0 ;;                     # tag creation
             *) exit 1 ;;
         esac
@@ -314,13 +315,25 @@ assert_log_lacks "suggested push command does not name origin" \
 # status, so it cannot see which commit the release commits, tags and waits
 # for. These rows run the real git against a local bare repository standing in
 # for the `mine` remote (nothing leaves TMP_ROOT); gh is still a stub, and it
-# answers `run list` from the commit named in the script's own --jq filter.
+# answers `run list` by running the script's own --json/--jq over a fixture list.
 # 真 git 的 fixture：上面的假 git 只回一個固定的 HEAD 與乾淨的狀態，看不到 release
 # 提交、打標籤、等 CI 的是哪一個 commit。這幾列用真的 git，`mine` 換成 TMP_ROOT 裡的
-# 本機 bare repository；gh 仍是替身，依腳本自己 --jq 裡寫的 commit 回答 run list。
+# 本機 bare repository；gh 仍是替身，拿腳本自己的 --json／--jq 去跑一份固定的執行清單來回答 run list。
 RG_ROOT="$TMP_ROOT/real-git"
 RG_BIN="$RG_ROOT/bin"
 mkdir -p "$RG_BIN"
+
+# The stub evaluates the script's selection program with jq (gh itself runs it
+# with its embedded gojq), so the suite needs a jq on PATH. Without one the stub
+# answers each `run list` with a failed run, the rows below that expect a
+# release to complete fail, and this row names the cause.
+# 替身用 jq 執行腳本的篩選程式（gh 本身用內建的 gojq），所以這套測試需要 PATH 上有 jq。沒有的話替身對每個
+# run list 都回一次失敗的執行，下面預期 release 完成的列會失敗，而這一列說出原因。
+if command -v jq >/dev/null 2>&1; then
+    pass "jq is available to evaluate the script's own --jq program"
+else
+    fail "jq is available to evaluate the script's own --jq program (none on PATH)"
+fi
 
 rg_git() {
     GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
@@ -334,19 +347,59 @@ cat > "$RG_BIN/gh" <<'EOF'
 printf '%s\n' "$*" >> "$BETTER_RM_TEST_GH_LOG"
 case "$1 $2" in
     "run list")
-        want=$(printf '%s' "$*" | sed -n 's/.*headSha == "\([0-9a-f]*\)".*/\1/p')
+        # BR-B-5: run the script's OWN --json and --jq over a fixture list, as gh
+        # does, instead of pulling the commit out of the --jq text. The atomic push
+        # of main plus the tag starts two ci-release.yml runs of the SAME commit,
+        # and only the tag run has the release job; here the main-branch run is the
+        # newer of the two and its verdict differs from the tag run's whenever a
+        # row sets BETTER_RM_TEST_MAIN_CI. The newest run of that commit is a
+        # workflow_dispatch run on the tag ref (a manual re-run, whose release job
+        # fails once the release exists), so a selection that drops
+        # `event == "push"` takes its failure for the tag push's verdict. Fields
+        # the script did not ask for are dropped, as gh drops them. A program that
+        # selects nothing (or does not compile) gets a failed run, so it ends the
+        # release at once instead of polling for 30 minutes.
+        # BR-B-5：照 gh 的做法，拿腳本自己的 --json 與 --jq 去跑一份固定清單，而不是從 --jq 文字裡抽出
+        # commit。atomic push（main 加標籤）會對「同一個」commit 啟動兩次 ci-release.yml，只有標籤那次有
+        # release job；這裡 main 那次比較新，列設了 BETTER_RM_TEST_MAIN_CI 時兩者結果不同。那個 commit 最新的一次
+        # 是在標籤 ref 上的 workflow_dispatch（手動重跑，release 已存在時它的 release job 會失敗），所以拿掉
+        # `event == "push"` 的篩選會把它的失敗當成標籤推播的結果。腳本沒要的欄位照 gh 的方式丟掉。什麼都沒選到
+        # （或編譯不過）的程式拿到一次失敗的執行，立刻結束，不輪詢 30 分鐘。
+        fields=""
+        program=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --json) fields="$2"; shift 2 ;;
+                --jq) program="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
         tag_commit=$(git -C "$BETTER_RM_TEST_PROJECT" rev-parse -q --verify \
             "refs/tags/$BETTER_RM_TEST_TAG^{commit}" 2>/dev/null)
-        if [ -n "$want" ] && [ "$want" = "$tag_commit" ]; then
-            printf 'completed\t%s\thttps://example.test/runs/tag-commit\n' "$BETTER_RM_TEST_TAG_CI"
-        elif [ -n "$want" ] && [ "$want" = "$BETTER_RM_TEST_PREVIOUS" ]; then
-            printf 'completed\tsuccess\thttps://example.test/runs/previous-commit\n'
-        elif [ -n "$want" ]; then
-            # Any other id (an annotated tag's own object, say) gets a failed run,
-            # so a wrong id ends the release at once instead of polling for 30 min.
-            # 其他 id（例如 annotated tag 自己的物件）一律回失敗的執行，錯的 id 會立刻結束，
-            # 而不是輪詢 30 分鐘。
-            printf 'completed\tfailure\thttps://example.test/runs/unknown-commit\n'
+        selected=$(jq -n \
+            --arg fields "$fields" \
+            --arg tag "$BETTER_RM_TEST_TAG" \
+            --arg tag_commit "$tag_commit" \
+            --arg previous "$BETTER_RM_TEST_PREVIOUS" \
+            --arg tag_ci "$BETTER_RM_TEST_TAG_CI" \
+            --arg main_ci "${BETTER_RM_TEST_MAIN_CI:-success}" '
+            [
+              {status: "completed", conclusion: "failure", url: "https://example.test/runs/tag-dispatch",
+               headSha: $tag_commit, headBranch: $tag, event: "workflow_dispatch", createdAt: "2026-10-22T00:00:02Z"},
+              {status: "completed", conclusion: $main_ci, url: "https://example.test/runs/main-branch",
+               headSha: $tag_commit, headBranch: "main", event: "push", createdAt: "2026-10-22T00:00:01Z"},
+              {status: "completed", conclusion: $tag_ci, url: "https://example.test/runs/tag-commit",
+               headSha: $tag_commit, headBranch: $tag, event: "push", createdAt: "2026-10-22T00:00:00Z"},
+              {status: "completed", conclusion: "success", url: "https://example.test/runs/previous-commit",
+               headSha: $previous, headBranch: "main", event: "push", createdAt: "2026-10-21T00:00:00Z"}
+            ]
+            | ($fields | split(",")) as $keep
+            | map(with_entries(select(.key as $key | $keep | any(.[]; . == $key))))' |
+            jq -r "$program" 2>/dev/null) || selected=""
+        if [ -n "$selected" ]; then
+            printf '%s\n' "$selected"
+        else
+            printf 'completed\tfailure\thttps://example.test/runs/none-selected\n'
         fi
         exit 0
         ;;
@@ -400,7 +453,8 @@ make_release_fixture() {
 }
 
 # run_release_fixture PROJECT TAG_CI LABEL [args...]: the release from the
-# project root, stubbed gh first on PATH, real git. Sets RG_STATUS.
+# project root, stubbed gh first on PATH, real git. Sets RG_STATUS. The
+# main-branch run of the same commit concludes with RG_MAIN_CI (default success).
 run_release_fixture() {
     local project="$1"
     local tag_ci="$2"
@@ -414,6 +468,7 @@ run_release_fixture() {
         BETTER_RM_TEST_GH_LOG="$RG_ROOT/$label.gh.log" \
         BETTER_RM_TEST_PROJECT="$project" BETTER_RM_TEST_TAG=v1.0.1 \
         BETTER_RM_TEST_TAG_CI="$tag_ci" BETTER_RM_TEST_PREVIOUS="$RG_PREVIOUS" \
+        BETTER_RM_TEST_MAIN_CI="${RG_MAIN_CI:-success}" \
         BETTER_RM_TEST_NOTES="$RG_ROOT/$label.notes" \
         "$SCRIPT" "$@" ) > "$RG_ROOT/$label.out" 2>&1 < /dev/null || RG_STATUS=$?
 }
@@ -448,6 +503,10 @@ assert_log_contains "the CI result reported is the tag commit's run" \
     "https://example.test/runs/tag-commit" "$RG_ROOT/ci-success.out"
 assert_log_lacks "the previous commit's run is not reported as the release CI" \
     "https://example.test/runs/previous-commit" "$RG_ROOT/ci-success.out"
+assert_log_lacks "the main-branch run of the same commit is not reported as the release CI" \
+    "https://example.test/runs/main-branch" "$RG_ROOT/ci-success.out"
+assert_log_lacks "a workflow_dispatch run of the tag is not reported as the tag push's CI" \
+    "https://example.test/runs/tag-dispatch" "$RG_ROOT/ci-success.out"
 assert_log_contains "the published notes cite the tag's commit" \
     "- Commit：$RG_TAG_COMMIT" "$RG_ROOT/ci-success.notes"
 assert_status "the release tag reaches mine and names the release commit" \
@@ -464,6 +523,29 @@ assert_log_lacks "a failed tag CI is never announced as complete" \
     "CI 已完成" "$RG_ROOT/ci-failure.out"
 assert_log_lacks "no release notes are written after a failed tag CI" \
     "release edit" "$RG_ROOT/ci-failure.gh.log"
+assert_log_lacks "a passing main-branch run of the same commit is not taken for the tag's CI" \
+    "https://example.test/runs/main-branch" "$RG_ROOT/ci-failure.out"
+
+# BR-B-5, the other direction: the main-branch run of the same commit fails while
+# the tag run -- the one with the release job -- succeeds and publishes the
+# release. Following the main run reported "CI 結束但未成功" for a release that
+# exists, so the notes were never written and the advised retry hit the
+# local-tag refusal.
+# BR-B-5 的另一個方向：同一個 commit 的 main 那次失敗，而標籤那次（有 release job 的那次）成功並發佈了
+# release。跟著 main 那次走會對一個已存在的 release 回報「CI 結束但未成功」，說明從沒寫上，建議的重試又撞上
+# 本機標籤的拒絕。
+RG_PROJECT=$(make_release_fixture main-run-fails)
+RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
+( cd "$RG_PROJECT" && "$SCRIPT" bump patch ) > "$RG_ROOT/main-run-fails.bump.out" 2>&1
+RG_MAIN_CI=failure
+run_release_fixture "$RG_PROJECT" success main-run-fails
+RG_MAIN_CI=success
+assert_status "a release completes when its tag CI succeeds and the main-branch run of that commit fails" \
+    "0" "$RG_STATUS"
+assert_log_contains "the tag run is the CI result reported when the main-branch run fails" \
+    "https://example.test/runs/tag-commit" "$RG_ROOT/main-run-fails.out"
+assert_log_contains "the notes are written when only the main-branch run failed" \
+    "release edit" "$RG_ROOT/main-run-fails.gh.log"
 
 # The release commit takes the release files and nothing else. Work already
 # staged outside RELEASE_FILES must not be committed, tagged and pushed under a
@@ -603,6 +685,133 @@ assert_status "--auto --no-push tags the release commit" "$(rg_git -C "$RG_PROJE
     "$(rg_git -C "$RG_PROJECT" rev-parse -q --verify 'refs/tags/v1.0.1^{commit}')"
 assert_status "--auto --no-push pushes nothing" "$RG_PREVIOUS" \
     "$(rg_git --git-dir="$RG_ROOT/auto-no-push/mine.git" rev-parse refs/heads/main)"
+
+# BR-B-6: the notes' base is the previous release in the fork's own history. The
+# fork's checkout carries the upstream's tags, and the newest of them by creation
+# date (v1.6.0) is one the fork never merged; the notes then counted commits and
+# listed "changed files" against a non-ancestor, which put upstream-only files
+# into the fork's release. The foreign tag here sits on a side commit, created
+# later than v1.0.0.
+# BR-B-6：說明的比較基準是 fork 自己歷史裡的上一個 release。fork 的 checkout 帶著上游的標籤，依建立時間最新的
+# 那個（v1.6.0）fork 從沒合併過；說明於是對一個非祖先計算 commit 數、列出「變更檔案」，把只有上游才有的檔案
+# 放進 fork 的 release。這裡的外來標籤放在一個側支 commit 上，建立時間晚於 v1.0.0。
+RG_PROJECT=$(make_release_fixture foreign-tag)
+RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
+RG_FOREIGN_BLOB=$(printf 'upstream only\n' | rg_git -C "$RG_PROJECT" hash-object -w --stdin)
+RG_FOREIGN_TREE=$( { rg_git -C "$RG_PROJECT" ls-tree HEAD; printf '100644 blob %s\tupstream-only.txt\n' "$RG_FOREIGN_BLOB"; } |
+    rg_git -C "$RG_PROJECT" mktree)
+RG_FOREIGN_COMMIT=$(rg_git -C "$RG_PROJECT" commit-tree "$RG_FOREIGN_TREE" -p HEAD -m 'upstream release')
+# Tagged 2100-01-01 in git's epoch spelling (it rejects `2100-01-01T00:00:00 +0000`),
+# so the foreign tag is the newest by creation date whenever this suite runs.
+# 以 git 的 epoch 寫法標成 2100-01-01（它不接受 `2100-01-01T00:00:00 +0000`），所以不論何時跑，外來標籤都是建立時間最新的。
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
+    GIT_COMMITTER_DATE='@4102444800 +0000' \
+    git -C "$RG_PROJECT" tag -a v1.6.0 -m 'upstream release' "$RG_FOREIGN_COMMIT"
+if [ "$(rg_git -C "$RG_PROJECT" tag --sort=-creatordate | head -n 1)" = "v1.6.0" ] &&
+   ! rg_git -C "$RG_PROJECT" merge-base --is-ancestor v1.6.0 HEAD; then
+    pass "the foreign tag is the newest tag and is not in the fork's history"
+else
+    fail "the foreign tag is the newest tag and is not in the fork's history"
+fi
+( cd "$RG_PROJECT" && "$SCRIPT" bump patch ) > "$RG_ROOT/foreign-tag.bump.out" 2>&1
+run_release_fixture "$RG_PROJECT" success foreign-tag
+assert_status "a release with a newer foreign tag in the clone completes" "0" "$RG_STATUS"
+assert_log_contains "the notes count the commits since the previous fork release" \
+    "- Commit 數：2" "$RG_ROOT/foreign-tag.notes"
+assert_log_contains "the notes list the files changed since the previous fork release" \
+    "- hooks/x.js" "$RG_ROOT/foreign-tag.notes"
+assert_log_lacks "the notes never list a file only the foreign tag has" \
+    "- upstream-only.txt" "$RG_ROOT/foreign-tag.notes"
+
+# The order among tags that ARE in the fork's history: the base is the highest
+# x.y.z version. v0.10.0 sits on the later commit, tagged 2099: newer by creation
+# date and first in plain refname order, but a lower version than v1.0.0. An
+# ascending, unsorted or creation-date order picks it and the notes then start
+# one commit too late (no hooks/x.js, one commit).
+# fork 歷史「裡面」的標籤之間的順序：基準是 x.y.z 版本最高的那個。v0.10.0 在較晚的 commit 上、標成 2099：
+# 建立時間較新、在一般 refname 順序裡排第一，版本卻比 v1.0.0 低。遞增、不排序或依建立時間的順序都會選到它，
+# 說明就少算一個 commit（沒有 hooks/x.js、commit 數 1）。
+RG_PROJECT=$(make_release_fixture tag-order)
+RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
+    GIT_COMMITTER_DATE='@4070908800 +0000' \
+    git -C "$RG_PROJECT" tag -a v0.10.0 -m 'an older release line' HEAD
+if [ "$(rg_git -C "$RG_PROJECT" tag --merged HEAD --sort=-creatordate | head -n 1)" = "v0.10.0" ] &&
+   [ "$(rg_git -C "$RG_PROJECT" tag --merged HEAD | head -n 1)" = "v0.10.0" ]; then
+    pass "the lower reachable tag is the newest by creation date and first in refname order"
+else
+    fail "the lower reachable tag is the newest by creation date and first in refname order"
+fi
+( cd "$RG_PROJECT" && "$SCRIPT" bump patch ) > "$RG_ROOT/tag-order.bump.out" 2>&1
+run_release_fixture "$RG_PROJECT" success tag-order
+assert_status "a release with two reachable x.y.z tags completes" "0" "$RG_STATUS"
+assert_log_contains "the notes count from the highest reachable version" \
+    "- Commit 數：2" "$RG_ROOT/tag-order.notes"
+assert_log_contains "the notes list the files changed since the highest reachable version" \
+    "- hooks/x.js" "$RG_ROOT/tag-order.notes"
+
+# BR-B-11: a release that will push needs gh, and it has to say so before it
+# commits or tags. The check sat after both, so without gh the release left a
+# local release commit and an unpushed tag, and its own re-run then refused the
+# version as already tagged. These rows run on a PATH holding git and node but
+# no gh, built from named tools rather than by dropping a directory, since gh
+# can share a directory with git and node.
+# --auto --no-push is documented to commit and tag without gh, so it still must.
+# BR-B-11：會推播的 release 需要 gh，而且必須在提交或打標籤之前說出來。檢查原本在兩者之後，所以沒有 gh 時
+# release 留下本機 release commit 與沒推出去的標籤，自己的重跑又以「已有標籤」拒絕這個版本。這幾列跑在有 git、
+# node 而沒有 gh 的 PATH 上；PATH 用具名工具組成而不是拿掉某個目錄，因為 gh 可能與 git、node 在同一個目錄。
+# --auto --no-push 依文件不需要 gh 就能提交與打標籤，所以仍然必須做得到。
+NOGH_BIN="$RG_ROOT/no-gh-bin"
+mkdir -p "$NOGH_BIN"
+for nogh_tool in bash env git node grep sed awk cat date mktemp rm mv sleep tr wc head dirname basename perl uname; do
+    nogh_path=$(command -v "$nogh_tool" 2>/dev/null) || continue
+    case "$nogh_path" in
+        /*) ln -s "$nogh_path" "$NOGH_BIN/$nogh_tool" ;;
+    esac
+done
+if ( PATH="$NOGH_BIN"; command -v gh ) >/dev/null 2>&1; then
+    fail "the no-gh PATH really holds no gh"
+else
+    pass "the no-gh PATH really holds no gh"
+fi
+run_release_without_gh() { # PROJECT LABEL [args...]: like run_release_fixture, with no gh at all
+    local project="$1"
+    local label="$2"
+    shift 2
+    RG_STATUS=0
+    ( cd "$project" && PATH="$NOGH_BIN" \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+        GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+        GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
+        "$SCRIPT" "$@" ) > "$RG_ROOT/$label.out" 2>&1 < /dev/null || RG_STATUS=$?
+}
+
+RG_PROJECT=$(make_release_fixture no-gh)
+RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
+( cd "$RG_PROJECT" && "$SCRIPT" bump patch ) > "$RG_ROOT/no-gh.bump.out" 2>&1
+run_release_without_gh "$RG_PROJECT" no-gh
+assert_status "the no-argument release without gh stops with status 2" "2" "$RG_STATUS"
+assert_log_contains "the release without gh names the missing gh" "缺少指令：gh" "$RG_ROOT/no-gh.out"
+assert_status "the release without gh makes no release commit" \
+    "$RG_PREVIOUS" "$(rg_git -C "$RG_PROJECT" rev-parse HEAD)"
+if rg_git -C "$RG_PROJECT" rev-parse -q --verify refs/tags/v1.0.1 >/dev/null; then
+    fail "the release without gh creates no local tag"
+else
+    pass "the release without gh creates no local tag"
+fi
+
+RG_PROJECT=$(make_release_fixture no-gh-no-push)
+RG_PREVIOUS=$(rg_git -C "$RG_PROJECT" rev-parse HEAD)
+( cd "$RG_PROJECT" && "$SCRIPT" bump patch ) > "$RG_ROOT/no-gh-no-push.bump.out" 2>&1
+run_release_without_gh "$RG_PROJECT" no-gh-no-push --auto --no-push
+assert_status "--auto --no-push completes without gh" "0" "$RG_STATUS"
+assert_status "--auto --no-push without gh still commits the bump" "chore(release): bump to 1.0.1" \
+    "$(rg_git -C "$RG_PROJECT" log -1 --format=%s)"
+assert_status "--auto --no-push without gh still tags the release commit" \
+    "$(rg_git -C "$RG_PROJECT" rev-parse HEAD)" \
+    "$(rg_git -C "$RG_PROJECT" rev-parse -q --verify 'refs/tags/v1.0.1^{commit}')"
 
 HELP_OUT="$TMP_ROOT/help.out"
 "$SCRIPT" --help > "$HELP_OUT" 2>&1

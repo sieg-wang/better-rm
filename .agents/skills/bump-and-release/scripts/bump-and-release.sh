@@ -365,7 +365,15 @@ run_release() {
   version="$(current_version)"
   local tag="${VERSION_PREFIX}${version}"
   local previous_tag
-  previous_tag="$(git -C "$PROJECT" tag --sort=-creatordate | grep -m 1 "^${VERSION_PREFIX}[0-9]\+\.[0-9]\+\.[0-9]\+$" || true)"
+  # The previous release is the highest x.y.z tag in this commit's own history.
+  # The newest x.y.z tag anywhere in the clone was upstream's v1.6.0, which the
+  # fork never merged, so the notes counted commits and listed "changed files"
+  # against a non-ancestor (BR-B-6). HEAD is still the pre-release commit here,
+  # and the new tag does not exist yet.
+  # 上一個 release 是這個 commit 自己歷史裡最高的 x.y.z 標籤。整個 clone 裡最新的 x.y.z 標籤是 fork 從沒合併的
+  # 上游 v1.6.0，說明於是對一個非祖先計算 commit 數、列出「變更檔案」（BR-B-6）。這裡的 HEAD 仍是 release 前的
+  # commit，新標籤也還不存在。
+  previous_tag="$(git -C "$PROJECT" tag --merged HEAD --sort=-v:refname | grep -m 1 "^${VERSION_PREFIX}[0-9]\+\.[0-9]\+\.[0-9]\+$" || true)"
   local previous_tag_or_head=""
   local changed
   # The tag is named, not left to --follow-tags: --follow-tags skips a tag the
@@ -405,7 +413,16 @@ run_release() {
   # 也問遠端的標籤，而且在提交、打標籤、推播之前：沒有那個標籤的 clone 過得了上面的本機
   # 檢查。只在會推播的路徑上問，dry-run 與建議指令的路徑不連網。ls-remote 找不到時結束碼
   # 是 2；其他失敗一律停下，不猜。
+  # gh is checked here for the same reason: it used to be checked only after the
+  # release commit and the tag existed, so a machine without gh was left with a
+  # local release commit and an unpushed tag, and the re-run then refused the
+  # version as already tagged (BR-B-11). --auto --no-push, the dry run and the
+  # suggestion path still need no gh.
+  # gh 也在這裡檢查，理由相同：它原本要等 release commit 與標籤都建好才檢查，沒有 gh 的機器於是留下本機的
+  # release commit 與沒推出去的標籤，重跑時又以「已有標籤」拒絕這個版本（BR-B-11）。--auto --no-push、dry-run
+  # 與建議指令的路徑仍然不需要 gh。
   if [[ "$AUTO_RELEASE" -eq 1 && "$PUSH" -eq 1 && "$DRY_RUN" -ne 1 ]]; then
+    require_command gh
     local remote_tag_status=0
     git -C "$PROJECT" ls-remote --exit-code --tags "$RELEASE_REMOTE" "refs/tags/${tag}" >/dev/null || remote_tag_status=$?
     if [[ "$remote_tag_status" -eq 0 ]]; then
@@ -465,12 +482,31 @@ run_release() {
     # 用 `^{commit}`：annotated tag 自己的物件 id 不是 commit，對不上任何 CI 執行。
     sha="$(git -C "$PROJECT" rev-parse "${tag}^{commit}")"
     if [[ "$PUSH" -eq 1 ]]; then
-      require_command gh
       echo "開始推播..."
       "${push_cmd[@]}"
       echo "已完成推播。CI 發佈流程會基於標籤建立 GitHub Release。"
 
       echo "等待 ${CI_WORKFLOW_FILE} CI 完成（標籤 ${tag}）。"
+      # The atomic push of main and the tag starts two ci-release.yml runs of the
+      # SAME commit, and only the tag run has the release job. Selecting by
+      # headSha alone let whichever run was newer, or won the createdAt tie,
+      # decide: a failed tag CI beside a passing main run surfaced only as the
+      # release wait's timeout 30 minutes later, and a failed main run beside a
+      # passing tag run stopped a release CI had published (BR-B-5). The wait now
+      # takes the push run whose headBranch is the tag. That relies on GitHub
+      # reporting a tag push's run with the bare tag name as head_branch, as public
+      # tag-push runs show (head_branch=v26.8.1, event=push); it was not measured
+      # on this repository's runs. If it ever differs, nothing matches: each poll
+      # says it found no run for the tag, and the wait times out. A `"` in the
+      # tag is escaped for the jq string; git refuses a backslash in a tag name.
+      # main 與標籤的 atomic push 會對「同一個」commit 啟動兩次 ci-release.yml，只有標籤那次有 release job。只用
+      # headSha 篩選時，由比較新、或 createdAt 平手時排前面的那一次決定：標籤 CI 失敗而 main 通過時，要等 30 分鐘
+      # 後 Release 等待逾時才看得到；main 失敗而標籤通過時，又把 CI 已經發佈的 release 判成失敗（BR-B-5）。現在取
+      # headBranch 為標籤名的那次 push 執行。這依賴 GitHub 以不含 refs/tags/ 的標籤名作為標籤推播執行的
+      # head_branch（公開的標籤推播執行是如此：head_branch=v26.8.1、event=push），沒有在本 repo 的執行上量過；
+      # 若不是如此，就什麼都對不上：每次查詢都會說找不到這個標籤的執行，直到逾時。標籤裡的 `"` 會替 jq
+      # 字串跳脫；git 不接受含反斜線的標籤名。
+      local jq_tag="${tag//\"/\\\"}"
       deadline=$((SECONDS + CI_WAIT_TIMEOUT_SECONDS))
       while [[ $SECONDS -lt $deadline ]]; do
         run_count=$((run_count + 1))
@@ -478,8 +514,8 @@ run_release() {
           --repo "$RELEASE_GH_REPO" \
           --workflow "$CI_WORKFLOW_FILE" \
           --limit 20 \
-          --json status,conclusion,url,headSha,createdAt \
-          --jq 'map(select(.headSha == "'$sha'")) | sort_by(.createdAt) | reverse | if length > 0 then (.[0].status + "\t" + (.[0].conclusion // "") + "\t" + (.[0].url // "")) else "" end' \
+          --json status,conclusion,url,headSha,headBranch,event,createdAt \
+          --jq 'map(select(.headSha == "'"$sha"'" and .headBranch == "'"$jq_tag"'" and .event == "push")) | sort_by(.createdAt) | reverse | if length > 0 then (.[0].status + "\t" + (.[0].conclusion // "") + "\t" + (.[0].url // "")) else "" end' \
           || true)"
 
         ci_run_status=""
@@ -490,7 +526,7 @@ run_release() {
         fi
 
         if [[ -z "$ci_run_status" ]]; then
-          echo "未找到對應的 ci-release workflow 執行紀錄，稍後再查（已檢查 ${run_count} 次）。"
+          echo "未找到標籤 ${tag} 推播觸發的 ci-release workflow 執行紀錄（commit ${sha}），稍後再查（已檢查 ${run_count} 次）。"
         elif [[ "$ci_run_status" == "completed" ]]; then
           if [[ "$ci_conclusion" == "success" ]]; then
             echo "CI 已完成，流程網址：${ci_url}"

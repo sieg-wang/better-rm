@@ -118,7 +118,9 @@ if (agent === 'cursor') {
     }
   }
 } else if (agent === 'antigravity') {
-  const workspace = settings?.hooks?.['better-rm-protection'];
+  // Antigravity's hooks.json maps hook NAMES to their events, so the entry sits
+  // under the top-level hook name (BR-B-1), never under a "hooks" wrapper.
+  const workspace = settings?.['better-rm-protection'];
   for (const entry of workspace?.PreToolUse ?? []) {
     if (entry?.matcher !== 'run_command' || !Array.isArray(entry.hooks)) continue;
     for (const hook of entry.hooks) {
@@ -158,7 +160,7 @@ if (agent === 'cursor') {
   }
 } else {
   const preToolUse = agent === 'antigravity'
-    ? settings?.hooks?.['better-rm-protection']?.PreToolUse
+    ? settings?.['better-rm-protection']?.PreToolUse
     : settings?.hooks?.PreToolUse;
   for (const entry of preToolUse ?? []) {
     for (const hook of entry?.hooks ?? []) if (ours(hook?.command)) entries.push(hook);
@@ -299,6 +301,30 @@ for agent in claude codex cursor copilot antigravity qoder pi grok; do
                 "$(hook_descriptor_field "$AGENT_SETTINGS" "$agent" onFailure)" ;;
     esac
 
+    # BR-B-3: Cursor's own key for the same policy is failClosed, default false. Its
+    # docs (cursor.com/docs/agent/hooks) say a hook that crashes, times out, exits
+    # non-zero other than 2 or prints nothing lets the action through unless the
+    # entry says failClosed: true, so a Cursor entry without it fails open on
+    # exactly the failures BR1-N-3 closed for Claude.
+    # BR-B-3：Cursor 同一個政策的欄位叫 failClosed，預設 false。它的文件說 hook 當掉、逾時、以 2 以外
+    # 的非零碼結束或沒有輸出時，除非該筆寫了 failClosed: true，否則照樣放行，所以少了它的 Cursor 項目
+    # 正好在 BR1-N-3 替 Claude 關掉的那幾種失敗上 fail open。
+    if [ "$agent" = "cursor" ]; then
+        assert_equal "matrix cursor hook blocks the shell command when the hook fails" "true" \
+            "$(hook_descriptor_field "$AGENT_SETTINGS" cursor failClosed)"
+    fi
+
+    # BR-B-1: Antigravity's hooks.json maps hook NAMES to their event
+    # configurations, so every top-level key is read as a hook name. A file whose
+    # only top-level key is "hooks" is one hook named "hooks" with no event at all.
+    # BR-B-1：Antigravity 的 hooks.json 以 hook 名稱對應事件設定，最上層每個鍵都是 hook 名稱；最上層只有
+    # "hooks" 的檔案，是一個名為 "hooks"、沒有任何事件的 hook。
+    if [ "$agent" = "antigravity" ]; then
+        assert_equal "matrix antigravity writes its hook name at the top level, with no hooks wrapper" \
+            '["better-rm-protection"]' \
+            "$(node -e 'process.stdout.write(JSON.stringify(Object.keys(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")))))' "$AGENT_SETTINGS")"
+    fi
+
     # claude 以外的 agent 必須「自己」拒絕 --global（exit 2，訊息指名這個旗標）。這一列原本
     # 在 $TMP_ROOT 跑，那裡不是 repository，所以不管有沒有那個拒絕，resolve_project_root 都會
     # exit 1，這一列兩種情況都通過（審查的 X-codex-global 拿掉 codex 的拒絕：仍綠）。改在該
@@ -340,6 +366,97 @@ assert_equal "re-install upgrades the existing claude entry to onFailure block" 
     "$(hook_descriptor_field "$UPGRADE_SETTINGS" claude onFailure)"
 assert_equal "re-install keeps exactly one claude hook entry" "1" \
     "$(hook_count "$UPGRADE_SETTINGS" claude)"
+
+# BR-B-3: the same in-place upgrade for a Cursor entry written before failClosed.
+# BR-B-3：加上 failClosed 之前寫的 Cursor 項目，重新安裝時同樣原地升級。
+CURSOR_UPGRADE_SETTINGS="$TMP_ROOT/matrix-cursor-project/.cursor/hooks.json"
+node - "$CURSOR_UPGRADE_SETTINGS" <<'NODE'
+const fs = require('fs');
+const file = process.argv[2];
+const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
+for (const hook of settings.hooks.beforeShellExecution) delete hook.failClosed;
+fs.writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
+NODE
+assert_equal "a pre-failClosed cursor entry starts without the key" "(absent)" \
+    "$(hook_descriptor_field "$CURSOR_UPGRADE_SETTINGS" cursor failClosed)"
+(cd "$TMP_ROOT/matrix-cursor-project" && "$INSTALLER" -a cursor >/dev/null)
+assert_equal "re-install upgrades the existing cursor entry to failClosed true" "true" \
+    "$(hook_descriptor_field "$CURSOR_UPGRADE_SETTINGS" cursor failClosed)"
+assert_equal "re-install keeps exactly one cursor hook entry" "1" \
+    "$(hook_count "$CURSOR_UPGRADE_SETTINGS" cursor)"
+
+# BR-B-1: files written by the old installer carry the entry one level down, under
+# a top-level "hooks" object. A re-install moves better-rm's own entries out of
+# that wrapper. "hooks" is also a name a user's own Antigravity hook may have, so
+# everything else under it stays exactly where it was.
+# BR-B-1：舊版安裝程式寫的檔案把項目放在最上層 "hooks" 物件底下一層。重新安裝時把 better-rm 自己的
+# 項目移出那層包裝；"hooks" 也可能是使用者自己的 Antigravity hook 名稱，所以其他東西原地不動。
+antigravity_json() { # file js-expression -> JSON of the expression, with `s` the parsed file
+    node -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(JSON.stringify(eval(process.argv[2])) ?? "undefined")' "$1" "$2"
+}
+AG_LEGACY_REPO="$TMP_ROOT/antigravity-legacy-project"
+make_repo "$AG_LEGACY_REPO"
+mkdir -p "$AG_LEGACY_REPO/.agents"
+AG_LEGACY_SETTINGS="$AG_LEGACY_REPO/.agents/hooks.json"
+cat > "$AG_LEGACY_SETTINGS" <<'JSON'
+{
+  "hooks": {
+    "better-rm-protection": {
+      "PreToolUse": [
+        {
+          "matcher": "run_command",
+          "hooks": [
+            {"type": "command", "command": "node '/old/project/.agents/protect-important-paths.js'", "timeout": 5}
+          ]
+        }
+      ]
+    }
+  }
+}
+JSON
+(cd "$AG_LEGACY_REPO" && "$INSTALLER" -a antigravity >/dev/null)
+assert_equal "an old nested antigravity install is migrated to the top-level hook name" \
+    '["better-rm-protection"]' "$(antigravity_json "$AG_LEGACY_SETTINGS" 'Object.keys(s)')"
+assert_equal "the migrated antigravity file registers exactly one better-rm hook" "1" \
+    "$(hook_count "$AG_LEGACY_SETTINGS" antigravity)"
+AG_LEGACY_HASH=$(file_hash "$AG_LEGACY_SETTINGS")
+(cd "$AG_LEGACY_REPO" && "$INSTALLER" -a antigravity >/dev/null)
+assert_equal "a migrated antigravity file is left alone by the next run" \
+    "$AG_LEGACY_HASH" "$(file_hash "$AG_LEGACY_SETTINGS")"
+
+AG_MIXED_REPO="$TMP_ROOT/antigravity-mixed-project"
+make_repo "$AG_MIXED_REPO"
+mkdir -p "$AG_MIXED_REPO/.agents"
+AG_MIXED_SETTINGS="$AG_MIXED_REPO/.agents/hooks.json"
+# The repo's own template beside the old nested entry (the README-shaped file an
+# old re-install left with two entries), plus a user's own hook named "hooks".
+# 本 repo 的範本與舊版的巢狀項目並存（舊版重新安裝後留下兩筆的那種檔案），再加上使用者自己名為
+# "hooks" 的 hook。
+node - "$SCRIPT_DIR/.agents/hooks.json" "$AG_MIXED_SETTINGS" <<'NODE'
+const fs = require('fs');
+const settings = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+settings.hooks = {
+  PreToolUse: [{ matcher: 'run_command', hooks: [{ type: 'command', command: 'echo user-hook' }] }],
+  'better-rm-protection': {
+    PreToolUse: [{
+      matcher: 'run_command',
+      hooks: [{ type: 'command', command: "node '/old/project/.agents/protect-important-paths.js'", timeout: 5 }],
+    }],
+  },
+};
+fs.writeFileSync(process.argv[3], `${JSON.stringify(settings, null, 2)}\n`);
+NODE
+(cd "$AG_MIXED_REPO" && "$INSTALLER" -a antigravity >/dev/null)
+assert_equal "antigravity keeps one better-rm hook when the template and an old entry are both present" "1" \
+    "$(hook_count "$AG_MIXED_SETTINGS" antigravity)"
+assert_equal "the better-rm hook replaces the template's command with the installed runtime" \
+    "\"node '$(cd "$AG_MIXED_REPO" && pwd -P)/.agents/protect-important-paths.js'\"" \
+    "$(antigravity_json "$AG_MIXED_SETTINGS" 's["better-rm-protection"].PreToolUse[0].hooks[0].command')"
+assert_equal "a user's own hook named hooks keeps its events" \
+    '[{"matcher":"run_command","hooks":[{"type":"command","command":"echo user-hook"}]}]' \
+    "$(antigravity_json "$AG_MIXED_SETTINGS" 's.hooks.PreToolUse')"
+assert_equal "only better-rm's old entry leaves the hooks object" \
+    '["PreToolUse"]' "$(antigravity_json "$AG_MIXED_SETTINGS" 'Object.keys(s.hooks)')"
 
 # OpenCode has dedicated runtime + plugin install path checks.
 OPENCODE_PROJECT="$TMP_ROOT/opencode-project"
@@ -2062,11 +2179,52 @@ if [ "$OPENCODE_PERMISSIVE_STATUS" -ne 0 ]; then
 else
     fail "opencode rejects a valid non-empty runtime hook that allows everything"
 fi
-if [ -f "$OPENCODE_PERMISSIVE_RUNTIME" ] && hook_is_permissive "$OPENCODE_PERMISSIVE_RUNTIME"; then
-    fail "opencode never leaves an allow-everything runtime hook behind"
+# BR-B-8: judged under the FULL PreToolUse contract, because README's manual
+# configs run this same file as a command. On macOS `> /dev/fd/9` neither
+# truncates nor rewinds the held stage, so the published "replacement" used to be
+# the rejected candidate with the stub appended: a mid-file `#!` line, a
+# SyntaxError, exit 1 -- which hook_is_permissive (exit 0 only) called safe and
+# PreToolUse treats as allow. Linux reopens /dev/fd/9 through /proc with O_TRUNC
+# (not run here), which is why the ubuntu leg published the bare stub.
+# BR-B-8：以完整的 PreToolUse 契約判定，因為 README 的手動設定把同一個檔案當命令執行。macOS 上
+# `> /dev/fd/9` 不截斷也不倒帶，發布的「替代品」原本是被拒的候選檔後面接上 stub：檔案中間的 `#!`
+# 是 SyntaxError，exit 1——hook_is_permissive（只認 exit 0）說它安全，PreToolUse 卻當成放行。
+if [ -f "$OPENCODE_PERMISSIVE_RUNTIME" ] && hook_allows_protected_deletion "$OPENCODE_PERMISSIVE_RUNTIME"; then
+    fail "opencode never leaves an allow-everything runtime hook behind, run as a command"
 else
-    pass "opencode never leaves an allow-everything runtime hook behind"
+    pass "opencode never leaves an allow-everything runtime hook behind, run as a command"
 fi
+if [ -f "$OPENCODE_PERMISSIVE_RUNTIME" ] && grep -Fq 'process.exit(0); });' "$OPENCODE_PERMISSIVE_RUNTIME"; then
+    fail "the published fail-closed replacement holds none of the rejected candidate"
+else
+    pass "the published fail-closed replacement holds none of the rejected candidate"
+fi
+
+# BR-B-8, the reachable trigger the verifier measured: TMPDIR naming a directory
+# that does not exist. The candidate probe copies the held bytes into a private
+# directory under os.tmpdir() (source mode) while the positive control ran the
+# source by path, so a byte-perfect runtime failed its probe, the control passed,
+# and a healthy install was turned into the stub. The control now goes through
+# the same staging; when that cannot run either, the byte comparison decides.
+# BR-B-8，驗證者實測到的觸發條件：TMPDIR 指向不存在的目錄。候選檔探測會把位元組複製到 os.tmpdir() 底下
+# 的私有目錄（source 模式），正對照卻以路徑執行來源，於是位元組完全相同的 runtime 探測失敗、正對照通過，
+# 健康的安裝被換成 stub。正對照現在走同一條 staging；連它也跑不起來時，由位元組比對決定。
+OPENCODE_NO_TMPDIR_PROJECT="$TMP_ROOT/opencode-missing-tmpdir-project"
+make_repo "$OPENCODE_NO_TMPDIR_PROJECT"
+OPENCODE_NO_TMPDIR_RUNTIME="$OPENCODE_NO_TMPDIR_PROJECT/hooks/protect-important-paths.js"
+OPENCODE_NO_TMPDIR_STATUS=0
+OPENCODE_NO_TMPDIR_OUTPUT=$(
+    cd "$OPENCODE_NO_TMPDIR_PROJECT" &&
+    TMPDIR="$TMP_ROOT/no-such-tmpdir" HOME="$TMP_ROOT/opencode-missing-tmpdir-home" \
+        CLAUDE_CONFIG_DIR='' "$INSTALLER" -a opencode 2>&1
+) || OPENCODE_NO_TMPDIR_STATUS=$?
+assert_equal "opencode installs a byte-perfect runtime when TMPDIR names a missing directory" \
+    "0" "$OPENCODE_NO_TMPDIR_STATUS"
+assert_equal "a missing TMPDIR still publishes the genuine runtime, not the stub" \
+    "$(file_hash "$SCRIPT_DIR/hooks/protect-important-paths.js")" \
+    "$([ -f "$OPENCODE_NO_TMPDIR_RUNTIME" ] && file_hash "$OPENCODE_NO_TMPDIR_RUNTIME" || echo missing)"
+assert_contains "a missing TMPDIR is reported as a self-check that could not run" \
+    "$OPENCODE_NO_TMPDIR_OUTPUT" "Could not run the hook self-check"
 
 # 第一次安裝（目的地不存在）走的是純 cp，完全沒有信任探測；hook_is_trustworthy
 # 只服務 refresh 路徑。cp 回報成功不代表寫進去的是完整內容：磁碟滿或檔案系統錯誤
@@ -2461,6 +2619,60 @@ assert_success "claude accepts an ancestor symlink that stays inside the root" \
     bash -c "cd '$JSON_INSIDE_LINK_REPO' && '$INSTALLER' -a claude"
 assert_file "claude installs through an inside-the-root ancestor symlink" \
     "$JSON_INSIDE_LINK_REPO/real-claude/settings.json"
+
+# BR-B-4: the FINAL component of the shared hook path, as a dangling symbolic link.
+# physical_path resolves a path that does not exist by walking up to its parent,
+# so `<agent dir>/protect-important-paths.js -> <outside>/planted.js` passed the
+# containment check above, and the first-install `cp` then followed the link and
+# created the guard at the outside target, exit 0. Every JSON agent shares that
+# branch, so every one gets a row; the relative spelling gets one too.
+# BR-B-4：共用 hook 路徑的「最後一層」是懸空的符號連結。physical_path 遇到不存在的路徑會往上走到父目錄，
+# 所以上面的範圍檢查放行，第一次安裝的 `cp` 接著跟著連結在專案外建立 guard，exit 0。八個 JSON agent
+# 共用這段，所以每個都有一列；相對路徑的寫法也有一列。
+for dangling_agent in claude codex cursor copilot antigravity qoder pi grok; do
+    DANGLING_REPO="$TMP_ROOT/dangling-hook-$dangling_agent-project"
+    make_repo "$DANGLING_REPO"
+    DANGLING_SETTINGS="$DANGLING_REPO/$(expected_settings_path "$dangling_agent")"
+    DANGLING_OUTSIDE="$TMP_ROOT/dangling-hook-$dangling_agent-outside"
+    mkdir -p "$DANGLING_OUTSIDE" "$(dirname "$DANGLING_SETTINGS")"
+    ln -s "$DANGLING_OUTSIDE/planted.js" "$(dirname "$DANGLING_SETTINGS")/protect-important-paths.js"
+    assert_failure "$dangling_agent refuses a dangling symbolic link at the shared hook path" \
+        bash -c "cd '$DANGLING_REPO' && '$INSTALLER' -a $dangling_agent"
+    assert_equal "$dangling_agent writes nothing through a dangling hook link" "0" \
+        "$(find "$DANGLING_OUTSIDE" -mindepth 1 | wc -l | tr -d ' ')"
+    if [ ! -e "$DANGLING_SETTINGS" ]; then
+        pass "$dangling_agent registers no hook when the hook path is a dangling link"
+    else
+        fail "$dangling_agent registers no hook when the hook path is a dangling link"
+    fi
+done
+DANGLING_RELATIVE_REPO="$TMP_ROOT/dangling-hook-relative-project"
+make_repo "$DANGLING_RELATIVE_REPO"
+mkdir -p "$DANGLING_RELATIVE_REPO/.claude" "$TMP_ROOT/dangling-hook-relative-outside"
+ln -s ../../dangling-hook-relative-outside/planted.js \
+    "$DANGLING_RELATIVE_REPO/.claude/protect-important-paths.js"
+assert_failure "claude refuses a relative dangling symbolic link at the shared hook path" \
+    bash -c "cd '$DANGLING_RELATIVE_REPO' && '$INSTALLER' -a claude"
+assert_equal "claude writes nothing through a relative dangling hook link" "0" \
+    "$(find "$TMP_ROOT/dangling-hook-relative-outside" -mindepth 1 | wc -l | tr -d ' ')"
+
+# Anti-tautology, and the boundary the fix must keep: a link to a byte-identical
+# hook was accepted as up to date, and still is. Only the first-install copy,
+# which would write THROUGH the link, refuses one.
+# 反套套邏輯，也是修法必須守住的邊界：指向位元組相同 hook 的連結原本被當成「已是最新」，現在仍是。
+# 只有會「穿過」連結寫入的第一次安裝複製才拒絕連結。
+LINKED_IDENTICAL_REPO="$TMP_ROOT/linked-identical-hook-project"
+make_repo "$LINKED_IDENTICAL_REPO"
+mkdir -p "$LINKED_IDENTICAL_REPO/.claude" "$LINKED_IDENTICAL_REPO/tools"
+cp "$SCRIPT_DIR/hooks/protect-important-paths.js" "$LINKED_IDENTICAL_REPO/tools/protect-important-paths.js"
+ln -s ../tools/protect-important-paths.js "$LINKED_IDENTICAL_REPO/.claude/protect-important-paths.js"
+assert_success "claude accepts a symbolic link to a byte-identical hook" \
+    bash -c "cd '$LINKED_IDENTICAL_REPO' && '$INSTALLER' -a claude"
+if [ -L "$LINKED_IDENTICAL_REPO/.claude/protect-important-paths.js" ]; then
+    pass "the link to a byte-identical hook is left as it was"
+else
+    fail "the link to a byte-identical hook is left as it was"
+fi
 
 # The physical project root can itself be renamed after resolve_opencode_plugin
 # records it. Inject on the second dirname of the plugin destination: the first
@@ -2929,15 +3141,155 @@ fi
 # `-a pi` 寫的是 .pi/hooks.json，只有像 pi-hooks 這種支援 hooks 的擴充套件會讀（README Pi 章節
 # 方式 B）。只印「已建立 Pi hook 設定」會讓沒有擴充套件的使用者以為守衛已啟用。輸出必須寫出這個
 # 條件與 README 推薦的原生 hook（方式 A），每次執行都要。
+# BR-B-2: the fallback it names has to be one stock pi loads. Stock pi
+# (@earendil-works/pi-coding-agent) reads project extensions from .pi/extensions/,
+# and only after the user grants the project trust; .omp/hooks/pre/ is the
+# oh-my-pi layout, which stock pi does not read, so naming it alone sent the stock
+# pi user this warning addresses to a file that does not run.
+# BR-B-2：它指出的替代方案必須是原生 pi 會載入的。原生 pi 從 .pi/extensions/ 讀專案擴充套件，而且要使用者
+# 先信任這個專案；.omp/hooks/pre/ 是 oh-my-pi 的版面，原生 pi 不讀它，只寫它等於把這則警告的讀者送去一個
+# 不會執行的檔案。
 PI_PROJECT="$TMP_ROOT/pi-caveat-project"
 make_repo "$PI_PROJECT"
 for pi_run in first repeat; do
     PI_OUTPUT=$(cd "$PI_PROJECT" && "$INSTALLER" -a pi 2>&1)
     assert_contains "-a pi ($pi_run run) says .pi/hooks.json needs a hooks extension such as pi-hooks" \
         "$PI_OUTPUT" "pi-hooks"
-    assert_contains "-a pi ($pi_run run) points to the native hook" \
-        "$PI_OUTPUT" ".omp/hooks/pre/protect-important-paths.ts"
+    assert_contains "-a pi ($pi_run run) points stock pi to a project extension in .pi/extensions/" \
+        "$PI_OUTPUT" "stock pi loads a project extension from \.pi/extensions/"
+    assert_contains "-a pi ($pi_run run) says the extension loads only once the project is trusted" \
+        "$PI_OUTPUT" "project trust"
+    assert_contains "-a pi ($pi_run run) labels .omp/hooks/pre/ as the oh-my-pi layout" \
+        "$PI_OUTPUT" "\.omp/hooks/pre/protect-important-paths\.ts is the oh-my-pi layout"
 done
+
+# BR-B-10: Codex runs a project hook only after the project's .codex/ layer is
+# trusted and the exact hook definition is reviewed and trusted in /hooks, and it
+# marks a new or changed definition for review (developers.openai.com/codex/hooks).
+# "Created Codex hook settings" alone said the guard was on. Every rewrite of the
+# entry -- a moved project changes its absolute path -- is such a change.
+# BR-B-10：Codex 只在專案的 .codex/ 層受信任、且這個 hook 定義在 /hooks 被審閱並信任後才執行它，新的或改過
+# 的定義會被標成待審閱。只印「已建立 Codex hook 設定」等於說守衛已啟用。每次改寫這一筆（專案搬移會改變
+# 絕對路徑）都是那種改動。
+CODEX_TRUST_PROJECT="$TMP_ROOT/codex-trust-project"
+make_repo "$CODEX_TRUST_PROJECT"
+CODEX_TRUST_OUTPUT=$(cd "$CODEX_TRUST_PROJECT" && "$INSTALLER" -a codex 2>&1)
+assert_contains "-a codex says Codex skips the hook until it is trusted in /hooks" \
+    "$CODEX_TRUST_OUTPUT" "trust this hook definition in /hooks"
+assert_contains "-a codex says the definition it just wrote needs review" \
+    "$CODEX_TRUST_OUTPUT" "Codex marks it for review"
+CODEX_TRUST_OUTPUT=$(cd "$CODEX_TRUST_PROJECT" && "$INSTALLER" -a codex 2>&1)
+assert_contains "an unchanged -a codex run still names /hooks" \
+    "$CODEX_TRUST_OUTPUT" "trust this hook definition in /hooks"
+assert_not_contains "an unchanged -a codex run does not claim the definition changed" \
+    "$CODEX_TRUST_OUTPUT" "Codex marks it for review"
+mv "$CODEX_TRUST_PROJECT" "$CODEX_TRUST_PROJECT-moved"
+CODEX_TRUST_OUTPUT=$(cd "$CODEX_TRUST_PROJECT-moved" && "$INSTALLER" -a codex 2>&1)
+assert_contains "a re-install that rewrites the moved codex entry says it needs review again" \
+    "$CODEX_TRUST_OUTPUT" "Codex marks it for review"
+
+# ---------------------------------------------------------------------------
+# The repository's own agent templates
+# ---------------------------------------------------------------------------
+# README presents each manual JSON snippet as the setup for a project that commits
+# the hook files, which is what these templates are, and no test read them: the
+# Claude template went without onFailure while README's snippet carried it
+# (BR-B-7). Each template must equal its README snippet, and the two that carry a
+# fail-closed key must carry it. Codex's section described its config only as
+# "the Claude structure without onFailure", which stopped being true when the
+# Claude command moved to ${CLAUDE_PROJECT_DIR}: only Claude Code sets that
+# variable, so in Codex the path became /hooks/protect-important-paths.js and
+# the guard never loaded. Its section now carries .codex/hooks.json verbatim and
+# is pinned like the others.
+# README 把每段手動 JSON 範例說成「hook 檔案已提交在專案裡」時的設定，也就是這些範本，而沒有任何測試讀過
+# 它們：Claude 範本少了 onFailure，README 的範例卻有（BR-B-7）。每個範本都必須等於它的 README 範例，帶有
+# fail-closed 欄位的那兩個必須帶著它。Codex 那一節原本只說「結構與 Claude Code 相同、但不含 onFailure」，
+# Claude 的命令改用 ${CLAUDE_PROJECT_DIR} 之後就不對了：只有 Claude Code 會設定這個變數，在 Codex 裡路徑變成
+# /hooks/protect-important-paths.js，guard 載入不了。那一節現在原樣附上 .codex/hooks.json，和其他範本一樣被釘住。
+TEMPLATE_README_OUTPUT=$(node - "$SCRIPT_DIR" <<'NODE'
+const fs = require('fs');
+const root = process.argv[2];
+const readme = fs.readFileSync(`${root}/README.md`, 'utf8').split('\n');
+const fence = '`'.repeat(3);
+const pairs = [
+  ['#### 1. Claude Code', '.claude/settings.json'],
+  ['#### 2. Codex', '.codex/hooks.json'],
+  ['#### 3. GitHub Copilot CLI / Cloud Agent', '.github/hooks/better-rm.json'],
+  ['#### 4. Antigravity CLI / Antigravity 2.0', '.agents/hooks.json'],
+  ['#### 5. Qoder', '.qoder/settings.json'],
+  ['* **方式 B：JSON 設定檔', '.pi/hooks.json'],
+  ['#### 7. Cursor', '.cursor/hooks.json'],
+  ['#### 9. Grok Build', '.grok/hooks/better-rm.json'],
+];
+for (const [heading, file] of pairs) {
+  let verdict = 'same';
+  const start = readme.findIndex((line) => line.startsWith(heading));
+  let i = start + 1;
+  while (start >= 0 && i < readme.length && readme[i].trim() !== `${fence}json` && !readme[i].startsWith('#### ')) i += 1;
+  if (start < 0 || i >= readme.length || readme[i].trim() !== `${fence}json`) {
+    verdict = 'no README snippet';
+  } else {
+    const indent = readme[i].match(/^\s*/)[0].length;
+    const body = [];
+    for (i += 1; i < readme.length && readme[i].trim() !== fence; i += 1) body.push(readme[i].slice(indent));
+    try {
+      const snippet = JSON.parse(body.join('\n'));
+      const template = JSON.parse(fs.readFileSync(`${root}/${file}`, 'utf8'));
+      if (JSON.stringify(snippet) !== JSON.stringify(template)) verdict = 'different';
+    } catch (error) {
+      verdict = `unreadable (${error.message})`;
+    }
+  }
+  console.log(`${file}: ${verdict}`);
+}
+NODE
+)
+for template_file in .claude/settings.json .codex/hooks.json .github/hooks/better-rm.json .agents/hooks.json \
+        .qoder/settings.json .pi/hooks.json .cursor/hooks.json .grok/hooks/better-rm.json; do
+    assert_equal "the $template_file template equals its README snippet" \
+        "$template_file: same" "$(printf '%s\n' "$TEMPLATE_README_OUTPUT" | grep -F "$template_file:")"
+done
+assert_equal "the .claude/settings.json template blocks the call when the hook fails" "block" \
+    "$(hook_descriptor_field "$SCRIPT_DIR/.claude/settings.json" claude onFailure)"
+assert_equal "the .cursor/hooks.json template blocks the command when the hook fails" "true" \
+    "$(hook_descriptor_field "$SCRIPT_DIR/.cursor/hooks.json" cursor failClosed)"
+
+# BR-B-9: Claude Code runs a hook command in the session's CURRENT directory, and
+# the template found the guard with $(git rev-parse --show-toplevel) from there.
+# From a nested repository that is the inner repository, which has no hooks/;
+# outside every repository git fails and the path becomes /hooks/... Either way
+# node exited 1 ("Cannot find module"), a non-blocking error, so the Bash call ran
+# unguarded. ${CLAUDE_PROJECT_DIR} is the project root wherever the session
+# moved. The template command is run exactly as stored, from all three places.
+# BR-B-9：Claude Code 在 session 的「目前目錄」執行 hook 命令，範本又從那裡用 $(git rev-parse
+# --show-toplevel) 找 guard。在巢狀 repository 裡得到的是內層 repository（沒有 hooks/）；在任何
+# repository 之外 git 失敗，路徑變成 /hooks/...。兩者都讓 node 以 1 結束（Cannot find module），屬於
+# 非阻擋錯誤，Bash 呼叫照樣執行。${CLAUDE_PROJECT_DIR} 不管 session 移到哪裡都是專案根目錄。
+TEMPLATE_COMMAND=$(node -e 'process.stdout.write(require(process.argv[1]).hooks.PreToolUse[0].hooks[0].command)' \
+    "$SCRIPT_DIR/.claude/settings.json")
+TEMPLATE_PROJECT="$TMP_ROOT/template-project"
+make_repo "$TEMPLATE_PROJECT"
+mkdir -p "$TEMPLATE_PROJECT/hooks"
+cp "$SCRIPT_DIR/hooks/protect-important-paths.js" "$TEMPLATE_PROJECT/hooks/protect-important-paths.js"
+make_repo "$TEMPLATE_PROJECT/vendor/inner"
+mkdir -p "$TMP_ROOT/template-outside"
+template_command_verdict() { # cwd -> "deny" or "allow (exit N)"
+    local out status=0
+    out=$(cd "$1" && printf '%s' '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /etc"},"cwd":"/"}' |
+        GIT_CEILING_DIRECTORIES="$(cd "$TMP_ROOT" && pwd -P)" CLAUDE_PROJECT_DIR="$TEMPLATE_PROJECT" \
+        bash -c "$TEMPLATE_COMMAND" 2>/dev/null) || status=$?
+    if [ "$status" -eq 2 ] || { [ "$status" -eq 0 ] && printf '%s' "$out" | grep -q '"permissionDecision":"deny"'; }; then
+        printf 'deny\n'
+    else
+        printf 'allow (exit %s)\n' "$status"
+    fi
+}
+assert_equal "the claude template denies from the project root" "deny" \
+    "$(template_command_verdict "$TEMPLATE_PROJECT")"
+assert_equal "the claude template denies from a nested repository" "deny" \
+    "$(template_command_verdict "$TEMPLATE_PROJECT/vendor/inner")"
+assert_equal "the claude template denies from a directory outside every repository" "deny" \
+    "$(template_command_verdict "$TMP_ROOT/template-outside")"
 
 echo ""
 echo "========================================"

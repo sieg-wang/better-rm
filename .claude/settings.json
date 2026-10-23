@@ -6,9 +6,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\"",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/hooks/protect-important-paths.js\"",
             "timeout": 5,
-            "statusMessage": "Checking protected directories..."
+            "statusMessage": "Checking protected directories...",
+            "onFailure": "block"
           }
         ]
       }

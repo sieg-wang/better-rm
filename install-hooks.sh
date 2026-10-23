@@ -284,6 +284,23 @@ resolve_shared_hook_for_settings() {
     PENDING_HOOK_REFRESH=false
 
     if [ ! -f "$HOOK_PATH" ] || [ ! -r "$HOOK_PATH" ]; then
+        # 走到這裡而路徑是符號連結，代表連結懸空，或不指向可讀的一般檔案。cp 會跟著連結寫到它的目標，而
+        # require_json_settings_within_root 解析不存在的路徑時是往上走到父目錄，看不到連結指向哪裡：懸空的
+        # 連結因此通過範圍檢查，guard 被寫到專案外並以 exit 0 收場（BR-B-4）。指向位元組相同 hook 的連結走
+        # 不到這裡（帶我們進來的 -f／-r 測試會跟著它成立），所以照舊被當成已是最新。
+        # A symbolic link here dangles or does not lead to a readable regular file.
+        # cp would follow it and write at its target, and
+        # require_json_settings_within_root resolves a path that does not exist by
+        # walking up to its parent, so it never saw where the link leads: a dangling
+        # link passed the containment check and the guard was written outside the
+        # project, exit 0 (BR-B-4). A link to a byte-identical hook never reaches
+        # this branch (the -f and -r tests that lead here follow it), so it is
+        # still accepted as up to date.
+        if [ -L "$HOOK_PATH" ]; then
+            error "拒絕透過符號連結寫入共用 hook（連結懸空，或不指向可讀的一般檔案）：$HOOK_PATH"
+            error "Refusing to write the shared hook through a symbolic link that dangles or does not lead to a readable regular file: $HOOK_PATH"
+            exit 1
+        fi
         mkdir -p -- "$(dirname -- "$HOOK_PATH")"
         cp "$HOOK_SOURCE_PATH" "$HOOK_PATH"
         # 第一次安裝同樣要驗。cp 回報成功不代表寫進去的是完整內容：磁碟滿或檔案
@@ -479,6 +496,11 @@ hook_denies_protected_deletion() {
 '
     if [ "$candidate_mode" = source ]; then
         BETTER_RM_HOOK_SOURCE_MODE=source node -e "$probe_script" "$1" 3<&6 2>/dev/null
+    elif [ "$candidate_mode" = source-file ]; then
+        # Source mode's staging, with fd 3 read from the file itself: the
+        # positive control for a source-mode candidate (see hook_is_trustworthy).
+        # source 模式的 staging，fd 3 直接讀這個檔案：source 模式候選檔的正對照（見 hook_is_trustworthy）。
+        BETTER_RM_HOOK_SOURCE_MODE=source node -e "$probe_script" "$1" 2>/dev/null 3< "$1"
     else
         BETTER_RM_HOOK_SOURCE_MODE=path node -e "$probe_script" "$1" 2>/dev/null
     fi
@@ -565,13 +587,27 @@ require_verified_downloaded_hook() {
 # the source hook is itself bad, the control fails too and that is indistinguishable
 # from a broken probe, so it is accepted — validating the source is test-hooks.js's
 # job, not the installer's.
+#
+# The control runs through the same staging as the candidate. A source-mode
+# candidate is copied into a private directory under os.tmpdir() before it runs
+# and the control used to run the source by path, so with TMPDIR naming a missing
+# directory a byte-perfect candidate failed its probe, the control passed, and a
+# healthy OpenCode install was replaced by the fail-closed stub (BR-B-8). Now that
+# shape fails the control as well, and the byte comparison decides.
+# 正對照走與候選檔相同的 staging。source 模式的候選檔會先被複製到 os.tmpdir() 底下的私有目錄再執行，正對照
+# 以前卻直接以路徑執行來源，所以 TMPDIR 指向不存在的目錄時，位元組完全相同的候選檔探測失敗、正對照通過，健康
+# 的 OpenCode 安裝被換成 fail-closed stub（BR-B-8）。現在那種情況正對照也會失敗，改由位元組比對決定。
 hook_is_trustworthy() {
     local candidate="$1"
     local candidate_mode="${2:-path}"
+    local control_mode=path
     if hook_denies_protected_deletion "$candidate" "$candidate_mode"; then
         return 0
     fi
-    if hook_denies_protected_deletion "$HOOK_SOURCE_PATH"; then
+    if [ "$candidate_mode" = source ]; then
+        control_mode="source-file"
+    fi
+    if hook_denies_protected_deletion "$HOOK_SOURCE_PATH" "$control_mode"; then
         # 探測工具正常，所以是候選檔案真的不擋。
         # The probe works, so the candidate genuinely fails to deny.
         return 1
@@ -1255,7 +1291,11 @@ require_verified_opencode_runtime() {
     # The message branches on whether the stub was actually written: if it was not,
     # what remains on disk is unverified and may allow everything, and claiming "it
     # now fails closed" there would be a lie.
-    if write_fail_closed_hook_stub "${OPENCODE_RUNTIME_WRITE_PATH:-$OPENCODE_RUNTIME_PATH}"; then
+    # The stub goes into a fresh stage, never after the rejected candidate's bytes
+    # (open_fail_closed_opencode_stage says why).
+    # stub 寫進新的 stage，絕不接在被拒候選檔的位元組後面（原因見 open_fail_closed_opencode_stage）。
+    if open_fail_closed_opencode_stage &&
+       write_fail_closed_hook_stub "${OPENCODE_RUNTIME_WRITE_PATH:-$OPENCODE_RUNTIME_PATH}"; then
         OPENCODE_RUNTIME_FAIL_CLOSED_WRITTEN=true
         error "OpenCode 共用 hook 無法通過驗證；fail-closed replacement 已在錨定暫存檔備妥，尚待發布：$report_path"
         error "The OpenCode runtime hook could not be verified; a fail-closed replacement is staged but not yet published: $report_path"
@@ -1415,9 +1455,22 @@ const nodeCommand = `node ${shellQuote(hookPath)}`;
 const nodePowershellCommand = `node ${powershellQuote(hookPath)}`;
 const statusMessage = 'Checking protected directories...';
 
+// Cursor's hook entry has a failClosed field whose default, false, lets the shell
+// command run when the hook crashes, times out, exits non-zero other than 2 or
+// prints nothing (cursor.com/docs/agent/hooks): a moved project ("Cannot find
+// module") or a node missing from Cursor's PATH allowed every command (BR-B-3).
+// Same policy as the Claude entry's onFailure below. The guard answers each
+// Cursor call it judges with a JSON permission (measured: allow and deny both
+// exit 0 with one), so true blocks only those failures. An existing entry without
+// the key differs from this shape, so a re-install replaces it in place.
+// Cursor 的 hook 項目有 failClosed 欄位，預設 false：hook 當掉、逾時、以 2 以外的非零碼結束或沒有輸出時，shell
+// 命令照樣執行，所以專案搬移後（Cannot find module）或 Cursor 的 PATH 上沒有 node 時每個命令都放行（BR-B-3）。
+// 與下面 Claude 項目的 onFailure 同一個政策。guard 對每個它判定的 Cursor 呼叫都回一個 JSON permission（實測放行與
+// 拒絕都以 0 結束並印出），所以 true 只擋那幾種失敗。既有、沒有這個欄位的項目與這個形狀不同，重新安裝時原地取代。
 const cursorDesiredHook = {
   command: nodeCommand,
-  matcher: '.*'
+  matcher: '.*',
+  failClosed: true
 };
 
 // The descriptor codex and pi get, and the shape every target got before BR1-N-3.
@@ -1617,34 +1670,67 @@ if (hookTarget === 'cursor') {
     changed = true;
   }
 } else if (hookTarget === 'antigravity') {
+  // Antigravity's hooks.json maps hook NAMES to their event configurations
+  // (antigravity.google/docs/hooks), so every top-level key is read as a hook
+  // name: the shape of README section 4 and of this repo's .agents/hooks.json.
+  // This merge used to put the entry one level deeper, under a top-level "hooks"
+  // object -- to Antigravity one hook named "hooks" whose only key,
+  // "better-rm-protection", is not an event -- so no handler existed while the
+  // install reported success (BR-B-1). The entry now sits under the top-level
+  // hook name. better-rm's own entries in that old wrapper are moved out of it
+  // below; "hooks" is a name a user's own hook can have, so nothing else in it
+  // is touched, and a level is removed only when better-rm's entries were all
+  // it held.
+  // Antigravity 的 hooks.json 以 hook「名稱」對應事件設定，最上層每個鍵都是 hook 名稱：README 第 4 節與本 repo
+  // .agents/hooks.json 的形狀。這裡以前把項目寫在最上層 "hooks" 物件底下一層——對 Antigravity 而言是一個名叫
+  // "hooks"、唯一的鍵 "better-rm-protection" 又不是事件的 hook——所以根本沒有 handler，安裝卻回報成功（BR-B-1）。
+  // 項目現在放在最上層的 hook 名稱底下。舊包裝裡 better-rm 自己的項目在下面移出；"hooks" 也可能是使用者自己的
+  // hook 名稱，所以裡面其他東西一律不動，某一層只在 better-rm 的項目是它全部內容時才移除。
   const workspace = 'better-rm-protection';
-  if (settings.hooks === undefined) {
-    settings.hooks = {};
+  if (settings[workspace] === undefined) {
+    settings[workspace] = {};
   }
-  if (!isObject(settings.hooks)) {
-    fail('Settings path "hooks" must be a JSON object');
-  }
-
-  if (settings.hooks[workspace] === undefined) {
-    settings.hooks[workspace] = {};
-  }
-  if (!isObject(settings.hooks[workspace])) {
-    fail(`Settings path "hooks.${workspace}" must be a JSON object`);
+  if (!isObject(settings[workspace])) {
+    fail(`Settings path "${workspace}" must be a JSON object`);
   }
 
-  if (settings.hooks[workspace].PreToolUse !== undefined && !Array.isArray(settings.hooks[workspace].PreToolUse)) {
-    fail(`Settings path "hooks.${workspace}.PreToolUse" must be an array`);
+  if (settings[workspace].PreToolUse !== undefined && !Array.isArray(settings[workspace].PreToolUse)) {
+    fail(`Settings path "${workspace}.PreToolUse" must be an array`);
   }
-  if (settings.hooks[workspace].PreToolUse === undefined) {
-    settings.hooks[workspace].PreToolUse = [];
+  if (settings[workspace].PreToolUse === undefined) {
+    settings[workspace].PreToolUse = [];
   }
 
-  const preToolUse = settings.hooks[workspace].PreToolUse;
+  const legacy = isObject(settings.hooks) ? settings.hooks[workspace] : undefined;
+  if (isObject(legacy) && Array.isArray(legacy.PreToolUse)) {
+    let migrated = false;
+    const keptEntries = [];
+    for (const entry of legacy.PreToolUse) {
+      if (isObject(entry) && entry.matcher === 'run_command' && Array.isArray(entry.hooks)
+        && entry.hooks.some((hook) => isOwnedPreToolHook(hook))) {
+        migrated = true;
+        entry.hooks = entry.hooks.filter((hook) => !isOwnedPreToolHook(hook));
+        if (entry.hooks.length === 0 && Object.keys(entry).every((key) => key === 'matcher' || key === 'hooks')) {
+          continue;
+        }
+      }
+      keptEntries.push(entry);
+    }
+    if (migrated) {
+      changed = true;
+      legacy.PreToolUse = keptEntries;
+      if (keptEntries.length === 0) delete legacy.PreToolUse;
+      if (Object.keys(legacy).length === 0) delete settings.hooks[workspace];
+      if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+    }
+  }
+
+  const preToolUse = settings[workspace].PreToolUse;
   const runEntries = [];
   for (const entry of preToolUse) {
     if (isObject(entry) && entry.matcher === 'run_command') {
       if (entry.hooks !== undefined && !Array.isArray(entry.hooks)) {
-        fail('A "hooks.PreToolUse" entry with matcher "run_command" must contain a hooks array');
+        fail(`A "${workspace}.PreToolUse" entry with matcher "run_command" must contain a hooks array`);
       }
       if (entry.hooks === undefined) entry.hooks = [];
       runEntries.push(entry);
@@ -1928,6 +2014,24 @@ install_codex_hooks() {
     result=$(HOOK_TARGET="$HOOK_TARGET" merge_json_settings)
 
     report_json_result "Codex" "$result"
+    # Codex loads a project hook only when the project's .codex/ layer is trusted,
+    # skips a hook until its exact definition is reviewed and trusted in /hooks,
+    # and marks a new or changed definition for review (the Codex hooks docs).
+    # "Created Codex hook settings" alone told the user the guard was on, and a
+    # re-install that rewrites the entry (a moved project changes its absolute
+    # path) needed review again with no word from here (BR-B-10). Said on every
+    # run, as for pi below; the second half only when this run wrote the entry.
+    # Codex 只在專案的 .codex/ 層受信任時才載入專案 hook，hook 定義要在 /hooks 審閱並信任之前一律略過，新的或改過的
+    # 定義會被標成待審閱。只印「已建立 Codex hook 設定」等於說守衛已啟用，而改寫這一筆的重新安裝（專案搬移會改變
+    # 絕對路徑）又需要重新審閱，這裡卻什麼都沒說（BR-B-10）。每次都講，與下面的 pi 相同；後半句只在這次寫了項目時講。
+    warning "Codex 只在專案的 .codex/ 層受信任、而且你在 /hooks 審閱並信任這個 hook 定義之後才會執行它；在那之前 Codex 會略過它"
+    warning "Codex runs this hook only once the project's .codex/ layer is trusted and you review and trust this hook definition in /hooks; until then Codex skips it"
+    case "$result" in
+        created*|updated*)
+            warning "這次安裝新增或改寫了這個 hook 定義，Codex 會把它標成待審閱：請在 Codex 執行 /hooks 信任它"
+            warning "This run added or rewrote the hook definition, so Codex marks it for review: run /hooks in Codex to trust it"
+            ;;
+    esac
 }
 
 # 安裝 GitHub Copilot hook (Install GitHub Copilot hook)
@@ -2015,12 +2119,18 @@ install_pi_hooks() {
     # .pi/hooks.json is read by a hooks-capable extension such as pi-hooks
     # (README's Pi section, 方式 B), so "Created Pi hook settings" alone told a
     # stock pi user the guard was on. Say so on every run, and name the native
-    # hook README recommends (方式 A), which this installer does not write.
+    # hook README describes (方式 A), which this installer does not write. Stock
+    # pi (@earendil-works/pi-coding-agent) reads project extensions from
+    # .pi/extensions/ once the project is trusted; .omp/hooks/pre/ is the
+    # oh-my-pi layout, which stock pi does not read, so naming it alone sent stock
+    # pi users to a file that does not run (BR-B-2).
     # .pi/hooks.json 是由支援 hooks 的擴充套件（例如 pi-hooks）讀取（README Pi 章節方式 B），只印
     # 「已建立 Pi hook 設定」會讓沒有擴充套件的使用者以為守衛已啟用。每次都講明，並寫出 README
-    # 推薦、但本安裝程式不會寫入的原生 hook（方式 A）。
-    warning ".pi/hooks.json 需要支援 hooks 的 Pi 擴充套件（例如 pi-hooks）來讀取（README Pi 章節方式 B）；沒有這種擴充套件時，請改用 README 推薦的原生 hook .omp/hooks/pre/protect-important-paths.ts（本安裝程式不會寫入它）"
-    warning ".pi/hooks.json needs a hooks-capable Pi extension such as pi-hooks to read it (README Pi section, option B); without one, use the native hook README recommends, .omp/hooks/pre/protect-important-paths.ts (this installer does not write it)"
+    # 說明、但本安裝程式不會寫入的原生 hook（方式 A）。原生 pi 在專案受信任後從 .pi/extensions/ 讀專案擴充
+    # 套件；.omp/hooks/pre/ 是 oh-my-pi 的版面，原生 pi 不讀它，只寫它等於把原生 pi 的使用者送去一個
+    # 不會執行的檔案（BR-B-2）。
+    warning ".pi/hooks.json 需要支援 hooks 的 Pi 擴充套件（例如 pi-hooks）來讀取（README Pi 章節方式 B）。沒有這種擴充套件時，原生 pi 會在你信任這個專案（project trust）之後，從 .pi/extensions/ 載入專案擴充套件（README Pi 章節方式 A）；.omp/hooks/pre/protect-important-paths.ts 是 oh-my-pi 的版面，原生 pi 不會讀它。本安裝程式兩者都不會寫入"
+    warning ".pi/hooks.json needs a hooks-capable Pi extension such as pi-hooks to read it (README Pi section, option B). Without one, stock pi loads a project extension from .pi/extensions/ once you grant the project trust (README Pi section, option A); .omp/hooks/pre/protect-important-paths.ts is the oh-my-pi layout, which stock pi does not read. This installer writes neither"
 }
 
 # 安裝 Grok Build hook (Install Grok Build hook)
@@ -2263,6 +2373,60 @@ prepare_anchored_opencode_file() {
         OPENCODE_COPY_WROTE_NOTHING=false
     else
         OPENCODE_COPY_WROTE_NOTHING=true
+    fi
+}
+
+# 把 fail-closed stub 寫進一個新的 stage，而不是寫回候選檔的 stage。macOS 上開啟 /dev/fd/9 等於複製那個
+# 已持有的 descriptor：`>` 既不截斷也不倒帶，於是 stub 被接在被拒候選檔的後面，發布出去的「替代品」是
+# 候選檔加 stub。當成命令執行時（README 的手動設定就是這樣執行 hooks/protect-important-paths.js）那是
+# SyntaxError，node 以 1 結束，PreToolUse 把它當成非阻擋錯誤，也就是放行（BR-B-8）。Linux 透過 /proc 以
+# O_TRUNC 重新開啟 /dev/fd/N（這裡沒有實跑），所以 ubuntu 那一腳看不到。新 stage 的建立方式與候選檔的完全相同：mktemp -u
+# 產生名稱、在已錨定目錄裡以 noclobber 獨占建立 direct child、只透過持有的 fd 寫入，發布前
+# publish_anchored_opencode_file 照樣比對 identity。被拒候選檔的 stage 先經由 EXIT trap 用的那套 identity
+# 檢查清掉；mode 與候選檔 stage 原本拿到的相同。
+# Write the fail-closed stub into a fresh stage, not back into the candidate's.
+# On macOS opening /dev/fd/9 duplicates the held descriptor: `>` neither
+# truncates nor rewinds it, so the stub landed after the rejected candidate and
+# the published "replacement" was candidate + stub. Run as a command -- the way
+# README's manual configs run hooks/protect-important-paths.js -- that file is a
+# SyntaxError and node exits 1, which PreToolUse reads as a non-blocking error,
+# i.e. allow (BR-B-8). Linux reopens /dev/fd/N through /proc with O_TRUNC (not
+# run here), which is why the ubuntu leg never showed it. The fresh stage is
+# made exactly like the candidate's: a mktemp -u name, an exclusive noclobber
+# create as a direct child of the anchored directory, writes only through the
+# held fd, and publish_anchored_opencode_file checks its identity before the
+# move. The rejected candidate's stage is removed first through the
+# identity-checked cleanup the EXIT trap uses, and the mode is the one the
+# candidate's stage got.
+open_fail_closed_opencode_stage() {
+    local stage_path write_identity stage_identity source_mode
+    [ -n "${OPENCODE_RUNTIME_WRITE_PATH:-}" ] || return 0
+    cleanup_anchored_opencode_leaf "${OPENCODE_STAGE_PATH:-}" /dev/fd/9 "candidate"
+    OPENCODE_STAGE_PATH=""
+    stage_path="$(mktemp -u "./.better-rm-opencode.stage.XXXXXX")" || {
+        error "Cannot reserve a staging name for the OpenCode fail-closed replacement"
+        return 1
+    }
+    require_direct_opencode_child "$stage_path" "fail-closed replacement staging" || return 1
+    set -o noclobber
+    if ! exec 9> "$stage_path"; then
+        set +o noclobber
+        error "Cannot create the OpenCode fail-closed replacement stage"
+        return 1
+    fi
+    set +o noclobber
+    OPENCODE_STAGE_PATH="$stage_path"
+    write_identity="$(opencode_held_file_identity /dev/fd/9)" || return 1
+    stage_identity="$(opencode_file_identity "$OPENCODE_STAGE_PATH")" || true
+    if [ "$stage_identity" != "$write_identity" ] || [ -L "$OPENCODE_STAGE_PATH" ]; then
+        error "OpenCode fail-closed replacement staging path changed while it was created: $OPENCODE_STAGE_PATH"
+        return 1
+    fi
+    if [ -n "${OPENCODE_ORIGINAL_MODE:-}" ]; then
+        chmod "$OPENCODE_ORIGINAL_MODE" /dev/fd/9 || return 1
+    else
+        source_mode="$(opencode_file_mode "$OPENCODE_RUNTIME_SOURCE_PATH")" || return 1
+        chmod "$source_mode" /dev/fd/9 || return 1
     fi
 }
 

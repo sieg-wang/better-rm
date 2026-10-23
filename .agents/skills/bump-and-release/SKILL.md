@@ -18,7 +18,7 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
 
 - 目前工作目錄位於 `better-rm` 專案根目錄（或以 `--repo` 指定）。
 - 需要安裝 `git`、`bash`、`node`。
-- 需要安裝 `gh`（GitHub CLI），自動化 release 流程會用它更新 Release Note。
+- 需要安裝 `gh`（GitHub CLI），自動化 release 流程會用它更新 Release Note。會推播的自動 release 在提交與打標籤之前就檢查 `gh`，缺少時直接停止、什麼都不提交；`--auto --no-push`、`--dry-run` 與只列建議指令的路徑不需要 `gh`。
 - `./test-better-rm.sh`、`./test-hooks.js`、`./test-install-hooks.sh` 可正常執行。
 
 ## 主要指令
@@ -34,7 +34,7 @@ description: 自動化 better-rm 的版本提升與發佈前檢核，涵蓋版�
   - 若標籤已存在：直接停止，提醒先進行 bump。會推播時也會先以 `git ls-remote` 查遠端 `mine`：遠端已有這個標籤、或查詢失敗，都會在提交與打標籤之前停止。
   - 若標籤不存在：以目前版本進行 release 準備，不會再做版本位元調整。
   - 若 release 相關檔案無變更，將直接建立標籤；若有變更，會自動提交後再標籤。
-- tag push 觸發後，流程會等待 `ci-release.yml` 完成，並在 Release 建立後自動使用 `gh release edit` 以**繁體中文**更新 Release Note。
+- tag push 觸發後，流程會等待 `ci-release.yml` 完成，並在 Release 建立後自動使用 `gh release edit` 以**繁體中文**更新 Release Note。推播會對同一個 commit 啟動兩次 `ci-release.yml`（`main` 一次、標籤一次），只有標籤那次有 release job，所以等待的是 `headBranch` 為標籤名的那次 push 執行。Release Note 的 commit 數與變更檔案以這個 commit 歷史裡最高的 `x.y.z` 標籤為基準，clone 裡 fork 沒合併過的上游標籤不算。
 - 真正的 GitHub Release 物件建立仍由 GitHub Actions 的 `ci-release.yml` 負責。
 - 預設會啟用 `--apply`，避免在本機工作目錄有未提交變更時中斷流程（這些變更若不在 release 檔案清單內，仍不會被提交到 release commit：release commit 以路徑限定只提交清單內的檔案，清單外已 `git add` 的變更提交後仍維持暫存）。
 

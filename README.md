@@ -963,8 +963,11 @@ Claude Code 的全域模式會寫入
 `install.sh` 與 `install-hooks.sh` 是分開的步驟，不會在安裝 `rm` 別名時自動修改
 Agent 設定。變更設定後，可能需要重新啟動相應 Agent 或開啟新的 session。
 
-下方手動設定範例仍適用於 hook 檔案已提交在目標專案中的情況；其中
-`git rev-parse --show-toplevel` 會從該專案載入 hook。對於 OpenCode，請參考下方 plugin 範例。
+下方手動設定範例仍適用於 hook 檔案已提交在目標專案中的情況。Claude Code 的範例以
+`${CLAUDE_PROJECT_DIR}`（Claude Code 執行 hook 時提供的專案根目錄）載入 hook；其他範例以
+`git rev-parse --show-toplevel` 載入，而它是在 Agent 執行 hook 時的目前目錄解析的：該目錄在巢狀的
+Git repository 裡時得到的是內層 repository，在任何 repository 之外時 git 會失敗，兩種情況 node 都找不到
+hook 而以 1 結束；Agent 若不把 hook 失敗當成阻擋，那次呼叫就照樣執行。對於 OpenCode，請參考下方 plugin 範例。
 
 ### 各個 Coding Agent 的安裝與設定說明 / Detailed Agent Configurations
 
@@ -982,7 +985,7 @@ Agent 設定。變更設定後，可能需要重新啟動相應 Agent 或開啟�
           "hooks": [
             {
               "type": "command",
-              "command": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\"",
+              "command": "node \"${CLAUDE_PROJECT_DIR}/hooks/protect-important-paths.js\"",
               "timeout": 5,
               "statusMessage": "Checking protected directories...",
               "onFailure": "block"
@@ -993,12 +996,31 @@ Agent 設定。變更設定後，可能需要重新啟動相應 Agent 或開啟�
     }
   }
   ```
-* **說明**：Claude Code 在執行 `Bash` 工具前，會先呼叫此 hook 檢查指令是否包含刪除受保護目錄的指令。`"onFailure": "block"` 讓 hook 本身失敗時（啟動不了、逾時、以 0／2 以外的碼結束）擋下該次呼叫；Claude Code 的預設值是 `continue`，也就是照樣執行。`install-hooks.sh -a claude` 會寫入這一行，並在重新安裝時替既有的項目補上。
+* **說明**：Claude Code 在執行 `Bash` 工具前，會先呼叫此 hook 檢查指令是否包含刪除受保護目錄的指令。`"onFailure": "block"` 讓 hook 本身失敗時（啟動不了、逾時、以 0／2 以外的碼結束）擋下該次呼叫；Claude Code 的預設值是 `continue`，也就是照樣執行。`install-hooks.sh -a claude` 會寫入這一行，並在重新安裝時替既有的項目補上。Claude Code 在 session 的目前目錄執行 hook，而 `cd` 會改變它，所以這裡用不隨目前目錄改變的 `${CLAUDE_PROJECT_DIR}`，而不是 `git rev-parse --show-toplevel`：後者在巢狀的 Git repository 或任何 repository 之外都找不到 hook。本 repo 的 `.claude/settings.json` 就是這份設定。
 
 #### 2. Codex
 * **設定檔位置**：`.codex/hooks.json`
-* **設定內容**：結構與 Claude Code 相同，但不含 `onFailure` 那一行（Codex 是否支援這個欄位尚未驗證，`install-hooks.sh -a codex` 也不寫入）。
-* **說明**：載入設定檔後，請在 Codex 介面中執行 `/hooks` 來審閱並信任此專案 hook，以使防護生效。
+* **設定內容**：即本 repo 的 `.codex/hooks.json`：結構與 Claude Code 相同，但不含 `onFailure` 那一行（Codex 是否支援這個欄位尚未驗證，`install-hooks.sh -a codex` 也不寫入），而且 `command` 仍是 `node "$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js"`，不是 Claude Code 範例的 `${CLAUDE_PROJECT_DIR}`：這個變數只有 Claude Code 會設定，Codex 不設定，在 Codex 裡它展開成空字串，路徑變成 `/hooks/protect-important-paths.js`，hook 載入不了。
+  ```json
+  {
+    "hooks": {
+      "PreToolUse": [
+        {
+          "matcher": "Bash",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\"",
+              "timeout": 5,
+              "statusMessage": "Checking protected directories..."
+            }
+          ]
+        }
+      ]
+    }
+  }
+  ```
+* **說明**：載入設定檔後，請在 Codex 介面中執行 `/hooks` 來審閱並信任此專案 hook，以使防護生效。Codex 只在專案的 `.codex/` 層受信任時載入專案 hook，並把新的或改過的 hook 定義標成待審閱、在信任之前略過它；`install-hooks.sh -a codex` 每次新增或改寫這一筆（例如專案搬移後的新路徑）都會這樣提醒，那之後要再到 `/hooks` 信任一次。
 
 #### 3. GitHub Copilot CLI / Cloud Agent
 * **設定檔位置**：`.github/hooks/better-rm.json`
@@ -1042,7 +1064,7 @@ Agent 設定。變更設定後，可能需要重新啟動相應 Agent 或開啟�
     }
   }
   ```
-* **說明**：Antigravity 透過攔截 `run_command` 工具來防止對受保護目錄的刪除動作。若被阻擋會直接向 agent 回傳拒絕訊息。
+* **說明**：Antigravity 透過攔截 `run_command` 工具來防止對受保護目錄的刪除動作。若被阻擋會直接向 agent 回傳拒絕訊息。`hooks.json` 以 hook 名稱對應事件設定，最上層每個鍵都是一個 hook 名稱，所以 `better-rm-protection` 必須在最上層。`install-hooks.sh -a antigravity` 就寫這個形狀；舊版安裝程式把它包在最上層的 `"hooks"` 物件裡（Antigravity 會把那讀成一個名叫 `hooks`、沒有任何事件的 hook），重新安裝時只把 better-rm 自己的項目移出那層包裝，其他內容不動。
 
 #### 5. Qoder
 * **設定檔位置**：`.qoder/settings.json`
@@ -1068,8 +1090,9 @@ Agent 設定。變更設定後，可能需要重新啟動相應 Agent 或開啟�
 #### 6. Pi Coding Agent
 Pi 支援兩種整合方式，您可以選擇其中一種：
 * **方式 A：原生 TypeScript Hook (推薦)**
-  * **路徑**：`.omp/hooks/pre/protect-important-paths.ts`
-  * **內容**：
+  * **路徑（oh-my-pi）**：`.omp/hooks/pre/protect-important-paths.ts`。`.omp/` 是 oh-my-pi 的版面，原生 pi 不讀它。
+  * **路徑（原生 pi，`@earendil-works/pi-coding-agent`）**：`.pi/extensions/protect-important-paths.ts`。內容與下面相同，改三處：第一行改成 `import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";`；`export default function hook(pi: HookAPI): void {` 改成 `export default function hook(pi: ExtensionAPI): void {`；runtime 路徑少一層，改成 `load("../../hooks/protect-important-paths.js")`。原生 pi 要你先信任這個專案（project trust）才會載入 `.pi/extensions/` 裡的擴充套件，在那之前這個檔案不會執行。
+  * **內容**（oh-my-pi 版）：
     ```typescript
     import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
     import { createRequire } from "node:module";
@@ -1161,13 +1184,14 @@ Pi 支援兩種整合方式，您可以選擇其中一種：
       "beforeShellExecution": [
         {
           "command": "node \"$(git rev-parse --show-toplevel)/hooks/protect-important-paths.js\"",
-          "matcher": ".*"
+          "matcher": ".*",
+          "failClosed": true
         }
       ]
     }
   }
   ```
-* **說明**：Cursor 在執行 `beforeShellExecution` 生命週期事件前會先執行此 hook。當判定為高風險時，回傳 `permission: "deny"` 將其完全阻擋。
+* **說明**：Cursor 在執行 `beforeShellExecution` 生命週期事件前會先執行此 hook。當判定為高風險時，回傳 `permission: "deny"` 將其完全阻擋。`"failClosed": true` 讓 hook 本身失敗時（當掉、逾時、以 2 以外的非零碼結束、沒有輸出）擋下該次命令；Cursor 的預設值是 `false`，也就是照樣執行。這個 hook 對每個它判定的命令都會輸出一個 `permission`，所以只有那幾種失敗會被擋。`install-hooks.sh -a cursor` 會寫入這一行，並在重新安裝時替既有的項目補上。
 
 #### 8. OpenCode
 * **路徑**：`.opencode/plugins/protect-important-paths.ts`
