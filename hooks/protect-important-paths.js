@@ -2061,6 +2061,168 @@ function decodeShellEscapes(text) {
   });
 }
 
+// What a LITERAL `printf` writes down a pipe is NOT the words on the command line:
+// `printf '%s%s -rf /etc' r m` composes `rm -rf /etc` across the format/operand
+// seam, where a gate that scans the format and the operands as separate texts
+// never sees the deletion. KNOWN-RESIDUALS.md R4 promised a literal printf is
+// "scanned as a nested command and judged by the ordinary rules"; it was not,
+// and the piped shell runs /bin/rm with no trash (CR-2026-10-25 #1, measured
+// ALLOW at eba1d0e through the real stdin entry point for ~, ~/.ssh, ~/.claude
+// and /etc). So the emitter's real output is COMPUTED here and added to the scan
+// texts -- additive, like the decodeShellEscapes pass above, so it can only turn
+// an allow into a deny -- and any directive this emulator does not model makes
+// the producer OPAQUE (refused when piped, R4's "no fail-open branch").
+//
+// It models bash's printf, the shell that runs this hook's own commands (both
+// /bin/bash 3.2.57 and PATH bash 5.3.20 were diffed against it; the surviving
+// divergences are an octal byte >= 0400 -- decodeShellEscapes does not mask to a
+// byte, but a protected path is ASCII so it cannot straddle one -- `%c` of an
+// empty operand (NUL vs ""), and `%d` of `5x` (3.2 says 0, 5.3 says 5); none can
+// form or hide a protected path, and the differential oracle confirmed the
+// composition and benign corpora match 5.3 byte-for-byte). Escapes reuse
+// decodeShellEscapes so there is ONE decoder, not two that drift.
+// printf 寫進 pipe 的東西不是命令列上的字：`printf '%s%s -rf /etc' r m` 把 `rm -rf /etc`
+// 組在「格式字串／操作元」的接縫上，而把格式與操作元當成分開的文字去掃的閘門永遠看不到那次刪
+// 除。R4 說字面 printf「會當成巢狀命令判定」，其實沒有，而管線端的 shell 跑的是沒有垃圾桶的
+// /bin/rm（CR-2026-10-25 #1，eba1d0e 走真正的 stdin 進入點實測對 ~、~/.ssh、~/.claude、
+// /etc 全部放行）。所以這裡「算出」emitter 的真正輸出並加進掃描文字——與上面的
+// decodeShellEscapes 一樣是「加入」而非取代，只會把放行變成拒絕——而這個模擬器建不出來的任何
+// 指示詞都讓產生器變成 OPAQUE（灌進 shell 就拒絕，符合 R4「沒有 fail-open 分支」）。它模擬的
+// 是 bash 的 printf（本 hook 自己的命令就跑在 bash 上；3.2.57 與 5.3.20 都對照過，剩下的分歧
+// —— >= 0400 的八進位位元組、空操作元的 `%c`、`5x` 的 `%d` —— 都組不出也藏不住受保護路徑）。
+// 逸出序列沿用 decodeShellEscapes，只有一份解碼器、不會走鐘。
+const PRINTF_OUTPUT_CAP = 65536;
+const PRINTF_DIRECTIVE = /%([-+ #0]*)([0-9]*)(?:\.([0-9]*))?([a-zA-Z%])?/g;
+
+function printfInteger(operand) {
+  const text = String(operand === undefined || operand === null ? '' : operand);
+  // bash: a leading quote makes the integer the code point of the next char.
+  // bash：開頭加引號時，整數是下一個字元的碼位。
+  if (text[0] === "'" || text[0] === '"') return text.length > 1 ? (text.codePointAt(1) || 0) : 0;
+  const match = /^\s*([+-]?)(0[xX][0-9a-fA-F]+|0[0-7]*|[1-9][0-9]*)/.exec(text);
+  if (!match) return 0;
+  let value;
+  if (/^0[xX]/.test(match[2])) value = parseInt(match[2], 16);
+  else if (/^0[0-7]+$/.test(match[2])) value = parseInt(match[2], 8);
+  else value = parseInt(match[2], 10);
+  if (!Number.isFinite(value)) value = 0;
+  return match[1] === '-' ? -value : value;
+}
+
+function printfPad(piece, flags, widthText, numeric) {
+  const width = widthText ? Number(widthText) : 0;
+  // A width past the cap would build a megabyte of fill: refuse (opaque) rather
+  // than spend it. 超過上限的寬度會造出整片填充字元，寧可拒絕也不花它。
+  if (!Number.isFinite(width) || width > PRINTF_OUTPUT_CAP) return null;
+  if (piece.length >= width) return piece;
+  const fill = width - piece.length;
+  if (flags.includes('-')) return piece + ' '.repeat(fill);
+  // bash zero-pads with the `0` flag, strings included (measured: `%05s` of `ab`
+  // is `000ab`); a signed number keeps its sign in front of the zeros.
+  // bash 在 `0` 旗標下連字串也補零（`%05s` 的 `ab` 是 `000ab`）；帶號數字的符號留在零的前面。
+  if (flags.includes('0')) {
+    if (numeric && /^[+\- ]/.test(piece)) return piece[0] + '0'.repeat(fill) + piece.slice(1);
+    return '0'.repeat(fill) + piece;
+  }
+  return ' '.repeat(fill) + piece;
+}
+
+// The bytes `printf format args...` writes, or null for any directive, width or
+// reuse this emulator does not model. Reused while operands remain, exactly as
+// bash reuses the format; a pass that consumes no operand ends it.
+// `printf format args...` 寫出的位元組，或對任何建不出來的指示詞／寬度／重複回傳 null。
+// 與 bash 一樣：還有操作元就重複套用格式，某一輪沒吃到操作元就停。
+function emulatePrintf(format, operands) {
+  if (typeof format !== 'string') return null;
+  let out = '';
+  let index = 0;
+  const maxPasses = operands.length + 1;
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    const before = index;
+    let last = 0;
+    let match;
+    PRINTF_DIRECTIVE.lastIndex = 0;
+    while ((match = PRINTF_DIRECTIVE.exec(format)) !== null) {
+      out += decodeShellEscapes(format.slice(last, match.index));
+      if (out.length > PRINTF_OUTPUT_CAP) return null;
+      last = PRINTF_DIRECTIVE.lastIndex;
+      const flags = match[1];
+      const widthText = match[2];
+      const precisionText = match[3];
+      const conv = match[4];
+      if (!conv) return null; // `%*`, `%(...)T`, `%1$s`, a trailing bare `%`
+      if (conv === '%') {
+        if (flags || widthText || precisionText !== undefined) return null; // `%5%`, `%.3%`
+        out += '%';
+        continue;
+      }
+      const operand = index < operands.length ? operands[index] : undefined;
+      if (operand !== undefined) index += 1;
+      let piece;
+      let stop = false;
+      if (conv === 's') {
+        piece = operand === undefined ? '' : String(operand);
+        if (precisionText !== undefined) piece = piece.slice(0, precisionText ? Number(precisionText) : 0);
+      } else if (conv === 'b') {
+        // `%b` decodes its operand's escapes, and `\c` stops all further output.
+        // A `\\c` is an escaped backslash then a `c`, not a stop; a `\x63` is the
+        // letter c, not a stop -- both handled by skipping the char after `\`.
+        // `%b` 會解碼操作元的逸出序列，`\c` 讓其後全部停止輸出。`\\c` 是跳脫的反斜線加 c、
+        // `\x63` 是字母 c，都不是停止符——跳過反斜線後一個字元就處理掉了。
+        let body = operand === undefined ? '' : String(operand);
+        let cut = -1;
+        for (let k = 0; k < body.length; k += 1) {
+          if (body[k] === '\\') {
+            if (body[k + 1] === 'c') { cut = k; break; }
+            k += 1;
+          }
+        }
+        if (cut >= 0) { body = body.slice(0, cut); stop = true; }
+        piece = decodeShellEscapes(body);
+        if (precisionText !== undefined) piece = piece.slice(0, precisionText ? Number(precisionText) : 0);
+      } else if (conv === 'c') {
+        piece = operand === undefined || operand === '' ? '' : String.fromCodePoint(String(operand).codePointAt(0));
+      } else if ('diouxX'.includes(conv)) {
+        const value = printfInteger(operand);
+        const magnitude = Math.abs(value);
+        let digits;
+        if (conv === 'o') digits = magnitude.toString(8);
+        else if (conv === 'x') digits = magnitude.toString(16);
+        else if (conv === 'X') digits = magnitude.toString(16).toUpperCase();
+        else digits = magnitude.toString(10);
+        if (precisionText !== undefined) {
+          const precision = precisionText ? Number(precisionText) : 0;
+          if (!Number.isFinite(precision) || precision > PRINTF_OUTPUT_CAP) return null;
+          if (value === 0 && precision === 0) digits = '';
+          else if (digits.length < precision) digits = '0'.repeat(precision - digits.length) + digits;
+        }
+        let prefix = '';
+        if ('di'.includes(conv)) {
+          if (value < 0) prefix = '-';
+          else if (flags.includes('+')) prefix = '+';
+          else if (flags.includes(' ')) prefix = ' ';
+        } else if (flags.includes('#') && value !== 0) {
+          if (conv === 'o' && digits[0] !== '0') digits = `0${digits}`;
+          else if (conv === 'x') prefix = '0x';
+          else if (conv === 'X') prefix = '0X';
+        }
+        piece = prefix + digits;
+      } else {
+        return null; // %q %Q, floats %eEfFgGaA, %n, a long modifier %ls ...
+      }
+      const padded = printfPad(piece, flags, widthText, 'diouxXc'.includes(conv));
+      if (padded === null) return null;
+      out += padded;
+      if (out.length > PRINTF_OUTPUT_CAP) return null;
+      if (stop) return out;
+    }
+    out += decodeShellEscapes(format.slice(last));
+    if (out.length > PRINTF_OUTPUT_CAP) return null;
+    if (index >= operands.length || index === before) break;
+  }
+  return out;
+}
+
 // A shell carrier whose SCRIPT this gate could not read: it arrived on a pipe,
 // through a process substitution, or as the output of a command substitution
 // inside the carrier's own here-string or heredoc body. Same sentinel
@@ -5739,6 +5901,31 @@ function commandTargetsScanOneReading(
       for (const text of texts.slice()) {
         const decoded = decodeShellEscapes(text);
         if (decoded !== text) texts.push(decoded);
+      }
+      // ...and for printf, the FIFTH text: what the format actually PRINTS once
+      // the operands are substituted into it. The four texts above read the
+      // format and the operands as separate words, so a deletion composed across
+      // the seam (`printf '%s%s -rf /etc' r m`) is in none of them -- the bypass
+      // R4 said could not exist. emulatePrintf() builds the real output and it is
+      // judged by the ordinary rules like every other text; a directive it cannot
+      // model returns null and the producer is OPAQUE, refused when it reaches a
+      // shell, with no fail-open branch. A leading option is `-v` (writes to a
+      // variable, not the pipe) or one bash would read as the FORMAT (so the
+      // format picked above is wrong): either way, opaque. echo has no format and
+      // keeps the literal reading. Pushed AFTER the decode loop so the already-
+      // decoded output is not decoded a second time.
+      // ……printf 還有第五段文字：把操作元代進格式字串之後「真正印出來」的東西。上面四段把格式
+      // 與操作元當成分開的字，所以跨接縫組出來的刪除（`printf '%s%s -rf /etc' r m`）四段都沒
+      // 有——正是 R4 說不可能存在的繞法。emulatePrintf() 建出真正的輸出，照一般規則判；建不出
+      // 來的指示詞回傳 null，產生器變成 OPAQUE，灌進 shell 就拒絕，沒有 fail-open 分支。開頭的
+      // 選項若是 `-v`（寫進變數而不是 pipe）或 bash 會當成格式字串的字（上面挑的格式就錯了），
+      // 兩種都判 opaque。echo 沒有格式字串，維持字面讀法。放在解碼迴圈之後 push，已解碼的輸出
+      // 不會再被解碼一次。
+      if (label === 'printf') {
+        if (firstOperandIndex > 0) return { kind: 'opaque', label };
+        const printed = emulatePrintf(emitted.length > 0 ? emitted[0] : '', emitted.slice(1));
+        if (printed === null) return { kind: 'opaque', label };
+        if (printed) texts.push(printed);
       }
       return { kind: 'literal', label, texts };
     }

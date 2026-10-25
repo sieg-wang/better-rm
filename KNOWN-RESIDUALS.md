@@ -214,6 +214,21 @@ curl -sSL https://example.invalid/install.sh | bash
 `blocked`／`allowed` 裡的字面產生器與誤擋對照列。規則消失、訊息爛回舊措辭、或豁免清單被放寬
 成裸 host，這三件事各自會讓測試轉紅。
 
+**2026-10-25 精確化（CR-2026-10-25 #1）**：上面那句「字面 `echo`／`printf` 的字會當成巢狀
+命令判定」對「把刪除組在**格式字串／操作元接縫**上」的 `printf` 並不成立——這道閘門把格式與
+操作元當成分開的文字掃，從沒建出 `printf '%s%s -rf /etc' r m` 真正印出的 `rm -rf /etc`
+（eba1d0e 走真正的 stdin 進入點實測，對 `/etc`、`~`、`"$HOME"`、`~/.ssh`、`~/.claude` 全部
+放行，而管線端的 shell 跑的是沒有垃圾桶的 /bin/rm）。現在 `emulatePrintf()` 把真正印出來的
+輸出**加進**掃描集合（與既有的逸出解碼一樣是加入、只會把放行變成拒絕），照一般規則判。它模
+擬 bash 的 printf：`%s %b %c` 與 `%d` 家族、寬度／精度、`%%`、格式字串與 `%b` 操作元的反斜線
+逸出、格式重複、`--`。模擬器建不出來的指示詞（`%q`、`%(fmt)T`、`%*`／`%.*`、位置參數 `%n$`、
+浮點、`-v`，以及開頭被 bash 當成格式字串的選項）或超過 65536 位元組的輸出讓 `printf` 變成
+OPAQUE，與本節「解析器分類不出來的產生器」同一條路——灌進 shell 就拒絕，沒有 fail-open 分支。
+`echo` 沒有格式字串，維持原本的字面讀法。本機以差分 oracle 對 /opt/homebrew/bin/bash 5.3.20
+與 /bin/bash 3.2.57 實測：corpus 的 87 個 printf emitter 全部逐位元組相符；105 列 corpus 有
+37 列組合列由放行翻成拒絕、0 列拒絕翻放行。釘在 `test-hooks.js` 的 `blocked`（組合列，受保護
+目錄拒絕）、`allowed`（良性雙胞胎）、`pipedScriptBlocked`（opaque 指示詞，unscannable 拒絕）。
+
 **R4 — closed with an exception list, 2026-09-03.** A shell carrier whose script
 arrives on a pipe or through a process substitution is refused unless this gate
 can READ that script: a literal emitter (`echo`/`printf` words, `cat <<EOF`) is
@@ -225,6 +240,29 @@ above, measured ALLOW that morning through the real stdin entry point with the
 deletion replaced by a touch, are refused now; the four install routes README.md
 documents still pass. The exception list matches URL TEXT and is not an identity
 check, which is why an exempted fetch may carry only options that cannot move it.
+
+**2026-10-25, made precise (CR-2026-10-25 #1).** The sentence above -- a literal
+`echo`/`printf` is "scanned as a nested command and judged by the ordinary rules"
+-- was NOT true for a `printf` that composes the deletion ACROSS the
+format/operand seam: the gate scanned the format and the operands as separate
+texts and never built the `rm -rf /etc` that `printf '%s%s -rf /etc' r m` actually
+prints (measured ALLOW at eba1d0e through the real stdin entry point for `/etc`,
+`~`, `"$HOME"`, `~/.ssh` and `~/.claude`, where the piped shell runs /bin/rm with
+no trash). `emulatePrintf()` now computes the real output and ADDS it to the scan
+set (additive like the escape-decode pass, so it can only turn an allow into a
+deny), judged by the ordinary rules. It models bash's printf: `%s %b %c` and the
+`%d` family, width and precision, `%%`, backslash escapes in the format and in
+`%b` operands, format reuse, and `--`. A directive it does NOT model -- `%q`,
+`%(fmt)T`, `%*`/`%.*`, `%n$` positional, floats, `-v`, and a leading option bash
+would read as the FORMAT -- or output past 65536 bytes makes the `printf` OPAQUE,
+the same "producer the parser cannot classify" path: refused when it reaches a
+shell, with no fail-open branch. `echo` has no format and keeps the plain literal
+reading. Measured with a differential oracle against /opt/homebrew/bin/bash 5.3.20
+and /bin/bash 3.2.57: all 87 corpus printf emitters matched byte-for-byte, and 37
+composition rows across the 105-row corpus flipped allow->deny with 0 deny->allow.
+Pinned in `test-hooks.js`: `blocked` (composition rows, protected-directory
+refusal), `allowed` (benign twins), `pipedScriptBlocked` (opaque directives,
+unscannable-piped-script refusal).
 
 ## R4-b — 這條規則刻意沒有涵蓋的部分
 
