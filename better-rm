@@ -325,11 +325,22 @@ log_deletion() {
         return 1
     fi
 
-    # 確保日誌檔案存在
-    # Ensure log file exists
+    # 確保日誌檔案存在。建立時開 noclobber（set -C）：路徑不存在時 bash 以 O_CREAT|O_EXCL
+    # 開檔，所以另一個 better-rm 在上面的 `[ ! -f ]` 之後才搶先建好的日誌，連同它已經 append
+    # 的紀錄，不會被 `>` 截回只剩表頭；這段空窗裡被放上的斷掉 symlink 也不會被跟隨、把 target
+    # 建出來。建立失敗時再驗一次綁定：通過代表別人剛建好一份合格的日誌，照常 append；不通過就
+    # 照舊警告。
+    # Ensure the log file exists. The create runs under noclobber (set -C): for a missing
+    # path bash opens with O_CREAT|O_EXCL, so a log that a sibling better-rm created after
+    # the `[ ! -f ]` above, with any record it already appended, is not truncated back to
+    # the header by `>`, and a dangling symlink planted in that window is not followed to
+    # create its target. When the create fails the binding is checked again: a pass means
+    # a sibling just created a bound log, which is appended to as usual; a fail warns as
+    # before.
     if [ ! -f "$log_file" ]; then
         if ! (
             umask 077
+            set -C
             {
                 echo "# Better-RM Deletion Log"
                 echo "# 更好的 RM 刪除日誌"
@@ -339,7 +350,7 @@ log_deletion() {
                 echo '# v2：路徑欄位轉義 \\ 反斜線、\p 直線、\n 換行、\r 歸位、\s 分號、\a 和號、\g 反引號、\d 錢號；沒有 v2 標記的紀錄沿用舊版 5 欄格式'
                 echo "# =============================================================================="
             } > "$log_file"
-        ) 2>/dev/null; then
+        ) 2>/dev/null && ! log_file_is_bound "$log_file"; then
             # 日誌檔案創建失敗，顯示警告但不中斷操作
             # Log file creation failed, show warning but don't interrupt operation
             warn_msg "無法創建刪除日誌: $log_file"

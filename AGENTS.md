@@ -251,22 +251,24 @@ them while `--restore` returned exit 0.
 
 **`--restore` never deletes anything, by path or otherwise.** The trashed item is
 moved into a staging directory this process created exclusively, and is then put
-in place by a single same-filesystem `rename`, which replaces an existing file or
-symlink atomically — the kernel unlinks the old destination as part of that call.
-Landing spots are verified afterwards rather than trusted to flags, because BSD
-`mv -h` still treats a real directory as a container and BSD `mv -n` returns 0
-without doing anything when the target exists.
+in place by a single same-filesystem `rename` that is always `-n`: it never
+replaces anything, and it lands on a destination that every occupant has already
+been moved out of (next paragraph). Landing spots are verified afterwards rather
+than trusted to flags, because BSD `mv -h` still treats a real directory as a
+container and BSD `mv -n` returns 0 without doing anything when the target exists.
 
-`rename` cannot replace a destination in two shapes: the destination is a real
-directory (`EISDIR`/`ENOTEMPTY`), or the staged item is a real directory and the
-destination is not (`ENOTDIR`). Linux's `mv -T` is `rename(2)` as well, so this is
-not macOS-specific. In both shapes the destination is cleared out of the way by
-**moving it into the trash** through `move_to_trash`, never by `rm -rf`. An
-overwrite *is* a deletion, and the whole point of this tool is that deletions are
-recoverable; the previous shape did inside `--restore` exactly what the tool
-exists to prevent. The old destination therefore lands in the trash with its own
-deletion-log record and comes back with `rm --restore <name>`, which the success
-message says out loud.
+Every occupant of the destination, whatever its shape (file, symlink, hard link,
+real directory), is set aside before the publish: it is **moved into the trash**
+through `move_to_trash`, bound to its proven `device:inode` (below), never removed
+by `rm -rf`. When the trash is on another volume measured too small for it, or the
+move into the trash fails while the destination is still the proven object, it is
+set aside in place instead, inside a directory `<name>.better-rm-displaced-XXXXXX`
+created next to the destination, and the restore exits `2` (see the exit contract
+below). An overwrite *is* a deletion, and the whole point of this tool is that
+deletions are recoverable; the previous shape did inside `--restore` exactly what
+the tool exists to prevent. The old destination therefore lands in the trash with
+its own deletion-log record and comes back with `rm --restore <name>`, which the
+success message says out loud.
 
 `move_to_trash` takes an optional third argument: a `device:inode` the caller has
 already proven. `--restore` passes the destination's identity, so the clearing
@@ -300,10 +302,6 @@ occupying it at publish time therefore arrived *after* the set-aside and was nev
 consented to: the publish fails, the unwind runs, and both objects survive. The
 `-f` this paragraph used to describe had exactly one remaining subject — that
 successor — and destroyed it with no trash entry and no backup (measured, exit 0).
-
-The two paragraphs above this one predate `60c2efa` and describe a narrower
-clearing rule than the code has had since: every occupant is set aside now, not
-only the shapes `rename` could not replace.
 
 Exit contract, because "partially successful" must not read as success (the
 README's exit-code list says the same):

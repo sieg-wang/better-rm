@@ -714,6 +714,118 @@ else
     test_fail "斷掉的 symlink 日誌未被拒絕 (status=$dangling_log_status, target 被建立=$([ -e "$dangling_log_target" ] && echo yes || echo no))"
 fi
 
+# BR-2（2026-10-29）：日誌還不存在時，log_deletion 先看 `[ ! -f ]`，再用 `>` 寫表頭，兩步之間
+# 沒有任何序列化。另一個 better-rm 若在這中間建好日誌並 append 了自己的紀錄，這邊的 `>` 會把它
+# 截回只剩表頭：兩次刪除都 exit 0、沒有警告，那一筆的項目明明在垃圾桶裡，--restore 卻說找不到。
+# 那段空窗裡只跑 builtin（umask、echo），PATH shim 碰不到，所以下面兩列用 xtrace：PS4 在每一個
+# 被追蹤的命令之前展開一次，到了建立表頭那個 subshell 的 `umask 077` 那一行（建檔之前）就執行
+# hook，由 hook 扮演搶先的那一方。SEAM 必須恰好對到一行，否則 hook 永遠不會觸發，這兩列卻可能
+# 照樣綠。PS4 與 `set -x` 放在 BASH_ENV 檔案裡、不經環境變數傳 PS4：bash 4.4 起以 root 執行時
+# 不從環境繼承 PS4（bash 的 COMPAT 有記載；TEST_README 的 docker 指令就是 root），而非互動的
+# bash 執行腳本時照樣會讀 BASH_ENV。
+# BR-2 (2026-10-29): while the log does not exist, log_deletion tests `[ ! -f ]` and then
+# writes the header with `>`, and nothing serialises the two steps. A sibling better-rm
+# that creates the log and appends its record in between is truncated back to the header
+# by this `>`: both deletions exit 0 with no warning, and --restore answers "not found"
+# for an item that is in the trash. Only builtins (umask, echo) run inside that window,
+# so no PATH shim reaches it; the two rows below use xtrace instead: PS4 is expanded
+# before every traced command, and at the `umask 077` line of the header subshell
+# (before the create) it runs a hook that plays the other party. SEAM must match exactly
+# one line, or the hook never fires and these rows could still pass. PS4 and `set -x`
+# come from a BASH_ENV file rather than a PS4 environment variable: since bash 4.4 a
+# shell running as root does not inherit PS4 from the environment (bash's COMPAT says
+# so; TEST_README's docker line runs as root), while a non-interactive bash running a
+# script still reads BASH_ENV.
+race_log_seam_count=$(grep -c '^            umask 077$' "$BETTER_RM")
+race_log_seam=$(grep -n '^            umask 077$' "$BETTER_RM" | cut -d: -f1)
+race_log_env="$TEST_WORK_DIR/race-log-env.sh"
+cat > "$race_log_env" <<'EOF'
+PS4='$((BRM_L=LINENO))$( [ "$BRM_L" = "$BRM_TEST_SEAM" ] && BASH_ENV= /bin/bash "$BRM_TEST_HOOK" )'
+set -x
+EOF
+race_log_hook="$TEST_WORK_DIR/race-log-hook.sh"
+cat > "$race_log_hook" <<'EOF'
+# 只觸發一次：symlink 模式在日誌位置放一個斷掉的連結，record 模式扮演搶先建好日誌、
+# 寫了一筆紀錄的另一個 better-rm。
+# Fires once: symlink mode plants a dangling link at the log path, record mode plays
+# a sibling better-rm that created the log and wrote one record.
+[ -e "$BRM_TEST_FIRED" ] && exit 0
+: > "$BRM_TEST_FIRED"
+if [ "$BRM_TEST_MODE" = symlink ]; then
+    ln -s "$BRM_TEST_TARGET" "$BRM_TEST_LOG"
+else
+    {
+        echo "# Better-RM Deletion Log"
+        printf '%s | v2 | %s | %s | %s | %s\n' 20261029_000000_000000001 \
+            "$BRM_TEST_ORIGINAL" "$BRM_TEST_TRASHED" nohash file
+    } > "$BRM_TEST_LOG"
+fi
+EOF
+# 用法：race_log_run <state dir> <mode> <要刪的檔案>；結束碼放在 RACE_LOG_STATUS，stderr
+# （含 xtrace）放在 <state dir>.err。
+# Usage: race_log_run <state dir> <mode> <file to delete>; the exit code lands in
+# RACE_LOG_STATUS and stderr (xtrace included) in <state dir>.err.
+race_log_run() {
+    RACE_LOG_STATUS=0
+    env BASH_ENV="$race_log_env" \
+        BRM_TEST_SEAM="$race_log_seam" BRM_TEST_HOOK="$race_log_hook" \
+        BRM_TEST_FIRED="$1.fired" BRM_TEST_MODE="$2" BRM_TEST_LOG="$1/deletion.log" \
+        BRM_TEST_TARGET="$1.target" BRM_TEST_ORIGINAL="$TEST_WORK_DIR/race-sibling/sibling-race.txt" \
+        BRM_TEST_TRASHED="$TEST_TRASH_DIR/race-sibling/sibling-race.txt__20261029_000000_000000001" \
+        BETTER_RM_STATE_DIR="$1" "$BETTER_RM" "$3" 2>"$1.err" </dev/null || RACE_LOG_STATUS=$?
+}
+
+test_item "日誌還不存在時，另一個 better-rm 搶先建好並寫進的紀錄不會被截掉"
+# 狀態目錄先建好，log_deletion 才不會走建目錄那一支；兩筆紀錄都要還原得回來，而且這邊不能
+# 印出建立或寫入日誌失敗的警告：別人建好的日誌是合格的，應該照樣 append。
+# The state dir exists up front so log_deletion skips the mkdir branch. Both records must
+# restore, and no create/write warning may appear: the log the sibling created is a bound
+# log and is appended to as usual.
+race_record_state="$TEST_WORK_DIR/race-record-state"
+mkdir -p "$race_record_state" "$TEST_TRASH_DIR/race-sibling" race-restore
+printf '%s\n' "SIBLING CONTENT" > "$TEST_TRASH_DIR/race-sibling/sibling-race.txt__20261029_000000_000000001"
+printf '%s\n' "RACE CONTENT" > race-record.txt
+race_log_run "$race_record_state" record race-record.txt
+race_record_status=$RACE_LOG_STATUS
+race_sibling_restore=0
+(cd race-restore && BETTER_RM_STATE_DIR="$race_record_state" "$BETTER_RM" --restore sibling-race.txt \
+    >/dev/null 2>&1 </dev/null) || race_sibling_restore=$?
+race_own_restore=0
+(cd race-restore && BETTER_RM_STATE_DIR="$race_record_state" "$BETTER_RM" --restore race-record.txt \
+    >/dev/null 2>&1 </dev/null) || race_own_restore=$?
+if [ "$race_log_seam_count" = "1" ] && [ -e "$race_record_state.fired" ] &&
+   [ "$race_record_status" -eq 0 ] && [ ! -e race-record.txt ] &&
+   ! grep -qE 'Failed to (create|write to) deletion log' "$race_record_state.err" &&
+   [ "$race_sibling_restore" -eq 0 ] &&
+   [ "$(cat race-restore/sibling-race.txt 2>/dev/null)" = "SIBLING CONTENT" ] &&
+   [ "$race_own_restore" -eq 0 ] &&
+   [ "$(cat race-restore/race-record.txt 2>/dev/null)" = "RACE CONTENT" ]; then
+    test_pass "搶先寫進的紀錄留著，兩筆都還原得回來，也沒有多餘的警告"
+else
+    test_fail "另一個 better-rm 搶先建好日誌時，紀錄不見了或多了警告（SEAM 命中=${race_log_seam_count}；hook 觸發=$([ -e "$race_record_state.fired" ] && echo yes || echo no)；刪除 exit=${race_record_status}；還原別人那筆 exit=${race_sibling_restore}；還原自己那筆 exit=${race_own_restore}）"
+fi
+
+test_item "日誌還不存在時，空窗裡被放上的斷掉 symlink 不會被沿著建出 target"
+# 把 `>` 換成 `>>` 也不會截掉紀錄，但它和 `>` 一樣會沿著斷掉的 symlink 把 target 建出來（上面
+# 那一列「斷掉的 symlink」只在檢查之前就放好連結時有效）。建檔失敗後的判斷必須再驗一次綁定：
+# 不合格就照舊警告並停止記錄，刪除本身仍然成功。
+# Switching `>` to `>>` would avoid the truncation too, but like `>` it follows a
+# dangling symlink and creates the target (the dangling-symlink row above covers only a
+# link planted before the check). After a failed create the binding has to be checked
+# again: when it fails, warn and stop logging as before, and the removal still succeeds.
+race_link_state="$TEST_WORK_DIR/race-link-state"
+mkdir -p "$race_link_state"
+printf '%s\n' "LINK RACE CONTENT" > race-link.txt
+race_log_run "$race_link_state" symlink race-link.txt
+if [ "$race_log_seam_count" = "1" ] && [ -e "$race_link_state.fired" ] &&
+   [ "$RACE_LOG_STATUS" -eq 0 ] && [ ! -e race-link.txt ] && verify_in_trash "race-link.txt" &&
+   [ ! -e "$race_link_state.target" ] && [ -L "$race_link_state/deletion.log" ] &&
+   grep -q 'Failed to create deletion log' "$race_link_state.err"; then
+    test_pass "空窗裡的斷掉 symlink 沒有被跟隨，警告照舊、刪除仍成功"
+else
+    test_fail "空窗裡的斷掉 symlink 被跟隨或沒有警告（SEAM 命中=${race_log_seam_count}；hook 觸發=$([ -e "$race_link_state.fired" ] && echo yes || echo no)；exit=${RACE_LOG_STATUS}；target 被建立=$([ -e "$race_link_state.target" ] && echo yes || echo no)）"
+fi
+
 test_item "KNOWN-RESIDUALS.md 的三條與程式碼事實仍然對得上（雙向釘）"
 # 為什麼需要：這三項是刻意不修的既有殘留，前四輪 review 每一輪都重新推導了一次。
 # 光把理由寫進 md 擋不住第五次——文字會爛。所以這裡兩邊都釘：文字不見了會紅，
@@ -2299,6 +2411,106 @@ if [ "$hint_status" -eq 1 ] &&
     test_pass "對不到的路徑寫法照舊找不到、什麼都沒動，提示的那一筆正是用名字還原得到的那一筆"
 else
     test_fail "路徑寫法對不到時的行為不對（exit=${hint_status}；提前還原=${hint_restored_early}；無紀錄名稱 exit=${nohint_status}；用名字還原 exit=${byname_status}；訊息=$(printf '%s' "$hint_out" | tr -d '\033' | tr '\n' ' ')）"
+fi
+
+test_item "--restore 的 parent 也已刪掉時，從最近存在的祖先解析寫法（經過連結的絕對路徑、兩層、../）"
+# BR-1（2026-10-29）：上面兩列的寫法 parent 都還在，所以 resolve_restore_operand 往上找最近存在
+# 祖先的那段迴圈從沒做過決定：把它換成 `return 1`、或把 rest 的接法顛倒，整套照樣綠（實測）。
+# 這裡先刪檔、再刪它的 parent（`rm f; rm -r dir` 這個常見順序），再用經過自建連結的絕對路徑與
+# ../ 寫法還原：parent 已經不在，只有往上走的那段能解析出刪除端記下的實體路徑。兩層都不在的
+# 那一筆釘的是 rest 的接法順序：只少一層時，接反了也對得上。
+# BR-1 (2026-10-29): every spelling in the two rows above has an existing parent, so the
+# nearest-existing-ancestor walk in resolve_restore_operand never decided anything:
+# replacing it with `return 1`, or reversing how `rest` is joined, left the suite green
+# (measured). Here the file is deleted and then its parent (the common `rm f; rm -r dir`
+# order), and it is restored by an absolute spelling through a link the row makes itself
+# and by a ../ spelling: with the parent gone, only the walk can produce the physical path
+# the delete side recorded. The case with two levels gone pins the join order of `rest`:
+# with one level missing, a reversed join still matches.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+walk_root="$TEST_WORK_DIR/walk"
+mkdir -p "$walk_root/real/c" "$walk_root/real/a/b" "$walk_root/up/x" "$walk_root/cwd/sub"
+printf '%s\n' "G CONTENT" > "$walk_root/real/c/g.txt"
+printf '%s\n' "F CONTENT" > "$walk_root/real/a/b/f.txt"
+printf '%s\n' "U CONTENT" > "$walk_root/up/x/u.txt"
+ln -s real "$walk_root/lnk"
+walk_ok=1
+walk_detail=""
+"$BETTER_RM" "$walk_root/lnk/c/g.txt" >/dev/null 2>&1
+"$BETTER_RM" -r "$walk_root/lnk/c" >/dev/null 2>&1
+"$BETTER_RM" "$walk_root/lnk/a/b/f.txt" >/dev/null 2>&1
+"$BETTER_RM" -r "$walk_root/lnk/a" >/dev/null 2>&1
+(cd "$walk_root/cwd/sub" && "$BETTER_RM" ../../up/x/u.txt >/dev/null 2>&1)
+(cd "$walk_root/cwd/sub" && "$BETTER_RM" -r ../../up/x >/dev/null 2>&1)
+# 前提：三個 parent 都真的不在了，否則這一列根本沒走到往上找的那段。
+# Precondition: all three parents are really gone, or the walk is never reached.
+if [ -e "$walk_root/real/c" ] || [ -e "$walk_root/real/a" ] || [ -e "$walk_root/up/x" ]; then
+    walk_ok=0
+    walk_detail="$walk_detail [parent 還在]"
+fi
+walk_status=0
+(cd "$walk_root/cwd" && "$BETTER_RM" --restore "$walk_root/lnk/c/g.txt" >/dev/null 2>&1 </dev/null) ||
+    walk_status=$?
+if [ "$walk_status" -ne 0 ] || [ "$(cat "$walk_root/cwd/g.txt" 2>/dev/null)" != "G CONTENT" ]; then
+    walk_ok=0
+    walk_detail="$walk_detail [<abs>/lnk/c/g.txt: exit=$walk_status]"
+fi
+walk_status=0
+(cd "$walk_root/cwd" && "$BETTER_RM" --restore "$walk_root/lnk/a/b/f.txt" >/dev/null 2>&1 </dev/null) ||
+    walk_status=$?
+if [ "$walk_status" -ne 0 ] || [ "$(cat "$walk_root/cwd/f.txt" 2>/dev/null)" != "F CONTENT" ]; then
+    walk_ok=0
+    walk_detail="$walk_detail [<abs>/lnk/a/b/f.txt: exit=$walk_status]"
+fi
+walk_status=0
+(cd "$walk_root/cwd/sub" && "$BETTER_RM" --restore ../../up/x/u.txt >/dev/null 2>&1 </dev/null) ||
+    walk_status=$?
+if [ "$walk_status" -ne 0 ] || [ "$(cat "$walk_root/cwd/sub/u.txt" 2>/dev/null)" != "U CONTENT" ]; then
+    walk_ok=0
+    walk_detail="$walk_detail [../../up/x/u.txt: exit=$walk_status]"
+fi
+if [ "$walk_ok" -eq 1 ]; then
+    test_pass "parent 已刪掉時，經過連結的絕對路徑（一層、兩層）與 ../ 寫法都還原成功"
+else
+    test_fail "parent 已刪掉時，刪除時用的路徑寫法還原不回來:${walk_detail}"
+fi
+
+test_item "同一個名字有兩筆紀錄時，路徑寫法對不到的提示說的是最新那一筆"
+# BR-1（2026-10-29）：上面那列的 hint.txt 只有一筆紀錄，所以讓提示只記最新那一筆的
+# `[ -z "$hint_original" ]` 拿掉也照樣綠（實測：拿掉後提示改說最舊的那一筆，而用名字還原拿到的
+# 仍是最新那一筆，提示指向的不是會被還原的那一筆）。這裡同一個名字先後從兩個資料夾刪掉。
+# BR-1 (2026-10-29): hint.txt in the row above has a single record, so dropping the
+# `[ -z "$hint_original" ]` guard that keeps the NEWEST record for the hint left the suite
+# green (measured: the hint then names the oldest record while a restore by the name still
+# takes the newest one, so the hint names a record that is not the one restored). Here one
+# name is deleted from two directories, one after the other.
+setup
+cd "$TEST_WORK_DIR" || exit 1
+mkdir -p older newer other
+printf '%s\n' "OLDER CONTENT" > older/twin.txt
+printf '%s\n' "NEWER CONTENT" > newer/twin.txt
+twin_older="$(cd older && pwd -P)/twin.txt"
+twin_newer="$(cd newer && pwd -P)/twin.txt"
+"$BETTER_RM" older/twin.txt >/dev/null 2>&1
+"$BETTER_RM" newer/twin.txt >/dev/null 2>&1
+twin_status=0
+twin_out=$("$BETTER_RM" --restore other/twin.txt 2>&1 </dev/null) || twin_status=$?
+twin_restored_early=no
+if [ -e twin.txt ] || [ -e other/twin.txt ]; then
+    twin_restored_early=yes
+fi
+twin_byname_status=0
+"$BETTER_RM" --restore twin.txt >/dev/null 2>&1 </dev/null || twin_byname_status=$?
+if [ "$twin_status" -eq 1 ] &&
+   [[ "$twin_out" == *"Hint:"* ]] &&
+   [[ "$twin_out" == *"'$twin_newer'"* ]] &&
+   [[ "$twin_out" != *"$twin_older"* ]] &&
+   [ "$twin_restored_early" = no ] &&
+   [ "$twin_byname_status" -eq 0 ] && [ "$(cat twin.txt 2>/dev/null)" = "NEWER CONTENT" ]; then
+    test_pass "提示說的是最新那一筆，用名字還原拿到的也正是那一筆"
+else
+    test_fail "同名兩筆時提示說錯了那一筆（exit=${twin_status}；提前還原=${twin_restored_early}；用名字還原 exit=${twin_byname_status}；訊息=$(printf '%s' "$twin_out" | tr -d '\033' | tr '\n' ' ')）"
 fi
 
 test_item "同名檔案存在時的覆蓋確認 - 選擇否 (n)"
@@ -4305,6 +4517,41 @@ if [ "$prompty_status" -eq 0 ] && \
     test_pass "回答 y 的覆蓋與 -f 一致，舊目的地進垃圾桶且還原得回來"
 else
     test_fail "回答 y 時舊目的地被銷毀 (status=$prompty_status, back=$prompty_back_status)"
+fi
+
+test_item "AGENTS.md 的 --restore 一節與「就位一律 -n」的程式碼事實對得上（雙向釘）"
+# BR-3（2026-10-29）：BR-A-8 的修正改寫了 AGENTS.md 的結束碼一節，同一節開頭的兩段卻還寫著
+# 「就位的 rename 會原子地取代既有檔案或連結、舊目的地由 kernel unlink」與「只有 rename 換不掉的
+# 兩種形狀才讓位」；標示過期的那句註記又擺錯位置，指到的是兩段正確的文字。文字面：那三句不得再
+# 出現。程式碼面：就位那一步仍是 `move_exact -n "$incoming" "$dest_path"`，而且是活碼；哪天改回
+# 會取代的寫法，這一列就紅，AGENTS.md 那一節（連同這一列）必須跟著重寫。
+# BR-3 (2026-10-29): BR-A-8's fix rewrote AGENTS.md's exit-contract text, but the same
+# section still opened by saying the publish `rename` replaces an existing file or link
+# atomically with the kernel unlinking the old destination, and that only the two shapes
+# rename cannot replace are set aside; the note marking that text stale sat under the two
+# correct paragraphs instead. Doc side: those three sentences must not come back. Code
+# side: the publish is still `move_exact -n "$incoming" "$dest_path"` in live code; if it
+# ever goes back to a replacing move this row turns red, and the section (and this row)
+# has to be rewritten with it.
+agents_doc="$SCRIPT_DIR/AGENTS.md"
+agents_problems=""
+if [ ! -f "$agents_doc" ]; then
+    agents_problems="AGENTS.md 不存在;"
+else
+    for agents_stale in 'the kernel unlinks the old destination' \
+                        'In both shapes the destination is cleared' \
+                        'predate `60c2efa`'; do
+        if grep -qF -- "$agents_stale" "$agents_doc"; then
+            agents_problems="$agents_problems 過期的說法[$agents_stale]還在 AGENTS.md;"
+        fi
+    done
+fi
+grep -v '^[[:space:]]*#' "$BETTER_RM" | grep -qF 'move_exact -n "$incoming" "$dest_path"' ||
+    agents_problems="$agents_problems 就位那一步已不是活碼裡的 move_exact -n（AGENTS.md 的 --restore 一節要跟著重寫）;"
+if [ -z "$agents_problems" ]; then
+    test_pass "AGENTS.md 不再說就位會取代既有物件，程式碼的就位仍是 -n"
+else
+    test_fail "AGENTS.md 的 --restore 一節與程式碼不同步:$agents_problems"
 fi
 
 test_item "含 | 的檔名可完整刪除並還原"
