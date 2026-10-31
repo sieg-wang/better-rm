@@ -337,10 +337,31 @@ log_deletion() {
     # create its target. When the create fails the binding is checked again: a pass means
     # a sibling just created a bound log, which is appended to as usual; a fail warns as
     # before.
+    # L2-BR-1（2026-11-01）：建檔與寫表頭拆成兩步。表頭原本寫在建檔的那個 `>` 上，那個 fd 不是
+    # O_APPEND：檔案一建好，另一個 better-rm 就看得到一份合格的日誌、用 `>>` 把紀錄 append 到
+    # 檔尾，而這邊後面的表頭行從自己的 offset 繼續寫，正好蓋掉那筆紀錄（--restore 答 "No
+    # matching deletion record"）。現在由 `: >` 在 noclobber 下獨佔建檔，表頭改用 `>>`；與別人的
+    # 紀錄交錯也無妨，因為讀日誌時任何位置的 `#` 行都會被略過。`|| exit 1` 不能省：建檔失敗（別人
+    # 搶先建好，或空窗裡被放上斷掉的 symlink）時，`>>` 會沿著 symlink 把 target 建出來，所以失敗
+    # 就直接離開 subshell，交給後面的綁定檢查。`>>` 以路徑重開的那一刻，與下面 append 紀錄時一樣
+    # 屬於 KNOWN-RESIDUALS R1 的窗口，不是新的一類。
+    # L2-BR-1 (2026-11-01): the create and the header are two steps. The header used to be
+    # written on the creating `>` itself, an fd without O_APPEND: as soon as the file
+    # existed a sibling better-rm saw a bound log and appended its record at the end with
+    # `>>`, and the header lines still to come here kept writing from their own offset, on
+    # top of that record (--restore then answered "No matching deletion record"). Now
+    # `: >` under noclobber makes the exclusive create and the header goes through `>>`;
+    # interleaving with a sibling's record is harmless because the log reader skips `#`
+    # lines anywhere. The `|| exit 1` is load-bearing: when the create fails (a sibling
+    # created the log first, or a dangling symlink was planted in the window) `>>` would
+    # follow the link and create its target, so a failed create leaves the subshell at
+    # once and the binding check after it decides. Reopening the path for `>>` is the same
+    # path-based window as the record append below (KNOWN-RESIDUALS R1), not a new kind.
     if [ ! -f "$log_file" ]; then
         if ! (
             umask 077
             set -C
+            : > "$log_file" || exit 1
             {
                 echo "# Better-RM Deletion Log"
                 echo "# 更好的 RM 刪除日誌"
@@ -349,7 +370,7 @@ log_deletion() {
                 echo '# v2: path fields escape \\ (backslash) \p (pipe) \n (newline) \r (CR) \s (;) \a (&) \g (backtick) \d ($); records without the v2 marker use the legacy 5-field layout'
                 echo '# v2：路徑欄位轉義 \\ 反斜線、\p 直線、\n 換行、\r 歸位、\s 分號、\a 和號、\g 反引號、\d 錢號；沒有 v2 標記的紀錄沿用舊版 5 欄格式'
                 echo "# =============================================================================="
-            } > "$log_file"
+            } >> "$log_file"
         ) 2>/dev/null && ! log_file_is_bound "$log_file"; then
             # 日誌檔案創建失敗，顯示警告但不中斷操作
             # Log file creation failed, show warning but don't interrupt operation

@@ -717,9 +717,9 @@ fi
 # BR-2（2026-10-29）：日誌還不存在時，log_deletion 先看 `[ ! -f ]`，再用 `>` 寫表頭，兩步之間
 # 沒有任何序列化。另一個 better-rm 若在這中間建好日誌並 append 了自己的紀錄，這邊的 `>` 會把它
 # 截回只剩表頭：兩次刪除都 exit 0、沒有警告，那一筆的項目明明在垃圾桶裡，--restore 卻說找不到。
-# 那段空窗裡只跑 builtin（umask、echo），PATH shim 碰不到，所以下面兩列用 xtrace：PS4 在每一個
+# 那段空窗裡只跑 builtin（umask、echo），PATH shim 碰不到，所以下面幾列用 xtrace：PS4 在每一個
 # 被追蹤的命令之前展開一次，到了建立表頭那個 subshell 的 `umask 077` 那一行（建檔之前）就執行
-# hook，由 hook 扮演搶先的那一方。SEAM 必須恰好對到一行，否則 hook 永遠不會觸發，這兩列卻可能
+# hook，由 hook 扮演搶先的那一方。SEAM 必須恰好對到一行，否則 hook 永遠不會觸發，這幾列卻可能
 # 照樣綠。PS4 與 `set -x` 放在 BASH_ENV 檔案裡、不經環境變數傳 PS4：bash 4.4 起以 root 執行時
 # 不從環境繼承 PS4（bash 的 COMPAT 有記載；TEST_README 的 docker 指令就是 root），而非互動的
 # bash 執行腳本時照樣會讀 BASH_ENV。
@@ -728,7 +728,7 @@ fi
 # that creates the log and appends its record in between is truncated back to the header
 # by this `>`: both deletions exit 0 with no warning, and --restore answers "not found"
 # for an item that is in the trash. Only builtins (umask, echo) run inside that window,
-# so no PATH shim reaches it; the two rows below use xtrace instead: PS4 is expanded
+# so no PATH shim reaches it; the rows below use xtrace instead: PS4 is expanded
 # before every traced command, and at the `umask 077` line of the header subshell
 # (before the create) it runs a hook that plays the other party. SEAM must match exactly
 # one line, or the hook never fires and these rows could still pass. PS4 and `set -x`
@@ -746,13 +746,19 @@ EOF
 race_log_hook="$TEST_WORK_DIR/race-log-hook.sh"
 cat > "$race_log_hook" <<'EOF'
 # 只觸發一次：symlink 模式在日誌位置放一個斷掉的連結，record 模式扮演搶先建好日誌、
-# 寫了一筆紀錄的另一個 better-rm。
+# 寫了一筆紀錄的另一個 better-rm，append 模式扮演看到日誌已經存在、像 log_deletion 自己
+# 那樣用 `>>` append 一筆紀錄的另一個 better-rm。
 # Fires once: symlink mode plants a dangling link at the log path, record mode plays
-# a sibling better-rm that created the log and wrote one record.
+# a sibling better-rm that created the log and wrote one record, append mode plays a
+# sibling that found the log already there and appended one record with `>>`, as
+# log_deletion's own record append does.
 [ -e "$BRM_TEST_FIRED" ] && exit 0
 : > "$BRM_TEST_FIRED"
 if [ "$BRM_TEST_MODE" = symlink ]; then
     ln -s "$BRM_TEST_TARGET" "$BRM_TEST_LOG"
+elif [ "$BRM_TEST_MODE" = append ]; then
+    printf '%s | v2 | %s | %s | %s | %s\n' 20261029_000000_000000001 \
+        "$BRM_TEST_ORIGINAL" "$BRM_TEST_TRASHED" nohash file >> "$BRM_TEST_LOG"
 else
     {
         echo "# Better-RM Deletion Log"
@@ -761,14 +767,15 @@ else
     } > "$BRM_TEST_LOG"
 fi
 EOF
-# 用法：race_log_run <state dir> <mode> <要刪的檔案>；結束碼放在 RACE_LOG_STATUS，stderr
-# （含 xtrace）放在 <state dir>.err。
-# Usage: race_log_run <state dir> <mode> <file to delete>; the exit code lands in
-# RACE_LOG_STATUS and stderr (xtrace included) in <state dir>.err.
+# 用法：race_log_run <state dir> <mode> <要刪的檔案> [<SEAM 行號>]；SEAM 省略時是 `umask 077`
+# 那一行。結束碼放在 RACE_LOG_STATUS，stderr（含 xtrace）放在 <state dir>.err。
+# Usage: race_log_run <state dir> <mode> <file to delete> [<SEAM line>]; SEAM defaults to
+# the `umask 077` line. The exit code lands in RACE_LOG_STATUS and stderr (xtrace
+# included) in <state dir>.err.
 race_log_run() {
     RACE_LOG_STATUS=0
     env BASH_ENV="$race_log_env" \
-        BRM_TEST_SEAM="$race_log_seam" BRM_TEST_HOOK="$race_log_hook" \
+        BRM_TEST_SEAM="${4:-$race_log_seam}" BRM_TEST_HOOK="$race_log_hook" \
         BRM_TEST_FIRED="$1.fired" BRM_TEST_MODE="$2" BRM_TEST_LOG="$1/deletion.log" \
         BRM_TEST_TARGET="$1.target" BRM_TEST_ORIGINAL="$TEST_WORK_DIR/race-sibling/sibling-race.txt" \
         BRM_TEST_TRASHED="$TEST_TRASH_DIR/race-sibling/sibling-race.txt__20261029_000000_000000001" \
@@ -824,6 +831,50 @@ if [ "$race_log_seam_count" = "1" ] && [ -e "$race_link_state.fired" ] &&
     test_pass "空窗裡的斷掉 symlink 沒有被跟隨，警告照舊、刪除仍成功"
 else
     test_fail "空窗裡的斷掉 symlink 被跟隨或沒有警告（SEAM 命中=${race_log_seam_count}；hook 觸發=$([ -e "$race_link_state.fired" ] && echo yes || echo no)；exit=${RACE_LOG_STATUS}；target 被建立=$([ -e "$race_link_state.target" ] && echo yes || echo no)）"
+fi
+
+test_item "日誌建好之後、表頭寫完之前，另一個 better-rm 用 >> append 的紀錄不會被表頭蓋掉"
+# L2-BR-1（2026-11-01）：BR-2 讓建檔變成 O_EXCL，但表頭仍寫在建檔的那個 `>` 上，而那個 fd 不是
+# O_APPEND，每一行寫在它自己的 offset。日誌一建好，另一個 better-rm 看到的就是一份合格的日誌，
+# 用 `>>` 把紀錄 append 到檔尾；這邊接下來的表頭行從原本的 offset 繼續寫，正好蓋在那筆紀錄上：
+# 兩次刪除都 exit 0、沒有警告，--restore 卻答 "No matching deletion record"。SEAM 放在表頭第二行
+# （第一行已經寫進去之後），hook 扮演 append 的那一方。表頭也要完整：建檔之後若仍用 `>` 寫表頭，
+# noclobber 下那一次開檔會失敗、整個表頭消失，而每一筆紀錄照樣還原得回來，所以這一列另外確認表頭還在。
+# L2-BR-1 (2026-11-01): BR-2 made the create O_EXCL, but the header was still written on
+# that creating `>`, an fd without O_APPEND that writes each line at its own offset. Once
+# the log exists a sibling better-rm sees a bound log and appends its record at the end
+# with `>>`; the header lines still to come here keep writing from the old offset, on top
+# of that record. Both deletions exit 0 with no warning, and --restore answers "No
+# matching deletion record". SEAM is the header's second line (after the first one is
+# written) and the hook plays the appending sibling. The header must also be whole: a
+# header still written with `>` after a separate create fails under noclobber and drops
+# the whole header while every record still restores, so this row checks it is there.
+race_header_seam_count=$(grep -c '^                echo "# 更好的 RM 刪除日誌"$' "$BETTER_RM")
+race_header_seam=$(grep -n '^                echo "# 更好的 RM 刪除日誌"$' "$BETTER_RM" | cut -d: -f1)
+race_header_state="$TEST_WORK_DIR/race-header-state"
+mkdir -p "$race_header_state" "$TEST_TRASH_DIR/race-sibling" race-header-restore
+printf '%s\n' "APPENDED SIBLING CONTENT" > "$TEST_TRASH_DIR/race-sibling/sibling-race.txt__20261029_000000_000000001"
+printf '%s\n' "HEADER RACE CONTENT" > race-header.txt
+race_log_run "$race_header_state" append race-header.txt "$race_header_seam"
+race_header_status=$RACE_LOG_STATUS
+race_header_sibling_restore=0
+(cd race-header-restore && BETTER_RM_STATE_DIR="$race_header_state" "$BETTER_RM" --restore sibling-race.txt \
+    >/dev/null 2>&1 </dev/null) || race_header_sibling_restore=$?
+race_header_own_restore=0
+(cd race-header-restore && BETTER_RM_STATE_DIR="$race_header_state" "$BETTER_RM" --restore race-header.txt \
+    >/dev/null 2>&1 </dev/null) || race_header_own_restore=$?
+if [ "$race_header_seam_count" = "1" ] && [ -e "$race_header_state.fired" ] &&
+   [ "$race_header_status" -eq 0 ] && [ ! -e race-header.txt ] &&
+   ! grep -qE 'Failed to (create|write to) deletion log' "$race_header_state.err" &&
+   [ "$(head -n 1 "$race_header_state/deletion.log" 2>/dev/null)" = "# Better-RM Deletion Log" ] &&
+   grep -qxF '# Format: TIMESTAMP | v2 | ORIGINAL_PATH | TRASH_PATH | HASH | FILE_TYPE' "$race_header_state/deletion.log" &&
+   [ "$race_header_sibling_restore" -eq 0 ] &&
+   [ "$(cat race-header-restore/sibling-race.txt 2>/dev/null)" = "APPENDED SIBLING CONTENT" ] &&
+   [ "$race_header_own_restore" -eq 0 ] &&
+   [ "$(cat race-header-restore/race-header.txt 2>/dev/null)" = "HEADER RACE CONTENT" ]; then
+    test_pass "表頭寫到一半時 append 的紀錄留著，兩筆都還原得回來，表頭完整也沒有多餘的警告"
+else
+    test_fail "表頭寫到一半時 append 的紀錄被蓋掉、表頭不完整或多了警告（SEAM 命中=${race_header_seam_count}；hook 觸發=$([ -e "$race_header_state.fired" ] && echo yes || echo no)；刪除 exit=${race_header_status}；還原別人那筆 exit=${race_header_sibling_restore}；還原自己那筆 exit=${race_header_own_restore}）"
 fi
 
 test_item "KNOWN-RESIDUALS.md 的三條與程式碼事實仍然對得上（雙向釘）"
