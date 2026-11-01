@@ -3939,12 +3939,20 @@ const execWrappers = new Map([
   // all take a value, so again nothing to cluster. That synopsis is BSD
   // /usr/sbin/chroot; GNU chroot (`gchroot`) has a DIFFERENT, long-only option
   // set -- `--groups=`, `--userspec=` (both value) and `--skip-chdir` -- and
-  // accepts any unambiguous prefix (`--us x:y`, `--u x:y`, `--g 0` measured RAN
-  // 2026-11-01). newroot is the single leading operand on both, so the value
-  // options must be stepped before it or the command word after newroot is lost.
-  // 這份 synopsis 是 BSD chroot；GNU chroot（`gchroot`）的選項完全不同、只有長選項（`--groups=`/`--userspec=`
-  // 吃值、`--skip-chdir`），且接受不歧義前綴（`--us x:y`、`--u x:y`、`--g 0` 實測 RAN）。兩者 newroot 都是
-  // 單一 leading operand，值選項要先跨過，否則 newroot 後面的命令字會丟失。
+  // accepts any unambiguous prefix. gchroot does NOT run its operand as uid 501:
+  // it exits with EPERM ("cannot change root directory ...: Operation not
+  // permitted") before any exec, so `gchroot ... rm` was not observed to delete.
+  // What WAS measured 2026-11-01 is where gchroot's OPTION PARSING puts the
+  // command word: `--us x:y`, `--u x:y`, `--g 0` reach EPERM (option accepted, so
+  // the value was consumed), while an unknown `--zzz` is rejected first -- that is
+  // what fixes the model, and it holds under sudo, where the privilege is real.
+  // newroot is the single leading operand on both builds, so the value options
+  // must be stepped before it or the command word after newroot is lost.
+  // 這份 synopsis 是 BSD chroot；GNU chroot（`gchroot`）的選項完全不同、只有長選項（`--groups=`/`--userspec=` 吃值、
+  // `--skip-chdir`），且接受不歧義前綴。gchroot 以 uid 501 不會執行操作元：exec 之前就以 EPERM 退出，所以沒有觀察到
+  // `gchroot ... rm` 真的刪除。2026-11-01 實測到的是它「選項解析把命令字放在哪」：`--us x:y`、`--u x:y`、`--g 0` 都走到
+  // EPERM（選項被接受、值被吃掉），未知的 `--zzz` 則先被拒——這才是修正模型的依據，在 sudo 下（權限為真）也成立。
+  // 兩者 newroot 都是單一 leading operand，值選項要先跨過，否則 newroot 後面的命令字會丟失。
   ['chroot', {
     valueOptions: ['-G', '-g', '-u'],
     clusteredValue: null,
@@ -4099,9 +4107,12 @@ const wrapperCommands = new Set([
 // This adds NO new program to the model -- it only lets the existing model see
 // the second spelling, mapping the g-name to the plain name BEFORE every
 // table/set lookup.
+// gtime (gnu-time) maps to `time` for the same reason: the guard models `time`
+// (a wrapper whose operand it runs), gtime is unambiguously that program, and the
+// `time` reserved word is spelled `time`, never `gtime`, so the collision that
+// keeps the bare word subtle does not arise for the g-name. gnu-time is not
+// installed here either, and the gfind/gxargs reasoning covers that.
 // Deliberately NOT mapped, and why:
-//   - gtime (gnu-time): `time` is a bash reserved word as well as a program, and
-//     gnu-time is not installed here to measure; it stays unmapped.
 //   - gecho / gprintf / gtrue / gfalse: these ARE echo/printf/true/false, but an
 //     UNRECOGNISED producer is REFUSED (fail-closed), so leaving them out
 //     over-refuses `gecho x | bash` rather than missing anything -- the safe
@@ -4116,26 +4127,32 @@ const wrapperCommands = new Set([
 // findutils 的，由 Homebrew formula 確認名字、本機未安裝，仍然映射——agent 可以在同一個 session 裡
 // `brew install findutils`，而替不存在的名字映射沒有成本（就像 SYSTEM_DIRS 裡的 /boot）。不新增任何程式，只讓既有
 // 模型看到第二個拼法，在每次查表／查集合之前把 g 名字換成原名。
-// 刻意不映射：gtime（`time` 既是 bash 保留字也是程式，gnu-time 本機未安裝無從實測）、
+// gtime（gnu-time）同樣映射到 `time`：守衛建模 `time`（會跑其操作元的包裝命令），gtime 明確就是那個程式，而 `time`
+// 保留字拼作 `time` 不是 `gtime`，所以讓裸字微妙的那個衝突對 g 名字不存在；gnu-time 本機也未安裝，由 gfind/gxargs 的理由涵蓋。
+// 刻意不映射：
 // gecho／gprintf／gtrue／gfalse（未識別的 producer 一律拒絕＝fail-closed，不映射只會過度拒絕而不會漏）、
 // gmv／gcp／gln／gsed／gstat（mv/cp/ln/sed/stat 這個守衛不建模，規則是不新增程式）。
 const gnuPrefixedNames = new Map([
   ['grm', 'rm'], ['grmdir', 'rmdir'], ['gtimeout', 'timeout'], ['genv', 'env'],
   ['gnice', 'nice'], ['gnohup', 'nohup'], ['gstdbuf', 'stdbuf'], ['gchroot', 'chroot'],
-  ['gfind', 'find'], ['gxargs', 'xargs'],
+  ['gfind', 'find'], ['gxargs', 'xargs'], ['gtime', 'time'],
 ]);
 // The basename of a command word, with a g-prefixed GNU tool mapped to the plain
-// name the guard models. Used where a g-name can hide a removal or a wrapper: the
-// executable walk, the heredoc-carrier walk's transparent-wrapper step, and the
-// coproc test of whether the NEXT word is a command word. Left as path.basename,
-// on purpose: the pipe-target carrier name (no g-name maps to a shell, so it
-// cannot change), the coproc test of whether the word ITSELF is a wrapper
-// (unmapped reads a g-wrapper as a NAME, which only refuses more), and the
-// producer classifier (an unrecognised producer is refused).
-// 命令字的 basename，把 g 前綴 GNU 工具換成守衛建模的原名。只用在 g 名字會藏住刪除或包裝命令的地方：執行檔走訪、
-// heredoc carrier 走訪的透明包裝步驟、coproc 判斷「下一個字」是不是命令字。刻意保留 path.basename 的：管線接收端
-// 的 carrier 名字（沒有 g 名字對應到 shell，改了也不會變）、coproc 判斷「這個字本身」是不是包裝命令（不映射會把 g
-// 包裝讀成 NAME，只會多擋）、以及 producer 分類（認不得的 producer 一律拒絕）。
+// name the guard models. Used wherever a g-name can hide a removal or a wrapper:
+// the executable walk, the heredoc-carrier walk's transparent-wrapper step, and
+// BOTH coproc tests -- whether the NEXT word is a command word and whether the
+// word ITSELF is a wrapper. The second coproc test was wrong at 864c31a with
+// path.basename: reading `coproc grm F=1 -rf /etc` as a coprocess NAME `grm`
+// skipped it, but bash 5.3 runs `grm F=1 -rf /etc` as a simple command (measured),
+// so the removal was lost -- mapping makes `grm` resolve to `rm` and stay the
+// command word. Left as path.basename, on purpose: the pipe-target carrier name
+// (no g-name maps to a shell, so it cannot change) and the producer classifier
+// (an unrecognised producer is already refused, so a g-name there over-refuses).
+// 命令字的 basename，把 g 前綴 GNU 工具換成守衛建模的原名。只要 g 名字會藏住刪除或包裝命令的地方都用它：執行檔走訪、
+// heredoc carrier 走訪的透明包裝步驟、以及 coproc 的「下一個字」與「這個字本身」兩個判斷。第二個判斷在 864c31a 用
+// path.basename 是錯的：把 `coproc grm F=1 -rf /etc` 讀成 coprocess NAME `grm` 會跳過它，但 bash 5.3 把
+// `grm F=1 -rf /etc` 當 simple command 執行（實測），刪除就丟了——映射後 `grm` 解析成 `rm`、維持命令字。刻意保留
+// path.basename 的：管線接收端的 carrier 名字（沒有 g 名字對應到 shell）與 producer 分類（認不得的 producer 本就拒絕）。
 const commandName = (word) => {
   const base = path.basename(word);
   return gnuPrefixedNames.get(base) ?? base;
@@ -4167,7 +4184,11 @@ function longOptionMatches(option, longOptions) {
 // 'none' (it is one word), or 'unknowable'. An attached value (`--kill-after=1`,
 // `--k=1`) matches no name -- no listed name contains `=` -- so it is 'none' and
 // consumes nothing more, which is right: the value is inside the word. An unknown
-// token is 'none' too: the real tool rejects it and runs nothing. An AMBIGUOUS
+// token is 'none' too, as getopt_long sees it: a getopt_long tool rejects it and
+// runs nothing. That is NOT true of every wrapper -- BSD /usr/bin/env has no long
+// options and reads an "unknown" `--X...` as -i plus a short cluster, running the
+// command after it -- which is why the env branch computes that second reading
+// itself (envShortAction) instead of trusting this 'none'. An AMBIGUOUS
 // prefix whose candidates ALL take a value, or ALL take none, steps the same way
 // under every reading (`--v` is verbose|version to GNU timeout: 'none'), so it
 // gets that step. Only a prefix that could be a value option OR a no-value one is
@@ -4194,6 +4215,30 @@ function longOptionArity(option, longOptions, valueLongOptions) {
   const valued = matches.filter((full) => valueLongOptions.includes(full)).length;
   if (valued === 0) return 'none';
   return valued === matches.length ? 'value' : 'unknowable';
+}
+
+// BSD env's reading of ONE short-option token (`/usr/bin/env` is the only `env`
+// on PATH here). env does not use getopt_long: a leading `-` is its obsolete `-i`,
+// and it then parses the rest as a short cluster, so `-un` is `-u` with the
+// ATTACHED value `n` (the NEXT word is the command) while a bare `-u` takes the
+// next word as its value. The value letters are `-u`/`-P`/`-C`/`-a`, and `-S`
+// introduces a split string, attached (`-Sxxx`) or in the next word (`-S`). This
+// is the one definition of that reading: the env branch uses it for real short
+// tokens AND for the BSD alternate reading of a `--...` token (there a `--X...`
+// token is `-` (its -i) plus the cluster `-X...`, so the token minus one dash).
+// Measured 2026-11-01 with `/bin/echo RAN`: `env --u FOO <cmd>` ran <cmd> (FOO is
+// -u's value), `env --un <cmd>` ran <cmd> (n is -u's attached value), contradicting
+// the earlier "BSD env rejects long options" note.
+// BSD env 讀「一個短選項 token」的方式（本機 PATH 上只有 /usr/bin/env）。env 不用 getopt_long：開頭的 `-` 是它過時的
+// `-i`，其餘當短 cluster 解析，所以 `-un` 是 `-u` 帶相連值 `n`（下一個字是命令），而裸 `-u` 吃下一個字當值。值字母是
+// `-u`/`-P`/`-C`/`-a`，`-S` 帶出拆解字串（相連 `-Sxxx` 或在下一個字 `-S`）。這份讀法只有一個定義：env 分支用它處理真的短
+// token，也用它當 `--...` token 的 BSD 另一種讀法（`--X...` 是 `-`（它的 -i）加上 cluster `-X...`，即 token 去掉一個 dash）。
+// 2026-11-01 用 `/bin/echo RAN` 實測：`env --u FOO <cmd>` 跑了 <cmd>，`env --un <cmd>` 跑了 <cmd>，推翻了先前「BSD env 拒絕長選項」的註記。
+function envShortAction(token) {
+  if (/^-[iv0]*S$/.test(token)) return { kind: 'split-sep' };
+  if (/^-[iv0]*S.+/.test(token)) return { kind: 'split-attached', str: token.replace(/^-[iv0]*S/, '') };
+  if (/^-[iv0]*[uPCa]$/.test(token)) return { kind: 'value-next' };
+  return { kind: 'flag' };
 }
 
 // `readingBudget` is the R7-a second-reading budget ({ alternateReadings,
@@ -5197,26 +5242,26 @@ function commandTargetsScanOneReading(
       }
 
       if (executable === 'env') {
-        const optionsWithValue = new Set([
-          '-u', '--unset', '-C', '--chdir', '-S', '--split-string', '-a', '--argv0', '-P',
-        ]);
         // GNU env's long options (coreutils 9.12 `genv --help`), with the ones that
-        // take a SEPARATE next word. `--split-string` takes one too, and the branch
-        // below routes it to the splitter first (env re-parses that value as its
-        // own argv); `--block-signal`/`--default-signal`/`--ignore-signal` take an
-        // OPTIONAL, ATTACHED value only, so they are not in the value list.
-        // getopt_long accepts any unambiguous prefix of each, which is why the `--`
-        // branch below resolves the token instead of matching the full spelling
-        // (measured 2026-11-01: `genv --ch /tmp`, `--un FOO`, `--e /dev/null`,
-        // `--spl '<cmd>'` all ran the command; BSD env rejects long options).
+        // take a SEPARATE next word. `--split-string` takes one too, and the `--`
+        // branch below routes it to the splitter first (env re-parses that value as
+        // its own argv); `--block-signal`/`--default-signal`/`--ignore-signal` take
+        // an OPTIONAL, ATTACHED value only, so they are not in the value list. GNU
+        // env's getopt_long accepts any unambiguous prefix of each. The claim that
+        // "BSD env rejects long options" was WRONG: BSD /usr/bin/env, the only env
+        // on PATH here, reads a `--...` token as `-i` plus a short cluster and runs
+        // the command after it (measured 2026-11-01: `env --u FOO <cmd>`,
+        // `env --un <cmd>`, `env --P /bin <cmd>` all ran <cmd>). The `--` branch
+        // below reads the token BOTH ways and fails closed when they disagree.
         // `--split-string` in the value list only decides AMBIGUITY (the splitter
         // is chosen first), and no listed prefix makes it ambiguous, so dropping it
         // is an EQUIVALENT mutant today; it stays because it does take a value.
         // 值清單裡的 `--split-string` 只影響「歧義」判定（拆解器先被選走），而沒有任何前綴讓它歧義，所以拿掉它今天是等價
         // 突變；留著是因為它確實吃值。
-        // GNU env 的長選項（`genv --help`），標出吃「獨立值」的那些。`--split-string` 也吃，下面的分支先把它交給拆解器
-        // （env 把值當自己的 argv 再解析一次）；`--block-signal`/`--default-signal`/`--ignore-signal` 只吃相連的選填值，
-        // 故不列為吃值。getopt_long 接受每個的不歧義前綴，所以下面的 `--` 分支是「解析 token」而不是比完整拼法。
+        // GNU env 的長選項（`genv --help`），標出吃「獨立值」的那些。`--split-string` 也吃，下面 `--` 分支先交給拆解器；
+        // `--block-signal` 等只吃相連選填值，故不列為吃值。GNU env 的 getopt_long 接受每個的不歧義前綴。先前「BSD env 拒絕
+        // 長選項」是錯的：本機 PATH 上唯一的 BSD /usr/bin/env 把 `--...` 讀成 `-i` 加短 cluster、執行其後的命令（實測
+        // `env --u FOO <cmd>`、`env --un <cmd>`、`env --P /bin <cmd>` 都跑了 <cmd>）。下面 `--` 分支兩種讀法都讀、分歧就 fail closed。
         const ENV_LONG_OPTIONS = [
           '--argv0', '--block-signal', '--chdir', '--debug', '--default-signal',
           '--env0-from', '--help', '--ignore-environment', '--ignore-signal',
@@ -5259,53 +5304,91 @@ function commandTargetsScanOneReading(
             i += 1;
             break;
           } else if (option.startsWith('--') && option.length > 2) {
-            // A GNU env long option, resolved by prefix (`--ch`, `--un`, `--spl`).
-            // A token that can only mean `--split-string` feeds the SAME splitter
-            // the short `-S` does; one that resolves to a value option takes the
-            // next word; an attached `=value`, the no-value options, the
-            // optional-value signal options and an unknown token consume nothing
-            // more (the real tool rejects an unknown one and runs nothing). The
-            // name before `=` is what is resolved, so `--spl=<cmd>` is the splitter
-            // too. See longOptionArity() for the 'unknowable' case.
-            // GNU env 的長選項，用前綴解析（`--ch`、`--un`、`--spl`）。只可能是 `--split-string` 的 token 走與 `-S`
-            // 同一個拆解器；解析到吃值選項的吃下一個字；相連 `=值`、不吃值與選填值的訊號選項、未知 token 不再多吃（真實
-            // 工具拒絕未知的、什麼都不跑）。解析的是 `=` 前面的名字，所以 `--spl=<cmd>` 也走拆解器。'unknowable' 見
-            // longOptionArity()。
+            // A `--...` env token is read TWO ways, and the command word is scanned
+            // under both. GNU env (genv) resolves it as a long option by prefix:
+            // `--spl` feeds the splitter, `--ch`/`--un`/`--argv0`/`--env0-from`
+            // take the next word, an attached `=value` and the no-value/unknown
+            // options take none. But the ONLY `env` on PATH here is BSD
+            // /usr/bin/env, which has no long options: it reads the leading `-` as
+            // its obsolete -i and the rest as a short cluster, so `--un` is `-u`
+            // with the attached value `n` and the NEXT word is the command -- which
+            // GNU would have swallowed. That regression (767a2fe) allowed
+            // `env --un rm -rf /etc`. So the BSD reading is computed too, from the
+            // token minus one dash, through the same envShortAction() the real
+            // short tokens use. Each reading's split string is scanned; when the
+            // two place the command word differently (or one splits and the other
+            // does not) the walk FAILS CLOSED -- unknowable command word, every
+            // later word judged as a removal operand -- and steps the earlier of
+            // the two, so neither reading's command word is stepped over.
+            // `--...` 的 env token 用兩種方式讀，命令字在兩種下都被掃。GNU env（genv）用前綴把它解析成長選項；但本機 PATH
+            // 上唯一的 env 是 BSD /usr/bin/env，它沒有長選項：開頭 `-` 當它過時的 -i、其餘當短 cluster，所以 `--un` 是 `-u`
+            // 帶相連值 `n`、下一個字才是命令——而 GNU 會把那個字吃掉。那個回歸（767a2fe）放行了 `env --un rm -rf /etc`。
+            // 所以 BSD 的讀法也算出來（token 去掉一個 dash，走真短 token 用的同一個 envShortAction()）。兩種讀法的拆解字串
+            // 都掃；兩者把命令字放在不同位置（或一邊拆、一邊不拆）時，走訪 fail closed——命令字不可知、之後每個字都當刪除
+            // 操作元判——並步進較早的那個，兩種讀法的命令字都不會被跨過。
             const eq = option.indexOf('=');
             const name = eq === -1 ? option : option.slice(0, eq);
             const matches = longOptionMatches(name, ENV_LONG_OPTIONS);
-            const takesValue = longOptionTakesValue(name, ENV_LONG_OPTIONS, ENV_LONG_VALUE_OPTIONS);
-            if (matches.length === 1 && matches[0] === '--split-string') {
-              if (eq === -1) {
-                envSplitStringTargets(words[i + 1] || '', envArgvAfter(i + 2));
-                i += 2;
-              } else {
-                envSplitStringTargets(option.slice(eq + 1), envArgvAfter(i + 1));
-                i += 1;
-              }
-            } else if (eq === -1 && takesValue) {
-              i += 2;
-            } else {
-              i += 1;
+            const gnuSplitSep = matches.length === 1 && matches[0] === '--split-string' && eq === -1;
+            const gnuSplitAttached = matches.length === 1 && matches[0] === '--split-string' && eq !== -1;
+            const gnuSplits = gnuSplitSep || gnuSplitAttached;
+            const gnuValue = eq === -1 && longOptionTakesValue(name, ENV_LONG_OPTIONS, ENV_LONG_VALUE_OPTIONS);
+            const gnuNext = (gnuSplitSep || gnuValue) ? i + 2 : i + 1;
+            const bsd = envShortAction(`-${option.slice(2)}`);
+            const bsdSplits = bsd.kind === 'split-sep' || bsd.kind === 'split-attached';
+            const bsdNext = (bsd.kind === 'split-sep' || bsd.kind === 'value-next') ? i + 2 : i + 1;
+            if (gnuSplitSep) envSplitStringTargets(words[i + 1] || '', envArgvAfter(i + 2));
+            else if (gnuSplitAttached) envSplitStringTargets(option.slice(eq + 1), envArgvAfter(i + 1));
+            if (bsdSplits && !(gnuSplits && gnuNext === bsdNext)) {
+              if (bsd.kind === 'split-sep') envSplitStringTargets(words[i + 1] || '', envArgvAfter(i + 2));
+              else envSplitStringTargets(bsd.str, envArgvAfter(i + 1));
             }
-          } else if (option === '-S') {
-            envSplitStringTargets(words[i + 1] || '', envArgvAfter(i + 2));
-            i += 2;
-          } else if (option.startsWith('-S') && option.length > 2) {
-            envSplitStringTargets(option.slice(2), envArgvAfter(i + 1));
-            i += 1;
-          } else if (/^-[iv]*S.+/.test(option)) {
-            envSplitStringTargets(option.replace(/^-[iv]*S/, ''), envArgvAfter(i + 1));
-            i += 1;
-          } else if (/^-[iv]*S$/.test(option)) {
-            envSplitStringTargets(words[i + 1] || '', envArgvAfter(i + 2));
-            i += 2;
-          } else if (/^-[iv]*[uPCa]$/.test(option)) {
-            i += 2;
-          } else if (optionsWithValue.has(option)) {
-            i += 2;
+            if (gnuNext === bsdNext && gnuSplits === bsdSplits) {
+              i = gnuNext;
+            } else {
+              // The readings put the command word one position apart (one consumes
+              // the token's value as a separate word, the other does not), so the
+              // command is at `lo` under one reading and at `hi` under the other,
+              // and the word BETWEEN them is an option-value, not a target. Both
+              // command positions are covered WITHOUT scanning that value:
+              //  - `i` is left at `lo`, so the ordinary walk resolves the word
+              //    there -- it reaches a carrier's heredoc or piped script
+              //    (`env --un bash <<EOF`, `... | env --un bash`) that only the
+              //    carrier machinery reads, and an rm there, exactly as usual;
+              //  - the tail from `hi` is scanned as removal operands, catching a
+              //    removal the OTHER reading puts there even when `lo` was a path
+              //    whose basename is empty (`env --C / rm -rf /etc`: `lo` is `/`,
+              //    which resolves to no executable, so the walk alone would miss).
+              // The value at `lo` is never operand-scanned, so a benign command
+              // behind a value option stays allowed (`env --P /bin ls -l /tmp`).
+              // All measured 2026-11-01.
+              // 兩種讀法把命令字放在相鄰一格（一個把 token 的值當獨立字吃掉、一個沒有），命令在一種讀法下在 `lo`、另一種在 `hi`，
+              // 而兩者之間那個字是選項值、不是目標。兩個命令位置都覆蓋到、又不掃那個值：`i` 停在 `lo`，讓一般走訪解析那裡的字——
+              // 碰到 carrier 的 heredoc／管線腳本（只有 carrier 機制讀得到）與那裡的 rm，一如往常；`hi` 起的尾端當刪除操作元掃，
+              // 連 `lo` 是 basename 為空的路徑（`env --C / rm`：`lo` 是 `/`、解析不出執行檔，單靠走訪會漏）時、另一種讀法放在那裡的
+              // 刪除也抓得到。`lo` 的值永不被當操作元掃，所以值選項後面的良性命令維持放行（`env --P /bin ls -l /tmp`）。
+              const lo = Math.min(gnuNext, bsdNext);
+              const hi = Math.max(gnuNext, bsdNext);
+              for (let k = hi; k < words.length && !operatorAt(k, separators); k += 1) {
+                const w = words[k];
+                if (w === '--') continue;
+                if (/\s/.test(w)) {
+                  if (depth >= 8) targets.push('/');
+                  else targets.push(...nestedScan(w, depth + 1, false, expansionEnv));
+                }
+                if (!w.startsWith('-') || w === '-') targets.push(targetFromWord(w, dynamicExpansions[k], expansionEnv));
+              }
+              i = lo;
+            }
           } else if (option.startsWith('-')) {
-            i += 1;
+            // A real short token, BSD env's own cluster grammar, in one place
+            // (envShortAction) shared with the BSD alternate reading above.
+            // 真的短 token，BSD env 自己的 cluster 文法，與上面 BSD 另一種讀法共用同一處（envShortAction）。
+            const act = envShortAction(option);
+            if (act.kind === 'split-sep') { envSplitStringTargets(words[i + 1] || '', envArgvAfter(i + 2)); i += 2; }
+            else if (act.kind === 'split-attached') { envSplitStringTargets(act.str, envArgvAfter(i + 1)); i += 1; }
+            else if (act.kind === 'value-next') { i += 2; }
+            else { i += 1; }
           } else {
             break;
           }
@@ -5414,6 +5497,20 @@ function commandTargetsScanOneReading(
 
       if (executable === 'time') {
         const optionsWithValue = new Set(['-f', '--format', '-o', '--output']);
+        // GNU time's long options (time(1), the GNU build; `gtime` maps here).
+        // DOCUMENTED, not measured on this Mac -- the same basis as GNU xargs --
+        // because the only `time` here are BSD /usr/bin/time and bash's `time`
+        // keyword, and the acceptor measured that both REJECT a `--` token, so
+        // routing prefixes through longOptionArity() can only over-refuse here and
+        // models GNU time where it runs (Linux CI, or `gtime`). `--format` and
+        // `--output` take a value; `--append`/`--verbose`/`--portability`/`--quiet`/
+        // `--help`/`--version` do not. getopt_long takes any unambiguous prefix.
+        // GNU time 的長選項（GNU build 的 time(1)；`gtime` 映射到這裡）。文件記載、本機未實測——與 GNU xargs 同一個依據：
+        // 本機的 time 只有 BSD /usr/bin/time 與 bash 的 time 保留字，acceptor 實測兩者都拒絕 `--` token，所以在這裡把前綴
+        // 走 longOptionArity() 只會過度拒絕，並在真的會跑 GNU time 的地方（Linux CI 或 `gtime`）建模。`--format`/`--output`
+        // 吃值，其餘不吃；getopt_long 接受不歧義前綴。
+        const longOptions = ['--append', '--format', '--help', '--output', '--portability', '--quiet', '--verbose', '--version'];
+        const longValueOptions = ['--format', '--output'];
         i += 1;
         while (i < words.length && words[i].startsWith('-')) {
           const option = words[i];
@@ -5422,6 +5519,7 @@ function commandTargetsScanOneReading(
             break;
           }
           i += optionsWithValue.has(option) || /^-[ahpqlvV]*[fo]$/.test(option)
+            || longOptionTakesValue(option, longOptions, longValueOptions)
             ? 2
             : 1;
         }
@@ -5481,7 +5579,7 @@ function commandTargetsScanOneReading(
             || /^[A-Za-z_][A-Za-z0-9_]*=/.test(next);
           if (
             opensCompound
-            || (looksLikeCommandWord && !wrapperCommands.has(path.basename(words[i])))
+            || (looksLikeCommandWord && !wrapperCommands.has(commandName(words[i])))
           ) i += 1;
         }
         if (words[i] === '{' || words[i] === '(') i += 1;

@@ -2882,9 +2882,11 @@ assert.ok(wrapperModelChecks >= requiredExecWrapperNames.length + execWrappers.s
 // resolve to a program already in the model (a wrapper, a carrier, or rm/rmdir)
 // so the map adds no new program. Behaviour is exercised by the g-name rows in
 // `blocked`/`allowed`; this pins the DATA so those rows cannot pass for the wrong
-// reason. gfind/gxargs are PRESENT although findutils is not installed here: an
-// agent can install it in the session the guard is judging, so the map cannot
-// depend on what is installed today. gtime stays absent (see the hook).
+// reason. gfind/gxargs/gtime are PRESENT although findutils/gnu-time are not
+// installed here: an agent can install them in the session the guard is judging,
+// so the map cannot depend on what is installed today. gtime maps to `time` -- the
+// reserved word is spelled `time`, never `gtime`, so the bare-word collision does
+// not apply to the g-name.
 // g 前綴 GNU 名字映射，釘住（P-L1-1）。Homebrew 把與 macOS 同名的 GNU coreutils 以 `g` 前綴安裝，每個跑的
 // 都是真正的 GNU 程式（`grm -rf <受保護>` 是永久刪除，不是垃圾桶別名）。走訪拿 basename 比字面名字，於是每個
 // g 名字都看不到（放行）。映射在每次查表前把 g 名字換成守衛已建模的原名。像 SYSTEM_DIRS 一樣釘在這裡：加減一個
@@ -2898,12 +2900,12 @@ assert.ok(wrapperModelChecks >= requiredExecWrapperNames.length + execWrappers.s
   const pinned = [
     ['grm', 'rm'], ['grmdir', 'rmdir'], ['gtimeout', 'timeout'], ['genv', 'env'],
     ['gnice', 'nice'], ['gnohup', 'nohup'], ['gstdbuf', 'stdbuf'], ['gchroot', 'chroot'],
-    ['gfind', 'find'], ['gxargs', 'xargs'],
+    ['gfind', 'find'], ['gxargs', 'xargs'], ['gtime', 'time'],
   ];
   assert.deepStrictEqual([...gnuPrefixedNames.entries()].sort(byKey), pinned.sort(byKey),
     'the g-prefixed GNU name map drifted from the pinned list');
-  assert.ok(!gnuPrefixedNames.has('gtime'),
-    'gtime is deliberately unmapped: `time` is also a bash reserved word and gnu-time was not measured');
+  assert.ok(!gnuPrefixedNames.has('gecho') && !gnuPrefixedNames.has('gprintf'),
+    'the literal emitters stay unmapped: an unrecognised producer is already refused, so mapping would turn refusals into allows');
   // find and xargs have their own branches and are not on wrapperCommands
   // (xargs completes its operands from stdin), so they are named here.
   // find 與 xargs 有自己的分支、不在 wrapperCommands 上（xargs 的操作元由 stdin 補），所以在這裡點名。
@@ -4062,6 +4064,99 @@ allowed.push(
   "echo hi | xargs --rep echo '{}'",
   'printf x | xargs --max 1 ls build',
 );
+
+// ---------------------------------------------------------------------------
+// ACCEPTOR ROUND (986... the acceptor's BLOCK of 864c31a): five more classes.
+// ---------------------------------------------------------------------------
+// (1,2) BSD env's reading of a `--...` token. `/usr/bin/env` -- the only env on
+// PATH here -- has no long options: it reads the leading `-` as its obsolete -i
+// and the rest as a short cluster, so `env --un rm -rf /etc` is `-u` with the
+// attached value `n` and runs `rm`, which GNU's `--unset` would have swallowed.
+// 767a2fe read only GNU's way and allowed these. Each row below has the command
+// (or a carrier, or a split string) right after the token; measured on this Mac
+// 2026-11-01 that BSD env runs it. Red at 197eb2a AND at 767a2fe/864c31a.
+// (1,2) BSD env 對 `--...` token 的讀法。本機 PATH 上唯一的 /usr/bin/env 沒有長選項：開頭 `-` 當它過時的 -i、其餘當短
+// cluster，所以 `env --un rm -rf /etc` 是 `-u` 帶相連值 `n`、會跑 `rm`，而 GNU 的 `--unset` 會把它吃掉。767a2fe 只讀 GNU
+// 那種、放行了這些。下面每列 token 後面緊接命令（或 carrier、或拆解字串）；2026-11-01 實測 BSD env 會跑它。
+blocked.push(
+  'env --un rm -rf /etc',
+  'env --uns rm -rf /etc',
+  'env --unset rm -rf /etc',
+  'env --un bash -c \'rm -rf /etc\'',
+  "env --un bash <<'EOF'\nrm -rf /etc\nEOF",
+  "echo 'rm -rf /etc' | env --un bash",
+  'sudo env --un rm -rf /etc',
+  'env --P /bin rm -rf /etc',
+  'env --iP /bin rm -rf /etc',
+  "env --S 'rm -rf /etc'",
+  "env --iS 'rm -rf /etc'",
+  'env --C / rm -rf /etc',
+  'env --iC / rm -rf /etc',
+  'env --iu FOO rm -rf /etc',
+);
+allowed.push(
+  // Benign twins that must STAY allowed: the word after the token is harmless, or
+  // the option-value is a protected path but the command is benign (the value
+  // must not be scanned as a removal target). cases11 row 10, cases3 row 12.
+  // 必須維持放行的良性雙胞胎：token 後面是無害命令，或選項值是 protected 路徑但命令無害（值不可被當刪除目標掃）。
+  'env --un rm -rf build',
+  'env --un bash -c \'ls -l /tmp\'',
+  'env --P /bin ls -l /tmp',
+  'env --C / ls -l /tmp',
+);
+// (3) coproc, g-name as the word ITSELF. `coproc grm F=1 -rf /etc` is a SIMPLE
+// command (an assignment-shaped word follows, not a compound opener), so bash 5.3
+// runs `grm F=1 -rf /etc` (measured); reading `grm` as the coprocess NAME skipped
+// it. commandName at that test maps `grm`->`rm`, so it stays the command word.
+// Red at 197eb2a and at 864c31a (path.basename there). cases2 rows 2/4/6, cases1 row 3.
+// (3) coproc，g 名字是「那個字本身」。`coproc grm F=1 -rf /etc` 是 simple command（後面是指派形狀的字、不是複合開頭），
+// bash 5.3 跑 `grm F=1 -rf /etc`（實測）；把 `grm` 讀成 coprocess NAME 會跳過它。那個判斷改用 commandName，`grm`→`rm` 維持命令字。
+blocked.push(
+  'coproc grm F=1 -rf /etc',
+  'coproc grmdir F=1 /etc',
+  'coproc grm F=1 /etc',
+  'coproc genv F=1 \'X-Y=2\' rm -rf /etc',
+  'coproc gnohup F=1 grm -rf /etc',
+);
+allowed.push(
+  // Benign twin: same shape, a target that names nothing protected.
+  // 良性雙胞胎：同形狀，目標不指向受保護路徑。
+  'coproc grm F=1 -rf build',
+);
+// (4a) gtime -> time. gnu-time is not installed here, but the gfind/gxargs rule
+// applies and the `time` reserved word is spelled `time`, never `gtime`. cases1 13/14.
+// (4a) gtime→time。gnu-time 本機未安裝，但 gfind/gxargs 的規則適用，且 `time` 保留字拼作 `time` 不是 `gtime`。
+blocked.push(
+  'gtime rm -rf /etc',
+  'gtime grm -rf /etc',
+);
+allowed.push('gtime ls -l /tmp');
+// (4b) the time branch's long options through longOptionArity(), from GNU time's
+// DOCUMENTED list (BSD /usr/bin/time and the `time` keyword reject `--` tokens, so
+// this only over-refuses here; it models GNU time / `gtime`). `--f`/`--o` are
+// prefixes of --format/--output and take the next word. Red at 197eb2a and 864c31a.
+// cases1 rows 18/19.
+// (4b) time 分支的長選項走 longOptionArity()，用 GNU time 的文件清單（BSD time 與 time 保留字都拒絕 `--` token，所以這裡只過度拒絕）。
+blocked.push(
+  'sudo time --format x rm -rf /etc',
+  'sudo time --f x rm -rf /etc',
+  'sudo time --o /dev/null rm -rf /etc',
+  'gtime --o /dev/null rm -rf /etc',
+);
+allowed.push(
+  'sudo time --f x ls -l /tmp',
+  'gtime --verbose ls -l /tmp',
+);
+// (A13) a row that kills the mutant dropping `--chroot` from sudo's value list:
+// `--chroot`/its prefix `--chr` takes the next word, so the command after the jail
+// path is reached. (A14, `--other-user`, is left as an equivalent -- see
+// fixer-mutants-3.txt.)
+// (A13) 殺掉「從 sudo 值清單移除 --chroot」突變的列：--chroot 及其前綴 --chr 吃下一個字，jail 路徑後面的命令才到得了。
+blocked.push(
+  'sudo --chroot /jail rm -rf /etc',
+  'sudo --chr /jail rm -rf /etc',
+);
+allowed.push('sudo --chroot /jail ls -l /tmp');
 allowed.push(
   // A literal emitter whose text is ordinary stays ordinary: the rule READS the
   // script rather than refusing every xargs pipeline.
