@@ -3864,7 +3864,18 @@ const execWrappers = new Map([
   ['caffeinate', { valueOptions: ['-t', '-w'], clusteredValue: /^-[dimsu]*[tw]$/, leadingOperands: 0 }],
   // stdbuf(1): `stdbuf [-e bufdef] [-i bufdef] [-o bufdef] [command [...]]`. The
   // attached spellings (`-o0`, `--output=0`) need no entry: they are one word.
-  ['stdbuf', { valueOptions: ['-e', '-i', '-o', '--error', '--input', '--output'], clusteredValue: null, leadingOperands: 0 }],
+  // GNU stdbuf (`gstdbuf`) also spells those long -- `--error`/`--input`/
+  // `--output` -- and accepts any unambiguous prefix (`--out 0`, `--o 0` measured
+  // RAN 2026-11-01). longOptions is the full list so an ambiguous prefix (none
+  // here) resolves to null; longValueOptions are the three that take a value.
+  // GNU stdbuf（`gstdbuf`）也有長寫法，且接受不歧義前綴（`--out 0`、`--o 0` 實測 RAN）。
+  ['stdbuf', {
+    valueOptions: ['-e', '-i', '-o'],
+    clusteredValue: null,
+    leadingOperands: 0,
+    longOptions: ['--error', '--input', '--output', '--help', '--version'],
+    longValueOptions: ['--error', '--input', '--output'],
+  }],
   // script(1), BSD: `script [-aeFkqr] [-t time] [file [command ...]]` -- one
   // leading operand, the typescript file, before the command.
   ['script', { valueOptions: ['-t', '-T'], clusteredValue: /^-[adeFkpqr]*[tT]$/, leadingOperands: 1 }],
@@ -3925,8 +3936,22 @@ const execWrappers = new Map([
   ['sandbox-exec', { valueOptions: ['-f', '-n', '-p', '-D'], clusteredValue: null, leadingOperands: 0 }],
   // chroot(8): `chroot [-G group[,group ...]] [-g group] [-u user] newroot
   // [command [arg ...]]` -- one leading operand, newroot, and three options that
-  // all take a value, so again nothing to cluster.
-  ['chroot', { valueOptions: ['-G', '-g', '-u'], clusteredValue: null, leadingOperands: 1 }],
+  // all take a value, so again nothing to cluster. That synopsis is BSD
+  // /usr/sbin/chroot; GNU chroot (`gchroot`) has a DIFFERENT, long-only option
+  // set -- `--groups=`, `--userspec=` (both value) and `--skip-chdir` -- and
+  // accepts any unambiguous prefix (`--us x:y`, `--u x:y`, `--g 0` measured RAN
+  // 2026-11-01). newroot is the single leading operand on both, so the value
+  // options must be stepped before it or the command word after newroot is lost.
+  // 這份 synopsis 是 BSD chroot；GNU chroot（`gchroot`）的選項完全不同、只有長選項（`--groups=`/`--userspec=`
+  // 吃值、`--skip-chdir`），且接受不歧義前綴（`--us x:y`、`--u x:y`、`--g 0` 實測 RAN）。兩者 newroot 都是
+  // 單一 leading operand，值選項要先跨過，否則 newroot 後面的命令字會丟失。
+  ['chroot', {
+    valueOptions: ['-G', '-g', '-u'],
+    clusteredValue: null,
+    leadingOperands: 1,
+    longOptions: ['--groups', '--userspec', '--skip-chdir', '--help', '--version'],
+    longValueOptions: ['--groups', '--userspec'],
+  }],
   // arch(1): `arch [-32] [-64] [[-arch_name | -arch arch_name]...] [-c]
   // [-d envname]... [-e envname=value]... [-h] prog [args ...]`. `-arch` and
   // `--arch` both take the NEXT word (measured: `arch --arch arm64 <cmd>` execs);
@@ -4054,6 +4079,116 @@ const wrapperCommands = new Set([
   ...shellCarriers,
   'rm', 'rmdir', 'better-rm',
 ]);
+
+// HOMEBREW'S g-PREFIXED GNU TOOLS. Homebrew installs the GNU coreutils whose
+// names collide with a macOS tool under a `g` prefix (coreutils' own caveat:
+// "installed with the prefix g"), and since macOS 27.2 this machine's own tooling
+// prefers them -- `gtimeout` over the BSD `timeout` -- so agents copy that. A
+// g-name runs the REAL GNU program, so `grm -rf <protected>` is a PERMANENT
+// deletion (not the .bashrc trash alias, which is never consulted in argument
+// position anyway) and `gtimeout <protected deletion>` wraps one. The command-word
+// walks below compared path.basename(words[i]) against literal names, so every
+// g-name was invisible and ALLOW.
+// Only names MEASURED on this Mac (2026-11-01) to be the GNU build of a program
+// the guard ALREADY models are mapped: each `<g> --version` prints
+// "(GNU coreutils) 9.12". This adds NO new program to the model -- it only lets
+// the existing model see the second spelling, mapping the g-name to the plain
+// name BEFORE every table/set lookup.
+// Deliberately NOT mapped, and why:
+//   - gfind / gxargs: the finding named them, and they ARE find/xargs, but
+//     findutils is NOT installed here (no /opt/homebrew/bin/gfind, no Cellar), so
+//     the names cannot be invoked; mapping only what is measured-installed is the
+//     rule the three pinned-list guards already follow. If findutils is installed
+//     later they belong here, mapping to 'find' and 'xargs'.
+//   - gecho / gprintf / gtrue / gfalse: these ARE echo/printf/true/false, but an
+//     UNRECOGNISED producer is REFUSED (fail-closed), so leaving them out
+//     over-refuses `gecho x | bash` rather than missing anything -- the safe
+//     direction -- while mapping them would turn a refusal into an allow.
+//   - gmv / gcp / gln / gsed / gstat / gsort ...: mv/cp/ln/sed/stat/sort are not
+//     programs this guard models, and the rule is not to add new programs.
+// Homebrew 的 g 前綴 GNU 工具。Homebrew 把與 macOS 同名的 GNU coreutils 以 `g` 前綴安裝，
+// macOS 27.2 起本機自己的工具偏好它們（`gtimeout` 勝過 BSD `timeout`），agent 也照抄。g 名字
+// 跑的是真正的 GNU 程式，所以 `grm -rf <受保護>` 是永久刪除、`gtimeout <受保護刪除>` 會包住一個。
+// 下面的命令字走訪拿 path.basename 去比字面名字，於是每個 g 名字都看不到、放行。只映射本機實測
+// （2026-11-01、`<g> --version` 印「(GNU coreutils) 9.12」）、且是「守衛已建模程式」之 GNU build
+// 的名字；不新增任何程式，只讓既有模型看到第二個拼法，在每次查表／查集合之前把 g 名字換成原名。
+// 刻意不映射：gfind／gxargs（findutils 本機未安裝，名字叫不出來，裝了才該加）、
+// gecho／gprintf／gtrue／gfalse（未識別的 producer 一律拒絕＝fail-closed，不映射只會過度拒絕而不會漏）、
+// gmv／gcp／gln／gsed／gstat（mv/cp/ln/sed/stat 這個守衛不建模，規則是不新增程式）。
+const gnuPrefixedNames = new Map([
+  ['grm', 'rm'], ['grmdir', 'rmdir'], ['gtimeout', 'timeout'], ['genv', 'env'],
+  ['gnice', 'nice'], ['gnohup', 'nohup'], ['gstdbuf', 'stdbuf'], ['gchroot', 'chroot'],
+]);
+// The basename of a command word, with a g-prefixed GNU tool mapped to the plain
+// name the guard models. Used where a g-name can hide a removal or a wrapper: the
+// executable walk, the heredoc-carrier walk's transparent-wrapper step, and the
+// coproc test of whether the NEXT word is a command word. Left as path.basename,
+// on purpose: the pipe-target carrier name (no g-name maps to a shell, so it
+// cannot change), the coproc test of whether the word ITSELF is a wrapper
+// (unmapped reads a g-wrapper as a NAME, which only refuses more), and the
+// producer classifier (an unrecognised producer is refused).
+// 命令字的 basename，把 g 前綴 GNU 工具換成守衛建模的原名。只用在 g 名字會藏住刪除或包裝命令的地方：執行檔走訪、
+// heredoc carrier 走訪的透明包裝步驟、coproc 判斷「下一個字」是不是命令字。刻意保留 path.basename 的：管線接收端
+// 的 carrier 名字（沒有 g 名字對應到 shell，改了也不會變）、coproc 判斷「這個字本身」是不是包裝命令（不映射會把 g
+// 包裝讀成 NAME，只會多擋）、以及 producer 分類（認不得的 producer 一律拒絕）。
+const commandName = (word) => {
+  const base = path.basename(word);
+  return gnuPrefixedNames.get(base) ?? base;
+};
+
+// ABBREVIATED LONG OPTIONS. getopt_long -- which GNU coreutils, and the BSD
+// timeout/xargs shipped on macOS 27.2, all use -- accepts ANY UNAMBIGUOUS PREFIX
+// of a long option, so `--kill 1`, `--sig TERM`, `--un FOO` each consume the
+// following word exactly as the full spelling does. A guard that matched only the
+// full spelling read the option's VALUE as the next token and the command word as
+// a plain operand -- the P-L1-2 fail-open. These resolve an option token against a
+// wrapper's REAL long-option list (measured on this Mac with `/bin/echo RAN`
+// stand-ins, never a deletion) rather than enumerating spellings.
+// longOptionMatches: the full options a token can mean. getopt treats an EXACT
+// match as unambiguous even when it is also a prefix of a longer option, so an
+// exact hit is the only candidate; otherwise every option the token is a prefix
+// of is one.
+// 縮寫長選項。getopt_long（GNU coreutils 與 macOS 27.2 的 BSD timeout／xargs 都用它）接受長選項的
+// 任何「不歧義前綴」，`--kill 1`、`--sig TERM`、`--un FOO` 都和完整拼法一樣吃下一個字。只比完整拼法的
+// 守衛把選項的「值」當成下一個 token、把命令字當普通操作元——P-L1-2 的 fail-open。這裡拿 token 去比對
+// 包裝命令「真實的」長選項清單（本機用 `/bin/echo RAN` 實測，從不用刪除指令），不逐一列拼法。
+// longOptionMatches：token 可能代表的完整選項。完整相符即使同時是更長選項的前綴，getopt 也視為不歧義，所以它是唯一
+// 候選；否則 token 是哪些選項的前綴，哪些就都是候選。
+function longOptionMatches(option, longOptions) {
+  if (longOptions.includes(option)) return [option];
+  return longOptions.filter((full) => full.startsWith(option));
+}
+// How a long-option token steps the walk: 'value' (the NEXT word is its value),
+// 'none' (it is one word), or 'unknowable'. An attached value (`--kill-after=1`,
+// `--k=1`) matches no name -- no listed name contains `=` -- so it is 'none' and
+// consumes nothing more, which is right: the value is inside the word. An unknown
+// token is 'none' too: the real tool rejects it and runs nothing. An AMBIGUOUS
+// prefix whose candidates ALL take a value, or ALL take none, steps the same way
+// under every reading (`--v` is verbose|version to GNU timeout: 'none'), so it
+// gets that step. Only a prefix that could be a value option OR a no-value one is
+// 'unknowable', and the caller then marks the command word unknowable
+// (`unmodelledOption`), the answer xcrun's `knownOptions` already gives: no reading
+// is picked, so the permissive one cannot be. xargs's `--max` is the one measured
+// prefix of that kind (three value options and the optional-argument
+// `--max-lines`); both xargs reject it, so it only over-refuses. It is wired in
+// ONE place (resolveExecutable's longOptionTakesValue closure), and test-hooks.js
+// pins the helper (unit rows on synthetic lists), the wiring through the
+// exec-wrapper table (a synthetic row) and the real xargs case.
+// 長選項 token 怎麼推進走訪：'value'（下一個字是它的值）、'none'（它就是一個字）、或 'unknowable'。相連的值
+// （`--k=1`）比不中任何名字（沒有名字含 `=`），所以是 'none'、不再多吃——值就在字裡。未知 token 也是 'none'：真實工具
+// 拒絕它、什麼都不跑。候選「全部吃值」或「全部不吃值」的歧義前綴，在每一種讀法下步進都一樣（GNU timeout 的 `--v`：
+// 'none'），就照那樣步進。只有「可能是吃值選項、也可能是不吃值選項」的前綴才是 'unknowable'，呼叫端會把命令字標成
+// 不可知（`unmodelledOption`，與 xcrun 的 `knownOptions` 同一個答案）：不挑任何一種讀法，寬鬆的那種就不可能被挑到。
+// 實測清單裡唯一這種前綴是 xargs 的 `--max`（三個吃值選項加上選填值 `--max-lines`）；兩種 xargs 都拒絕它，所以只會過度
+// 拒絕。它只接在一處（resolveExecutable 的 longOptionTakesValue closure），test-hooks.js 釘住 helper（合成清單的單元列）、
+// 經過 exec-wrapper 表的接線（一列合成列），以及真實的 xargs 情形。
+function longOptionArity(option, longOptions, valueLongOptions) {
+  if (!option.startsWith('--') || option === '--') return 'none';
+  const matches = longOptionMatches(option, longOptions);
+  const valued = matches.filter((full) => valueLongOptions.includes(full)).length;
+  if (valued === 0) return 'none';
+  return valued === matches.length ? 'value' : 'unknowable';
+}
 
 // `readingBudget` is the R7-a second-reading budget ({ alternateReadings,
 // alternateLength }); evaluate() passes one object to both of its readings
@@ -4658,7 +4793,13 @@ function commandTargetsScanOneReading(
         atCommandPosition = true; afterEnv = false; askedWrapperModel = false; continue;
       }
       if (!atCommandPosition) continue;
-      const name = path.basename(word);
+      // commandName, not path.basename: a g-prefixed wrapper (`gtimeout bash <<EOF`)
+      // must be seen as transparent here for the same reason it is unwrapped in
+      // the executable walk, and this walk calls resolveExecutable() below, which
+      // already maps. Carriers (bash/sh) have no g-spelling, so only wrappers gain.
+      // 用 commandName 而非 path.basename：g 前綴包裝命令（`gtimeout bash <<EOF`）在這裡也要被當透明的，理由
+      // 與執行檔走訪會拆開它相同；carrier（bash/sh）沒有 g 拼法，所以只有包裝命令會被多認出來。
+      const name = commandName(word);
       if (carriers.has(name)) { carrierPresent = true; break; }
       if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
       // A COMMAND WORD THIS WALK CANNOT READ IS A CARRIER IT CANNOT RULE OUT.
@@ -4826,6 +4967,18 @@ function commandTargetsScanOneReading(
     // (BRM-ab-08); the command word after it is then unknowable.
     // 列出自己選項的包裝命令遇到沒列出的選項時設起（BRM-ab-08）；後面的命令字因此不可知。
     let unmodelledOption = false;
+    // Whether a long-option token takes the NEXT word as its value, for every
+    // branch below that parses long options (timeout, nice, env and the
+    // exec-wrapper table). One closure, so the 'unknowable' answer is wired to
+    // `unmodelledOption` in exactly one place -- see longOptionArity(). It is set,
+    // not cleared, so it is never the permissive reading.
+    // 長選項 token 是否吃「下一個字」當值，給下面每個解析長選項的分支用（timeout、nice、env、exec-wrapper 表）。只有一個
+    // closure，所以 'unknowable' 只在這一處接到 `unmodelledOption`——見 longOptionArity()。只設不清，絕不是寬鬆的讀法。
+    const longOptionTakesValue = (option, longOptions, valueLongOptions) => {
+      const arity = longOptionArity(option, longOptions, valueLongOptions);
+      if (arity === 'unknowable') unmodelledOption = true;
+      return arity === 'value';
+    };
     // BRM-ab-05: apply(1) RUNS ITS COMMAND OPERAND AS A SHELL STRING. It builds
     // `exec <command> <args>` and hands that to $SHELL -c -- `apply -d 'rmx -rf
     // /%1' etc` prints `exec rmx -rf /etc` -- so the table row below, which hands
@@ -4984,7 +5137,7 @@ function commandTargetsScanOneReading(
         executable = '';
         continue;
       }
-      executable = path.basename(words[i]);
+      executable = commandName(words[i]);
       executableIndex = i;
 
       if (executable === 'sudo') {
@@ -5012,6 +5165,29 @@ function commandTargetsScanOneReading(
         const optionsWithValue = new Set([
           '-u', '--unset', '-C', '--chdir', '-S', '--split-string', '-a', '--argv0', '-P',
         ]);
+        // GNU env's long options (coreutils 9.12 `genv --help`), with the ones that
+        // take a SEPARATE next word. `--split-string` takes one too, and the branch
+        // below routes it to the splitter first (env re-parses that value as its
+        // own argv); `--block-signal`/`--default-signal`/`--ignore-signal` take an
+        // OPTIONAL, ATTACHED value only, so they are not in the value list.
+        // getopt_long accepts any unambiguous prefix of each, which is why the `--`
+        // branch below resolves the token instead of matching the full spelling
+        // (measured 2026-11-01: `genv --ch /tmp`, `--un FOO`, `--e /dev/null`,
+        // `--spl '<cmd>'` all ran the command; BSD env rejects long options).
+        // `--split-string` in the value list only decides AMBIGUITY (the splitter
+        // is chosen first), and no listed prefix makes it ambiguous, so dropping it
+        // is an EQUIVALENT mutant today; it stays because it does take a value.
+        // 值清單裡的 `--split-string` 只影響「歧義」判定（拆解器先被選走），而沒有任何前綴讓它歧義，所以拿掉它今天是等價
+        // 突變；留著是因為它確實吃值。
+        // GNU env 的長選項（`genv --help`），標出吃「獨立值」的那些。`--split-string` 也吃，下面的分支先把它交給拆解器
+        // （env 把值當自己的 argv 再解析一次）；`--block-signal`/`--default-signal`/`--ignore-signal` 只吃相連的選填值，
+        // 故不列為吃值。getopt_long 接受每個的不歧義前綴，所以下面的 `--` 分支是「解析 token」而不是比完整拼法。
+        const ENV_LONG_OPTIONS = [
+          '--argv0', '--block-signal', '--chdir', '--debug', '--default-signal',
+          '--env0-from', '--help', '--ignore-environment', '--ignore-signal',
+          '--list-signal-handling', '--null', '--split-string', '--unset', '--version',
+        ];
+        const ENV_LONG_VALUE_OPTIONS = ['--argv0', '--chdir', '--env0-from', '--split-string', '--unset'];
         i += 1;
         while (i < words.length) {
           const option = words[i];
@@ -5047,12 +5223,39 @@ function commandTargetsScanOneReading(
           } else if (option === '--') {
             i += 1;
             break;
-          } else if (option === '-S' || option === '--split-string') {
+          } else if (option.startsWith('--') && option.length > 2) {
+            // A GNU env long option, resolved by prefix (`--ch`, `--un`, `--spl`).
+            // A token that can only mean `--split-string` feeds the SAME splitter
+            // the short `-S` does; one that resolves to a value option takes the
+            // next word; an attached `=value`, the no-value options, the
+            // optional-value signal options and an unknown token consume nothing
+            // more (the real tool rejects an unknown one and runs nothing). The
+            // name before `=` is what is resolved, so `--spl=<cmd>` is the splitter
+            // too. See longOptionArity() for the 'unknowable' case.
+            // GNU env 的長選項，用前綴解析（`--ch`、`--un`、`--spl`）。只可能是 `--split-string` 的 token 走與 `-S`
+            // 同一個拆解器；解析到吃值選項的吃下一個字；相連 `=值`、不吃值與選填值的訊號選項、未知 token 不再多吃（真實
+            // 工具拒絕未知的、什麼都不跑）。解析的是 `=` 前面的名字，所以 `--spl=<cmd>` 也走拆解器。'unknowable' 見
+            // longOptionArity()。
+            const eq = option.indexOf('=');
+            const name = eq === -1 ? option : option.slice(0, eq);
+            const matches = longOptionMatches(name, ENV_LONG_OPTIONS);
+            const takesValue = longOptionTakesValue(name, ENV_LONG_OPTIONS, ENV_LONG_VALUE_OPTIONS);
+            if (matches.length === 1 && matches[0] === '--split-string') {
+              if (eq === -1) {
+                envSplitStringTargets(words[i + 1] || '', envArgvAfter(i + 2));
+                i += 2;
+              } else {
+                envSplitStringTargets(option.slice(eq + 1), envArgvAfter(i + 1));
+                i += 1;
+              }
+            } else if (eq === -1 && takesValue) {
+              i += 2;
+            } else {
+              i += 1;
+            }
+          } else if (option === '-S') {
             envSplitStringTargets(words[i + 1] || '', envArgvAfter(i + 2));
             i += 2;
-          } else if (option.startsWith('--split-string=')) {
-            envSplitStringTargets(option.slice('--split-string='.length), envArgvAfter(i + 1));
-            i += 1;
           } else if (option.startsWith('-S') && option.length > 2) {
             envSplitStringTargets(option.slice(2), envArgvAfter(i + 1));
             i += 1;
@@ -5096,8 +5299,15 @@ function commandTargetsScanOneReading(
         i += 1;
         while (i < words.length && words[i].startsWith('-')) {
           const option = words[i];
+          // A GNU g-name (gstdbuf, gchroot) reaches this table under its plain
+          // name and uses getopt_long, so a long VALUE option and its prefixes
+          // (`--out 0`, `--userspec x:y`, `--us x:y`) take the next word. Rows
+          // without long options pass empty lists and this is inert.
+          // g 名字（gstdbuf、gchroot）以原名走到這張表、用 getopt_long，所以長值選項與其前綴吃下一個字。
+          // 沒有長選項的列傳空清單，這一項不作用。
           const takesNextWord = wrapperSpec.valueOptions.includes(option)
-            || (wrapperSpec.clusteredValue !== null && wrapperSpec.clusteredValue.test(option));
+            || (wrapperSpec.clusteredValue !== null && wrapperSpec.clusteredValue.test(option))
+            || longOptionTakesValue(option, wrapperSpec.longOptions || [], wrapperSpec.longValueOptions || []);
           // A row that lists its options (xcrun) does not get to skip one it does
           // not list: see `knownOptions` on the row.
           // 列出自己選項的列（xcrun）不能跳過沒列出的選項：見該列的 `knownOptions`。
@@ -5232,7 +5442,7 @@ function commandTargetsScanOneReading(
         if (i + 1 < words.length && /^[A-Za-z_][A-Za-z0-9_]*$/.test(words[i])) {
           const next = words[i + 1];
           const opensCompound = compoundOpeners.has(next);
-          const looksLikeCommandWord = wrapperCommands.has(path.basename(next))
+          const looksLikeCommandWord = wrapperCommands.has(commandName(next))
             || /^[A-Za-z_][A-Za-z0-9_]*=/.test(next);
           if (
             opensCompound
@@ -5255,10 +5465,18 @@ function commandTargetsScanOneReading(
       }
 
       if (executable === 'nice') {
+        // GNU nice (`gnice`) abbreviates `--adjustment` (`--adj 5`, `--a 5` all
+        // RAN, measured 2026-11-01); BSD nice rejects long options and runs
+        // nothing, so reading the value of a prefix only ever adds a DENY (when
+        // GNU runs it) or an over-refusal (when BSD rejects it), never a miss.
+        // GNU nice（`gnice`）縮寫 `--adjustment`（`--adj 5`、`--a 5` 實測都 RAN）；BSD nice 拒絕長選項、
+        // 什麼都不跑，所以讀前綴的值只會多一個 DENY 或一次過度拒絕，不會漏。
+        const longOptions = ['--adjustment', '--help', '--version'];
+        const longValueOptions = ['--adjustment'];
         i += 1;
         while (i < words.length && words[i].startsWith('-')) {
           const option = words[i];
-          i += option === '-n' || option === '--adjustment' ? 2 : 1;
+          i += option === '-n' || longOptionTakesValue(option, longOptions, longValueOptions) ? 2 : 1;
         }
         executable = '';
         continue;
@@ -5266,6 +5484,18 @@ function commandTargetsScanOneReading(
 
       if (executable === 'timeout') {
         const optionsWithValue = new Set(['-k', '--kill-after', '-s', '--signal']);
+        // timeout's long options, identical on BSD (/usr/bin/timeout, macOS 27.2)
+        // and GNU (coreutils 9.12 `gtimeout`); the two that take a SEPARATE value.
+        // Both accept any unambiguous prefix (measured 2026-11-01 with
+        // `/bin/echo RAN`): `--kill 1`, `--sig TERM`, `--signal TERM --kill 1`
+        // all run the command, while `--verbose`/`--foreground`/`--preserve-status`
+        // take no value and must NOT eat the duration. On this PATH even a bare
+        // `timeout` is the GNU build, so the prefix behaviour is live for it too.
+        // timeout 的長選項，BSD（macOS 27.2）與 GNU（`gtimeout`）相同；兩個吃「獨立值」的。兩者都接受
+        // 不歧義前綴（實測）；`--verbose`／`--foreground`／`--preserve-status` 不吃值，不可吞掉逾時值。
+        // 本機 PATH 上連裸 `timeout` 都是 GNU build，所以前綴行為對它也是活的。
+        const longOptions = ['--kill-after', '--signal', '--foreground', '--preserve-status', '--verbose', '--help', '--version'];
+        const longValueOptions = ['--kill-after', '--signal'];
         i += 1;
         while (i < words.length && words[i].startsWith('-')) {
           const option = words[i];
@@ -5274,6 +5504,7 @@ function commandTargetsScanOneReading(
             break;
           }
           i += optionsWithValue.has(option) || /^-[pfv]*[ks]$/.test(option)
+            || longOptionTakesValue(option, longOptions, longValueOptions)
             ? 2
             : 1;
         }
@@ -5359,6 +5590,27 @@ function commandTargetsScanOneReading(
           '--arg-file', '--delimiter', '--max-args', '--max-procs', '--max-chars',
           '--process-slot-var',
         ]);
+        // Every long option either xargs has, for PREFIX resolution (P-L1-2). BSD
+        // xargs on this Mac uses getopt_long (xargs(1): --null, --max-args,
+        // --max-procs, --interactive, --no-run-if-empty, --max-chars, --verbose,
+        // --exit) and accepts any unambiguous prefix: `--max-a 1`, `--max-p 2`,
+        // `--max-c 200` all ran a `/bin/echo` stand-in, while `--max`/`--m`/`--n`
+        // are rejected as ambiguous (measured 2026-11-01). The GNU-only names are
+        // from the findutils manual (no GNU xargs on this host, as above); GNU's
+        // getopt_long takes prefixes the same way. `--max` is a prefix of three
+        // value options AND the optional-argument `--max-lines`, so it resolves to
+        // 'unknowable' and the command word becomes unknowable -- both tools
+        // reject it and run nothing, so that only ever over-refuses.
+        // xargs 兩種實作的所有長選項，供前綴解析（P-L1-2）。本機 BSD xargs 用 getopt_long、接受不歧義前綴：`--max-a 1`、
+        // `--max-p 2`、`--max-c 200` 都跑了 `/bin/echo` 替身，`--max`/`--m`/`--n` 被判歧義拒絕（2026-11-01 實測）。GNU 專有
+        // 的名字取自 findutils 手冊（本機沒有 GNU xargs）。`--max` 同時是三個吃值選項與選填值 `--max-lines` 的前綴，所以解析成
+        // 'unknowable'、命令字變不可知——兩種工具都拒絕它、什麼都不跑，只會過度拒絕。
+        const XARGS_LONG_OPTIONS = [
+          '--arg-file', '--delimiter', '--eof', '--exit', '--help', '--interactive',
+          '--max-args', '--max-chars', '--max-lines', '--max-procs', '--no-run-if-empty',
+          '--null', '--open-tty', '--process-slot-var', '--replace', '--show-limits',
+          '--verbose', '--version',
+        ];
         // R5-16: SHORT options are letters, and they come in CLUSTERS. `-0I{}` is
         // one word holding two of them, and it is the ordinary spelling -- the
         // fully separated `-0 -I{}` is the unusual one. The walk above did not
@@ -5415,11 +5667,18 @@ function commandTargetsScanOneReading(
           const option = words[i];
           let consumesNextWord = false;
           if (option.startsWith('--')) {
-            if (option === '--replace') xargsReplaceString = '{}';
-            else if (option.startsWith('--replace=')) {
-              xargsReplaceString = option.slice('--replace='.length) || '{}';
+            // The name before any `=` is resolved by prefix, so `--rep` and
+            // `--rep=%` are GNU's `--replace` (the replace string) exactly as the
+            // full spellings are, and `--max-a 1` consumes its value.
+            // `=` 前面的名字用前綴解析，所以 `--rep`、`--rep=%` 與完整拼法一樣是 GNU 的 `--replace`，`--max-a 1` 也會吃掉值。
+            const eq = option.indexOf('=');
+            const name = eq === -1 ? option : option.slice(0, eq);
+            const matches = longOptionMatches(name, XARGS_LONG_OPTIONS);
+            if (matches.length === 1 && matches[0] === '--replace') {
+              xargsReplaceString = eq === -1 ? '{}' : (option.slice(eq + 1) || '{}');
             }
-            consumesNextWord = longOptionsWithValue.has(option);
+            consumesNextWord = eq === -1
+              && longOptionTakesValue(name, XARGS_LONG_OPTIONS, [...longOptionsWithValue]);
           } else {
             for (let letter = 1; letter < option.length; letter += 1) {
               const flag = option[letter];
@@ -7791,4 +8050,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, braceWordCanBeADotCommand, commandSubstitutions, commandTargets, evaluate, execWrappers, expandBraces, hasGlob, normalizedTarget, protectedReason, shellCarriers, shellWords, wrapperCommands };
+module.exports = { HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, braceWordCanBeADotCommand, commandSubstitutions, commandTargets, evaluate, execWrappers, expandBraces, gnuPrefixedNames, hasGlob, longOptionArity, normalizedTarget, protectedReason, shellCarriers, shellWords, wrapperCommands };

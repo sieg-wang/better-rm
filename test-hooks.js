@@ -12,8 +12,8 @@ const assert = require('assert');
 const os = require('os');
 const {
   HOME_DIRS, MAX_FAILED_SUBSTITUTION_READS, MOUNT_PARENTS, SYSTEM_DIRS, braceWordCanBeADotCommand,
-  commandSubstitutions, commandTargets, evaluate, execWrappers, expandBraces, normalizedTarget,
-  shellCarriers, shellWords, wrapperCommands,
+  commandSubstitutions, commandTargets, evaluate, execWrappers, expandBraces, gnuPrefixedNames,
+  longOptionArity, normalizedTarget, shellCarriers, shellWords, wrapperCommands,
 } = require('./hooks/protect-important-paths');
 
 // TMPDIR is here because the hook resolves it: it is one of the three variables
@@ -1634,6 +1634,96 @@ const blocked = [
   "su -m nobody -c 'rm -rf /etc'",
   "su -l nobody -c 'rm -rf /home/tester'",
   'su nobody <<EOF\nrm -rf /etc\nEOF',
+  // P-L1-1 (HIGH): Homebrew installs the GNU coreutils whose names collide with a
+  // macOS tool under a `g` prefix, and since macOS 27.2 this machine prefers them
+  // (`gtimeout` over the BSD `timeout`), so agents copy that. `grm`/`grmdir` are
+  // the real GNU rm/rmdir -- a PERMANENT deletion, not the trash alias -- and
+  // `gtimeout`/`genv`/`gnice`/`gnohup`/`gstdbuf`/`gchroot` are real exec wrappers.
+  // All were ALLOW at 197eb2a because the command-word walk compared
+  // path.basename(words[i]) against literal names with no g-alias. Measured on
+  // this Mac 2026-11-01: each `<g>` --version prints "(GNU coreutils) 9.12".
+  // P-L1-1（HIGH）：Homebrew 把與 macOS 同名的 GNU coreutils 以 `g` 前綴安裝，macOS 27.2 起
+  // 本機偏好它們（`gtimeout` 勝過 BSD `timeout`），agent 也照抄。`grm`／`grmdir` 是真正的
+  // GNU rm／rmdir（永久刪除，不是垃圾桶別名），`gtimeout` 等是真正的 exec 包裝命令。197eb2a
+  // 全部放行，因為走訪拿 path.basename 去比字面名字、沒有 g 別名。
+  'grm -rf /etc',
+  'grmdir /home/tester',
+  '/opt/homebrew/bin/grm -rf /etc',
+  'gtimeout 5 rm -rf /etc',
+  'gtimeout 5 grm -rf /etc',
+  'gnohup rm -rf /etc',
+  'gnohup grm -rf /etc',
+  'gnice -n 5 rm -rf /etc',
+  'genv rm -rf /etc',
+  'gstdbuf -o0 rm -rf /etc',
+  'sudo gchroot / rm -rf /etc',
+  "gtimeout 5 bash -c 'rm -rf /etc'",
+  // The two OTHER walks that name a command word, each the g-twin of a plain row
+  // already refused: the heredoc-carrier walk must see `gtimeout` as transparent
+  // (a compound spelling ends the executable walk before the heredoc), and the
+  // coproc NAME test must see `grm` as a command word, as it sees `rm`.
+  // 另外兩個會辨識命令字的走訪，各是一列已被拒絕之原名寫法的 g 雙胞胎：heredoc carrier 走訪要把 `gtimeout` 當透明
+  // （複合寫法讓執行檔走訪在 heredoc 之前就結束），coproc 的 NAME 判斷要把 `grm` 當命令字，與 `rm` 一樣。
+  "{ gtimeout 5 bash; } <<'EOF'\nrm -rf /etc\nEOF",
+  'coproc NAME grm -rf /etc',
+  // P-L1-2 (MED): getopt_long (GNU coreutils, and BSD timeout/xargs on macOS 27.2)
+  // accepts ANY UNAMBIGUOUS PREFIX of a long option, so `--kill 1`, `--sig TERM`,
+  // `--un FOO` each consume the following word exactly as the full spelling does.
+  // At 197eb2a the branches matched only the full spelling, so the guard read the
+  // option's VALUE as the duration/next word and the duration as the command word
+  // -- the deletion was never scanned. Measured RAN on this Mac 2026-11-01 with
+  // `/bin/echo RAN` stand-ins on BSD (/usr/bin) and GNU (g-names); never a
+  // deletion. timeout: --kill-after and --signal take the next word.
+  // P-L1-2（MED）：getopt_long（GNU coreutils，及 macOS 27.2 的 BSD timeout／xargs）接受長選項
+  // 的「任何不歧義前綴」，所以 `--kill 1`、`--sig TERM`、`--un FOO` 都和完整拼法一樣吃下一個字。
+  // 197eb2a 只比完整拼法，於是把選項的「值」當逾時值、把逾時值當命令字，刪除從來沒被掃到。
+  // 用 `/bin/echo RAN` 在 BSD 與 GNU 上實測，從不用真的刪除指令。
+  'timeout --kill-after 1 5 rm -rf /etc',
+  'timeout --kill 1 5 rm -rf /etc',
+  'timeout --k 1 5 rm -rf /etc',
+  'timeout --signal TERM 5 rm -rf /etc',
+  'timeout --sig TERM 5 rm -rf /etc',
+  'timeout --s TERM 5 rm -rf /etc',
+  'timeout --signal TERM --kill 1 5 rm -rf /etc',
+  'gtimeout --k 1 5 rm -rf /etc',
+  // env (GNU `genv`) abbreviations, including --split-string, which re-parses its
+  // own string as env argv -- a prefix of it must still reach that splitter.
+  // env（GNU `genv`）的前綴，含 --split-string（它把字串當 env argv 再解析一次），前綴也要走到那個拆解。
+  'env --unset FOO rm -rf /etc',
+  'env --un FOO rm -rf /etc',
+  'env --chdir /tmp rm -rf /etc',
+  'env --ch /tmp rm -rf /etc',
+  'env --argv0 x rm -rf /etc',
+  "env --split-string 'rm -rf /etc'",
+  "env --spl 'rm -rf /etc'",
+  'genv --ch /tmp rm -rf /etc',
+  // `--env0-from FILE` (new in coreutils 9.x) takes a value too; the guard did
+  // not know it in ANY spelling, so the file was read as the command word.
+  // `--env0-from FILE`（coreutils 9.x 新增）也吃值；守衛任何拼法都不認得它，於是把檔名當命令字。
+  'env --env0-from /dev/null rm -rf /etc',
+  'env --e /dev/null rm -rf /etc',
+  // An ATTACHED value is one word: `--ch=/tmp` must not also eat `rm`.
+  // 相連的值是一個字：`--ch=/tmp` 不可以再吃掉 `rm`。
+  'env --ch=/tmp rm -rf /etc',
+  // nice (GNU `gnice`) abbreviations of --adjustment.
+  // nice（GNU `gnice`）的 --adjustment 前綴。
+  'nice --adjustment 5 rm -rf /etc',
+  'nice --adj 5 rm -rf /etc',
+  'nice --a 5 rm -rf /etc',
+  'gnice --a 5 rm -rf /etc',
+  // stdbuf (GNU `gstdbuf`) long options and their prefixes.
+  // stdbuf（GNU `gstdbuf`）的長選項與其前綴。
+  'stdbuf --output 0 rm -rf /etc',
+  'stdbuf --out 0 rm -rf /etc',
+  'stdbuf --o 0 rm -rf /etc',
+  'gstdbuf --o 0 rm -rf /etc',
+  // chroot (GNU `gchroot`) long value options and prefixes; newroot is a leading
+  // operand, so the guard must step the value, then newroot, then land on rm.
+  // chroot（GNU `gchroot`）的長值選項與前綴；newroot 是 leading operand，守衛要先跨值、再跨 newroot、才落在 rm。
+  'sudo chroot --userspec 0:0 / rm -rf /etc',
+  'sudo chroot --us 0:0 / rm -rf /etc',
+  'sudo chroot --groups 0 / rm -rf /etc',
+  'sudo gchroot --u 0:0 / rm -rf /etc',
 ];
 
 const allowed = [
@@ -2376,6 +2466,52 @@ const allowed = [
   '"r\\m" -rf /etc',
   '"\\rm" -rf /etc',
   '"/bin/r\\m" -rf /etc',
+  // The ALLOW half of the two findings, so the fix can fail in the over-refusal
+  // direction too. A guard that refuses everything also passes every deny row.
+  // g-names doing harmless things: the mapped command is scanned on its own
+  // merits, and a benign target stays allowed.
+  // 兩個發現的放行那一半，讓修法在「過度拒絕」那一側也能紅。g 名字做無害的事：被映射的命令照自身判定，良性目標維持放行。
+  'grm -rf build',
+  'grm -rf ./dist',
+  'gtimeout 5 ls -l /tmp',
+  'gtimeout 5 grm -rf build',
+  'gnice -n 5 echo hi',
+  'genv FOO=1 ls',
+  'gstdbuf -o0 cat file',
+  // timeout with full AND abbreviated options wrapping a harmless command. The
+  // --verbose / --foreground rows are load-bearing: those long options take NO
+  // value, so a guard that treated every `--xxx` as value-taking would eat the
+  // duration `5` and misread the command word -- these must stay ALLOW to kill
+  // that mutant.
+  // timeout 用完整與縮寫選項包住無害命令。--verbose／--foreground 這兩列是承重的：它們不吃值，
+  // 把「每個 --xxx 都當吃值」的守衛會吞掉逾時值 `5`、讀錯命令字——它們必須維持放行，才能殺掉那個突變。
+  'timeout --kill-after 1 5 pytest',
+  'timeout --k 1 5 ls -l /tmp',
+  'timeout --sig TERM 5 ls -l /tmp',
+  'timeout --verbose 5 ls -l /tmp',
+  'timeout --foreground 5 ls -l /tmp',
+  'timeout -k 5 10 ls',
+  'env --ch /tmp ls -l /tmp',
+  'env --unset FOO ls',
+  // A benign split string, full and abbreviated: the splitter must READ it, not
+  // refuse it. A walk that sent the separated spelling down the attached path
+  // re-scans `env --split-string ...` until the depth cap refuses, which every
+  // deny row above still passes -- only these rows can tell.
+  // 無害的拆解字串（完整與縮寫）：拆解器要「讀」它而不是拒絕。把分開寫的拼法送進相連路徑的走訪，會一直重掃到深度上限
+  // 而拒絕；上面每一列 deny 照樣通過，只有這兩列分得出來。
+  "env --split-string 'ls -l /tmp'",
+  "env --spl 'ls -l /tmp'",
+  'nice --a 5 ls -l /tmp',
+  'stdbuf --o 0 ls -l /tmp',
+  // An unrelated program whose name merely STARTS WITH g must be untouched: only
+  // the measured GNU-build names are mapped, so `grep`, `gzip`, `gcc` and the
+  // coreutils g-name `gstat` (a program the guard does not model) stay allowed.
+  // 名字剛好以 g 開頭的無關程式不受影響：只有實測過的 GNU build 名字會被映射，所以 grep／gzip／gcc
+  // 與守衛不建模的 coreutils g 名字 `gstat` 維持放行。
+  'grep -rf pattern /etc',
+  'gzip -r /etc',
+  'gcc -c foo.c',
+  'gstat /etc',
 ];
 
 // Finding: a shell carrier nested past the recursion depth cap (8) must fail
@@ -2675,6 +2811,113 @@ for (const name of requiredCarrierNames) {
 
 assert.ok(wrapperModelChecks >= requiredExecWrapperNames.length + execWrappers.size,
   `the wrapper-model guards ran ${wrapperModelChecks} checks, fewer than the model declares`);
+
+// ---------------------------------------------------------------------------
+// The g-PREFIXED GNU NAME MAP, pinned (P-L1-1). Homebrew installs the GNU
+// coreutils whose names collide with a macOS tool under a `g` prefix, and each
+// runs the REAL GNU program -- `grm -rf <protected>` is a permanent deletion, not
+// the trash alias. The walk compared path.basename against literal names, so
+// every g-name was invisible (ALLOW). The map aliases each g-name to the plain
+// name the guard already models BEFORE every lookup. It is pinned here like
+// SYSTEM_DIRS is: a name added or removed goes red, and every mapped name must
+// resolve to a program already in the model (a wrapper, a carrier, or rm/rmdir)
+// so the map adds no new program. Behaviour is exercised by the g-name rows in
+// `blocked`/`allowed`; this pins the DATA so those rows cannot pass for the wrong
+// reason. gfind/gxargs are deliberately ABSENT -- the finding named them, they
+// ARE find/xargs, but findutils is not installed on the machine this guards, and
+// mapping only measured-installed names is the rule the pinned lists follow.
+// g 前綴 GNU 名字映射，釘住（P-L1-1）。Homebrew 把與 macOS 同名的 GNU coreutils 以 `g` 前綴安裝，每個跑的
+// 都是真正的 GNU 程式（`grm -rf <受保護>` 是永久刪除，不是垃圾桶別名）。走訪拿 basename 比字面名字，於是每個
+// g 名字都看不到（放行）。映射在每次查表前把 g 名字換成守衛已建模的原名。像 SYSTEM_DIRS 一樣釘在這裡：加減一個
+// 名字就會紅，且每個映射目標都必須是模型裡已有的程式（包裝命令／carrier／rm／rmdir），不新增任何程式。行為由
+// `blocked`/`allowed` 的 g 名字列驗；這裡釘住「資料」。gfind/gxargs 刻意不在（findutils 本機未安裝，只映射實測安裝的）。
+{
+  assert.ok(gnuPrefixedNames instanceof Map && gnuPrefixedNames.size > 0,
+    'the hook exported no gnuPrefixedNames map; the g-name rows would pass vacuously');
+  const byKey = (a, b) => (a[0] < b[0] ? -1 : 1);
+  const pinned = [
+    ['grm', 'rm'], ['grmdir', 'rmdir'], ['gtimeout', 'timeout'], ['genv', 'env'],
+    ['gnice', 'nice'], ['gnohup', 'nohup'], ['gstdbuf', 'stdbuf'], ['gchroot', 'chroot'],
+  ];
+  assert.deepStrictEqual([...gnuPrefixedNames.entries()].sort(byKey), pinned.sort(byKey),
+    'the g-prefixed GNU name map drifted from the pinned list');
+  assert.ok(!gnuPrefixedNames.has('gfind') && !gnuPrefixedNames.has('gxargs'),
+    'gfind/gxargs map to find/xargs but findutils is not installed; map only measured-installed names');
+  const modelled = new Set([...wrapperCommands, ...shellCarriers, 'rm', 'rmdir']);
+  for (const plain of gnuPrefixedNames.values()) {
+    assert.ok(modelled.has(plain),
+      `the g-name map resolves to ${plain}, which the guard does not model -- the rule is to add no new program`);
+  }
+  wrapperModelChecks += 1;
+}
+
+// longOptionArity(), the one place the getopt_long prefix rule lives (P-L1-2),
+// pinned on SYNTHETIC lists because the measured ones cannot reach two of its
+// answers: no real list has a prefix that mixes a value option with a no-value
+// one, and none holds a name that is a proper prefix of another. Each row is a
+// rule a mutant would break: an EXACT hit wins over a longer option it prefixes
+// (`--out` vs `--output`); a prefix that could be a value option OR a no-value
+// one is 'unknowable', never one reading picked (so never the permissive one);
+// an ambiguity whose candidates agree steps the way they agree; an attached
+// `=value`, an unknown token, a bare `--` and a short option consume nothing.
+// longOptionArity() 是 getopt_long 前綴規則唯一所在（P-L1-2），用「合成清單」釘住，因為實測清單走不到其中兩種答案：
+// 沒有任何真實清單有「吃值與不吃值混在一起」的前綴，也沒有名字是另一名字的真前綴。每一列都是某個突變會打破的規則：
+// 完全相符勝過它作為前綴的更長選項；可能吃值也可能不吃值的前綴是 'unknowable'，絕不挑一種讀法（所以絕不挑寬鬆的）；
+// 候選一致的歧義照一致的方式步進；相連 `=值`、未知 token、裸 `--` 與短選項都不多吃。
+{
+  const list = ['--alpha', '--alps', '--beta', '--out', '--output'];
+  const valued = ['--alpha', '--output'];
+  const rows = [
+    ['--out', list, valued, 'none'],
+    ['--outp', list, valued, 'value'],
+    ['--alph', list, valued, 'value'],
+    ['--be', list, valued, 'none'],
+    ['--al', list, valued, 'unknowable'],
+    ['--al', ['--alpha', '--alps'], ['--alpha', '--alps'], 'value'],
+    ['--al', ['--alpha', '--alps'], [], 'none'],
+    ['--alpha=1', list, valued, 'none'],
+    ['--zz', list, valued, 'none'],
+    ['--', ['--alpha'], ['--alpha'], 'none'],
+    ['-', ['--alpha'], ['--alpha'], 'none'],
+  ];
+  for (const [option, longOptions, valueLongOptions, wanted] of rows) {
+    assert.equal(longOptionArity(option, longOptions, valueLongOptions), wanted,
+      `longOptionArity(${option}) over [${longOptions}] (values [${valueLongOptions}]) must be ${wanted}`);
+    wrapperModelChecks += 1;
+  }
+}
+
+// ...and the WIRING of its 'unknowable' answer, through the real executable
+// walk. No measured list can reach it, so a synthetic row is added to the
+// exported table for the length of this block and removed in `finally`. A prefix
+// that could be the value option `--alpha` or the no-value `--alps` must make the
+// command word unknowable -- every later word judged as a removal operand -- so
+// the deletion behind it is refused under EITHER reading. Without the wiring the
+// walk took the no-value reading, landed on `x` and allowed. The benign twin
+// keeps this from passing by refusing everything.
+// ……以及它 'unknowable' 答案的「接線」，走真正的執行檔走訪。實測清單走不到，所以這一段期間在匯出的表加一列合成列、
+// `finally` 移除。可能是吃值的 `--alpha` 也可能是不吃值的 `--alps` 的前綴，必須讓命令字變成不可知（之後每個字都當刪除
+// 操作元判），於是不論哪種讀法、後面的刪除都被拒絕。少了接線，走訪會取不吃值的讀法、落在 `x`、放行。無害雙胞胎讓它不能
+// 靠「全部拒絕」通過。
+{
+  const probe = 'zz-ambiguity-probe';
+  assert.ok(!execWrappers.has(probe), `${probe} already names a real exec-wrapper row`);
+  execWrappers.set(probe, {
+    valueOptions: [], clusteredValue: null, leadingOperands: 0,
+    longOptions: ['--alpha', '--alps'], longValueOptions: ['--alpha'],
+  });
+  try {
+    assert.equal(evaluate(claude(`${probe} --al x rm -rf /etc`), env)?.hookSpecificOutput?.permissionDecision,
+      'deny', 'an ambiguous value/no-value long prefix must make the command word unknowable, not pick a reading');
+    assert.equal(evaluate(claude(`${probe} --al x ls build`), env), null,
+      'the unknowable command word must still allow operands that name nothing protected');
+    assert.equal(evaluate(claude(`${probe} --alph x rm -rf /etc`), env)?.hookSpecificOutput?.permissionDecision,
+      'deny', 'an unambiguous value prefix steps its value and reaches the removal');
+    wrapperModelChecks += 3;
+  } finally {
+    execWrappers.delete(probe);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // EVERY tilde form bash implements, and the property that replaces the list.
@@ -3712,6 +3955,48 @@ allowed.push(
   // 仍然要吃掉值的那一半的正對照：`-E` 若不再吃掉它的值，走訪會停在 `EOF` 上。
   "echo hi | xargs -E EOF bash -c 'echo hi'",
   'echo hi | xargs -a list.txt -n 2 echo',
+);
+// P-L1-2 for xargs. BSD xargs on this Mac uses getopt_long and accepts any
+// unambiguous prefix: `--max-a 1`, `--max-p 2`, `--max-c 200` all ran a
+// `/bin/echo` stand-in fed one stdin line (measured 2026-11-01), and GNU's
+// getopt_long does the same for its own names (`--rep` is `--replace`, `--proc`
+// is `--process-slot-var`; findutils manual, no GNU xargs here). The branch
+// matched only full spellings, so the value became the command word and every
+// row below was ALLOW at 197eb2a. `--max` is rejected by both as ambiguous -- it
+// could be a value option or the optional-argument `--max-lines` -- and the guard
+// must not pick either reading, so it refuses what follows rather than allowing it.
+// P-L1-2 的 xargs 部分。本機 BSD xargs 用 getopt_long、接受不歧義前綴（`--max-a 1` 等都跑了 `/bin/echo` 替身，2026-11-01
+// 實測），GNU 對自己的名字也一樣（`--rep` 是 `--replace`、`--proc` 是 `--process-slot-var`，依 findutils 手冊）。分支只比完整
+// 拼法，於是值變成命令字，下面每一列在 197eb2a 都放行。`--max` 兩邊都判歧義拒絕（可能是吃值選項也可能是選填值的
+// `--max-lines`），守衛不可挑任何一種讀法，所以拒絕後面的東西而不是放行。
+blocked.push(
+  'echo /etc | xargs --max-a 1 rm -rf',
+  'echo /etc | xargs --max-p 2 rm -rf',
+  'echo /etc | xargs --max-c 200 rm -rf',
+  "echo 'rm -rf /etc' | xargs --rep sh -c '{}'",
+  "echo 'rm -rf /etc' | xargs --rep=% sh -c '%'",
+  "echo 'rm -rf /etc' | xargs --proc V bash -c",
+  'printf x | xargs --max 1 rm -rf /etc',
+  // Read as a VALUE option, `--max` would eat `rm` and allow this; read as
+  // no-value it reaches rm. 'unknowable' must refuse it -- the permissive reading
+  // is the one a list that dropped `--max-lines` would pick.
+  // 當成吃值選項，`--max` 會吃掉 `rm` 而放行；當成不吃值則落在 rm。'unknowable' 必須拒絕——寬鬆的讀法正是少了
+  // `--max-lines` 的清單會挑的那種。
+  'printf x | xargs --max rm -rf /etc',
+  // An attached value is one word: `--max-a=1` must not also eat `rm`.
+  // 相連的值是一個字：`--max-a=1` 不可以再吃掉 `rm`。
+  'echo /etc | xargs --max-a=1 rm -rf',
+);
+allowed.push(
+  // The prefixes with a harmless command, and the ambiguous `--max` with operands
+  // that name nothing protected: the unknowable reading refuses only what a
+  // removal there would reach.
+  // 前綴配上無害命令，以及歧義的 `--max` 配上不指向受保護路徑的操作元：不可知的讀法只拒絕那裡的刪除會碰到的東西。
+  'ls | xargs --max-a 1 echo',
+  "find . -name '*.o' | xargs --max-p 4 grep foo",
+  'ls | xargs --nu echo',
+  "echo hi | xargs --rep echo '{}'",
+  'printf x | xargs --max 1 ls build',
 );
 allowed.push(
   // A literal emitter whose text is ordinary stays ordinary: the rule READS the

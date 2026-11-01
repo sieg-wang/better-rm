@@ -148,6 +148,44 @@ for (const [name, spec] of execWrappers) {
   checks += 1;
 }
 
+// A row that models a GNU-build tool's LONG value options (gstdbuf, gchroot reach
+// this table under their plain names) declares longOptions (the full list, for
+// prefix resolution) and longValueOptions (the ones that take a separate word).
+// getopt_long accepts any unambiguous prefix, so a longValueOption that is not in
+// longOptions could never resolve -- that drift is caught here, in both
+// directions, the same way the pinned lists above are.
+// 一列若要模型化 GNU build 工具的「長值選項」（gstdbuf、gchroot 以原名走到這張表），會宣告 longOptions
+// （完整清單，供前綴解析）與 longValueOptions（吃獨立字的那些）。longValueOption 若不在 longOptions 裡就永遠解析
+// 不到——這種走岔在這裡雙向抓。
+for (const [name, spec] of execWrappers) {
+  if (spec.longOptions === undefined && spec.longValueOptions === undefined) continue;
+  assert.ok(Array.isArray(spec.longOptions),
+    `${name} declares long-option handling but longOptions is not an array`);
+  assert.ok(Array.isArray(spec.longValueOptions),
+    `${name} declares long-option handling but longValueOptions is not an array`);
+  for (const option of spec.longValueOptions) {
+    assert.ok(option.startsWith('--'),
+      `${name}: long value option ${option} must be spelled with --`);
+    assert.ok(spec.longOptions.includes(option),
+      `${name}: ${option} takes a value but is absent from longOptions, so its prefixes resolve to null`);
+    checks += 1;
+  }
+}
+
+// The shortest `--` prefix that resolves to exactly one long option AND is that
+// option -- the spelling getopt_long accepts and a full-spelling-only guard
+// missed. Falls back to the full option when no shorter prefix is unique.
+// 解析到唯一一個長選項、且就是它的最短 `--` 前綴——getopt_long 接受、而只比完整拼法的守衛會漏的那個；
+// 沒有更短的唯一前綴時退回完整選項。
+function shortestUniquePrefix(option, longOptions) {
+  for (let len = 3; len < option.length; len += 1) {
+    const prefix = option.slice(0, len);
+    const matches = longOptions.filter((full) => full.startsWith(prefix));
+    if (matches.length === 1 && matches[0] === option) return prefix;
+  }
+  return option;
+}
+
 // ---------------------------------------------------------------------------
 // 2. EVERY ROW EXERCISED, with the shapes generated from the row itself.
 // ---------------------------------------------------------------------------
@@ -200,6 +238,23 @@ for (const [name, spec] of execWrappers) {
     // (f) the option as the LAST word: there is no value, and the walk must end
     //     rather than read past the end of the command.
     expect(`${name} ${option} at end of input`, `${name} ${option}`, 'ALLOW');
+  }
+
+  // (d')-(f') THE SAME GRID for every LONG value option, in its full spelling AND
+  //     its shortest unambiguous prefix -- the getopt_long form a full-spelling
+  //     match missed (P-L1-2). gstdbuf/gchroot reach this table under their plain
+  //     names, so `stdbuf --out 0 rm -rf /etc` and `chroot --us x / rm -rf /etc`
+  //     must step the value and (for chroot) the newroot before landing on rm.
+  for (const option of spec.longValueOptions || []) {
+    for (const spelling of new Set([option, shortestUniquePrefix(option, spec.longOptions)])) {
+      expect(`${name} ${spelling} value`,
+        assemble([name, spelling, VALUE, lead, 'rm -rf /etc']), 'DENY');
+      for (const sep of SEPARATORS) {
+        expect(`${name} ${spelling} then ${JSON.stringify(sep)}`,
+          `${name} ${spelling} ${sep} rm -rf /etc`, 'DENY');
+      }
+      expect(`${name} ${spelling} at end of input`, `${name} ${spelling}`, 'ALLOW');
+    }
   }
 
   if (spec.clusteredValue !== null) {
