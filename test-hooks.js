@@ -4191,6 +4191,21 @@ allowed.push(
   "env --C / bash <<'EOF'\nls -l /tmp\nEOF",
   "echo 'ls -l /tmp' | env --P /bin bash",
 );
+// Both candidate words are shells. BSD takes the earlier shell as -C's value; it
+// runs the later one on the piped script only when the cwd holds a directory of
+// that name, and otherwise the chdir fails, env exits 125 and nothing runs, so
+// refusing the line is right either way. The disagreement path used to stop at
+// the earlier shell whenever it was one, and the pipe check then saw a shell whose
+// operand is a script FILE, not stdin, so the pipe form was ALLOW at every
+// version (the heredoc forms were already DENY). It now stops at the later shell
+// whatever the earlier word is. cases14 row 2; its benign twin, row 7, must stay
+// ALLOW.
+// 兩個候選字都是 shell。BSD 把較前的 shell 當 -C 的值；只有 cwd 裡有同名目錄時才讓較後的跑管線腳本，否則 chdir 失敗、
+// env 以 125 退出、什麼都不跑，所以兩種情況拒絕這行都對。分歧路徑原本只要較前的是 shell 就停在那裡，
+// 管線檢查看到的 shell 的操作元是腳本「檔」而不是 stdin，所以管線形式在每個版本都放行（heredoc 形式本來就拒絕）。現在不論
+// 較前的字是什麼都停在較後的 shell。cases14 第 2 列；其良性雙胞胎第 7 列必須維持放行。
+blocked.push("echo 'rm -rf /etc' | env --C sh bash");
+allowed.push("env --C sh bash <<'EOF'\nls -l /tmp\nEOF");
 allowed.push(
   // A literal emitter whose text is ordinary stays ordinary: the rule READS the
   // script rather than refusing every xargs pipeline.

@@ -5358,10 +5358,19 @@ function commandTargetsScanOneReading(
               // arrive by heredoc or by a pipe into env -- routes only the carrier
               // walks read, and only when the ordinary walk is LEFT POINTING at that
               // carrier. So:
-              //  - if the carrier is the LATER word (`env --C / bash <<EOF`,
+              //  - if the LATER word is a carrier (`env --C / bash <<EOF`,
               //    `... | env --C / bash`: BSD reads `-C /` and runs bash), leave `i`
-              //    at `hi` so the carrier walks and the executable walk see it;
-              //  - if the carrier is the EARLIER word (`env --un bash <<EOF`: BSD
+              //    at `hi` so the carrier walks and the executable walk see it --
+              //    and this holds when the EARLIER word is a carrier TOO
+              //    (`... | env --C sh bash`): BSD takes `sh` as -C's value; it runs
+              //    bash on the piped script only when the cwd holds a directory
+              //    named `sh`, and otherwise the chdir fails, env exits 125 and
+              //    nothing runs, so refusing the line is right either way. Under the
+              //    other reading the earlier shell gets the later word as its script
+              //    FILE, so it does not run stdin and stepping past it loses nothing.
+              //    Stopping at the earlier shell instead left the pipe form ALLOW
+              //    (measured 2026-11-01);
+              //  - if only the EARLIER word is a carrier (`env --un bash <<EOF`: BSD
               //    reads `-u n` and runs bash), leave `i` at `lo`, as before;
               //  - otherwise the command is an rm at one position or the other:
               //    leave `i` at `lo` (an rm there resolves normally) and scan the
@@ -5374,20 +5383,26 @@ function commandTargetsScanOneReading(
               // allowed (`env --P /bin ls -l /tmp`). All measured 2026-11-01.
               // 兩種讀法把命令字放在相鄰一格（一個把 token 的值當獨立字吃、一個沒有）：命令在一種讀法下在 `lo`、另一種在 `hi`，
               // 中間那個字是選項值、不是目標。carrier（`bash`）在任一讀法下都可能是命令，其腳本可能由 heredoc 或管線進 env——
-              // 只有 carrier 機制讀得到，且只在「一般走訪停在那個 carrier 上」時。所以：carrier 是較後的字（`env --C / bash <<EOF`：
-              // BSD 讀 `-C /` 跑 bash）就把 `i` 停在 `hi`，讓 carrier 機制與執行檔走訪看得到；carrier 是較前的字（`env --un bash`）
-              // 就停在 `lo`，一如之前；否則命令是某一位置的 rm：停在 `lo`（那裡的 rm 正常解析），並從 `hi` 把尾端當刪除操作元掃，
+              // 只有 carrier 機制讀得到，且只在「一般走訪停在那個 carrier 上」時。所以：較後的字是 carrier（`env --C / bash <<EOF`：
+              // BSD 讀 `-C /` 跑 bash）就把 `i` 停在 `hi`，讓 carrier 機制與執行檔走訪看得到——較前的字「也」是 carrier 時同樣如此
+              // （`... | env --C sh bash`）：BSD 把 `sh` 當 -C 的值；只有 cwd 裡有名為 `sh` 的目錄時才讓 bash 跑管線腳本，否則 chdir 失敗、
+              // env 以 125 退出、什麼都不跑，所以兩種情況拒絕這行都對。另一種讀法下較前的 shell 拿到較後的字當腳本「檔」，
+              // 不會跑 stdin，跨過它不漏任何東西。停在較前的 shell 會讓管線形式放行（2026-11-01 實測）。只有較前的字是 carrier
+              // （`env --un bash`）就停在 `lo`，一如之前；否則命令是某一位置的 rm：停在 `lo`（那裡的 rm 正常解析），並從 `hi` 把尾端當刪除操作元掃，
               // 連 `lo` 是 `/` 這種 basename 解不出執行檔時、另一種讀法放在那裡的 rm 也抓得到。這不是 unmodelledOption：命令字是被
               // 解析、不是宣告為不可知。lo 與 hi 之間的選項值永不被當操作元掃，所以值選項後的良性命令維持放行。
               const lo = Math.min(gnuNext, bsdNext);
               const hi = Math.max(gnuNext, bsdNext);
               const carrierAt = (p) => p < words.length && shellCarriers.has(commandName(words[p]));
-              if (carrierAt(hi) && !carrierAt(lo)) {
-                // The carrier is the LATER word. Leave the walk there so the carrier
-                // walks (heredoc, stdin/pipe) and the executable walk read its
-                // script. The earlier word is this reading's option-value, not a
-                // command, so it is not scanned.
-                // carrier 是較後的字。把走訪停在那裡，讓 carrier 機制（heredoc、stdin／管線）與執行檔走訪讀它的腳本。較前的字是這種讀法的選項值、不是命令，不掃。
+              if (carrierAt(hi)) {
+                // The LATER word is a carrier, whatever the earlier word is. Leave
+                // the walk there so the carrier walks (heredoc, stdin/pipe) and the
+                // executable walk read its script. The earlier word is either this
+                // reading's option-value or, if it is a shell too, a shell whose
+                // script FILE is the later word -- not one that runs stdin -- so it
+                // is not scanned.
+                // 較後的字是 carrier，不論較前的字是什麼。把走訪停在那裡，讓 carrier 機制（heredoc、stdin／管線）與執行檔走訪讀它的
+                // 腳本。較前的字要嘛是這種讀法的選項值，要嘛（也是 shell 時）是把較後的字當腳本「檔」的 shell——不會跑 stdin——所以不掃。
                 i = hi;
               } else {
                 // The command is at the EARLIER word -- a carrier there (its heredoc
