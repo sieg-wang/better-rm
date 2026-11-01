@@ -2892,7 +2892,7 @@ assert.ok(wrapperModelChecks >= requiredExecWrapperNames.length + execWrappers.s
 // g 名字都看不到（放行）。映射在每次查表前把 g 名字換成守衛已建模的原名。像 SYSTEM_DIRS 一樣釘在這裡：加減一個
 // 名字就會紅，且每個映射目標都必須是模型裡已有的程式（包裝命令／carrier／rm／rmdir），不新增任何程式。行為由
 // `blocked`/`allowed` 的 g 名字列驗；這裡釘住「資料」。gfind/gxargs 在表裡，雖然本機沒裝 findutils：agent 可以在守衛
-// 判定中的 session 裡安裝它，映射不能取決於今天裝了什麼。gtime 仍不在（見 hook）。
+// 判定中的 session 裡安裝它，映射不能取決於今天裝了什麼。gtime 映射到 `time`——保留字拼作 `time` 不是 `gtime`，裸字衝突對 g 名字不適用。
 {
   assert.ok(gnuPrefixedNames instanceof Map && gnuPrefixedNames.size > 0,
     'the hook exported no gnuPrefixedNames map; the g-name rows would pass vacuously');
@@ -4157,6 +4157,40 @@ blocked.push(
   'sudo --chr /jail rm -rf /etc',
 );
 allowed.push('sudo --chroot /jail ls -l /tmp');
+// ---------------------------------------------------------------------------
+// ACCEPTOR ROUND 2. In env's disagreement path the command word can be a SHELL at
+// the LATER of the two positions (BSD reads the token as a value option and runs
+// the word after its value), and that shell's script can arrive by a heredoc or by
+// a pipe into env -- routes only the carrier walks read. The disagreement path now
+// leaves the walk pointing at that carrier so those walks see it. Rows below are
+// ALLOW at 197eb2a, 864c31a AND dcdbadc (pre-existing, the carrier-at-the-later-
+// word case was never covered); measured on stock /usr/bin/env 2026-11-01 that the
+// body runs. cases13 rows 1-6.
+// 驗收第二輪。env 的分歧路徑裡，命令字可能是「較後位置」的 shell（BSD 把 token 讀成值選項、跑其值後面的字），而那個 shell 的
+// 腳本可能由 heredoc 或管線進 env——只有 carrier 機制讀得到。分歧路徑現在把走訪停在那個 carrier 上讓那些機制看得到。下面各列
+// 在 197eb2a／864c31a／dcdbadc 都放行（既有，不是回歸）；2026-11-01 在原廠 /usr/bin/env 上實測 body 會跑。
+blocked.push(
+  "env --C / bash <<'EOF'\nrm -rf /etc\nEOF",
+  "echo 'rm -rf /etc' | env --C / bash",
+  "env --P /bin bash <<'EOF'\nrm -rf /etc\nEOF",
+  "echo 'rm -rf /etc' | env --P /bin bash",
+  "env --iu FOO bash <<'EOF'\nrm -rf /etc\nEOF",
+  "echo 'rm -rf /etc' | env --iu FOO bash",
+  // The tail scan of the disagreement path reads a WHITESPACE word as a command
+  // (defence in depth, as the unresolved-executable arm does): `env --C /` then a
+  // single word that is itself a removal. Kills the mutant that drops that
+  // nested-scan (the acceptor's B6); without it the word is only compared as a
+  // path, which names nothing protected, and the row flips to ALLOW.
+  // 分歧路徑的尾端掃描把「含空白的字」當命令讀（縱深防禦，與 unresolved-executable 分支一樣）。殺掉移除該 nested-scan 的突變（B6）。
+  "env --C / 'rm -rf /etc'",
+);
+allowed.push(
+  // Benign twins: the carrier at the later word runs a harmless body, by heredoc
+  // and by pipe. cases13 rows 9-10. Must stay ALLOW.
+  // 良性雙胞胎：較後位置的 carrier 跑無害 body（heredoc 與管線）。必須維持放行。
+  "env --C / bash <<'EOF'\nls -l /tmp\nEOF",
+  "echo 'ls -l /tmp' | env --P /bin bash",
+);
 allowed.push(
   // A literal emitter whose text is ordinary stays ordinary: the rule READS the
   // script rather than refusing every xargs pipeline.

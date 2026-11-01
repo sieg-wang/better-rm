@@ -4202,8 +4202,10 @@ function longOptionMatches(option, longOptions) {
 // pins the helper (unit rows on synthetic lists), the wiring through the
 // exec-wrapper table (a synthetic row) and the real xargs case.
 // 長選項 token 怎麼推進走訪：'value'（下一個字是它的值）、'none'（它就是一個字）、或 'unknowable'。相連的值
-// （`--k=1`）比不中任何名字（沒有名字含 `=`），所以是 'none'、不再多吃——值就在字裡。未知 token 也是 'none'：真實工具
-// 拒絕它、什麼都不跑。候選「全部吃值」或「全部不吃值」的歧義前綴，在每一種讀法下步進都一樣（GNU timeout 的 `--v`：
+// （`--k=1`）比不中任何名字（沒有名字含 `=`），所以是 'none'、不再多吃——值就在字裡。未知 token 在 getopt_long 眼中也是
+// 'none'：用 getopt_long 的工具拒絕它、什麼都不跑。但不是每個包裝命令都這樣——BSD /usr/bin/env 沒有長選項，把「未知」的
+// `--X...` 讀成 -i 加短 cluster、照跑其後的命令——所以 env 分支自己算那第二種讀法（envShortAction），不信這個 'none'。
+// 候選「全部吃值」或「全部不吃值」的歧義前綴，在每一種讀法下步進都一樣（GNU timeout 的 `--v`：
 // 'none'），就照那樣步進。只有「可能是吃值選項、也可能是不吃值選項」的前綴才是 'unknowable'，呼叫端會把命令字標成
 // 不可知（`unmodelledOption`，與 xcrun 的 `knownOptions` 同一個答案）：不挑任何一種讀法，寬鬆的那種就不可能被挑到。
 // 實測清單裡這種前綴是 xargs 的 `--max`（三個吃值選項加上選填值 `--max-lines`）與 sudo 的 `--h`（help|host）、`--p`、`--r`；
@@ -5317,15 +5319,17 @@ function commandTargetsScanOneReading(
             // token minus one dash, through the same envShortAction() the real
             // short tokens use. Each reading's split string is scanned; when the
             // two place the command word differently (or one splits and the other
-            // does not) the walk FAILS CLOSED -- unknowable command word, every
-            // later word judged as a removal operand -- and steps the earlier of
-            // the two, so neither reading's command word is stepped over.
+            // does not) the disagreement block below RESOLVES the command word at
+            // both candidate positions (it does NOT set unmodelledOption): it leaves
+            // the walk pointing at whichever is a carrier, so the carrier walks read
+            // a heredoc/piped script there, and scans the tail from the other as
+            // removal operands.
             // `--...` 的 env token 用兩種方式讀，命令字在兩種下都被掃。GNU env（genv）用前綴把它解析成長選項；但本機 PATH
             // 上唯一的 env 是 BSD /usr/bin/env，它沒有長選項：開頭 `-` 當它過時的 -i、其餘當短 cluster，所以 `--un` 是 `-u`
             // 帶相連值 `n`、下一個字才是命令——而 GNU 會把那個字吃掉。那個回歸（767a2fe）放行了 `env --un rm -rf /etc`。
             // 所以 BSD 的讀法也算出來（token 去掉一個 dash，走真短 token 用的同一個 envShortAction()）。兩種讀法的拆解字串
-            // 都掃；兩者把命令字放在不同位置（或一邊拆、一邊不拆）時，走訪 fail closed——命令字不可知、之後每個字都當刪除
-            // 操作元判——並步進較早的那個，兩種讀法的命令字都不會被跨過。
+            // 都掃；兩者把命令字放在不同位置（或一邊拆、一邊不拆）時，下面的分歧區塊會「解析」兩個候選位置的命令字（不設
+            // unmodelledOption）：把走訪停在是 carrier 的那一個，讓 carrier 機制讀那裡的 heredoc／管線腳本，另一個起的尾端當刪除操作元掃。
             const eq = option.indexOf('=');
             const name = eq === -1 ? option : option.slice(0, eq);
             const matches = longOptionMatches(name, ENV_LONG_OPTIONS);
@@ -5347,38 +5351,65 @@ function commandTargetsScanOneReading(
               i = gnuNext;
             } else {
               // The readings put the command word one position apart (one consumes
-              // the token's value as a separate word, the other does not), so the
+              // the token's value as a separate word, the other does not): the
               // command is at `lo` under one reading and at `hi` under the other,
-              // and the word BETWEEN them is an option-value, not a target. Both
-              // command positions are covered WITHOUT scanning that value:
-              //  - `i` is left at `lo`, so the ordinary walk resolves the word
-              //    there -- it reaches a carrier's heredoc or piped script
-              //    (`env --un bash <<EOF`, `... | env --un bash`) that only the
-              //    carrier machinery reads, and an rm there, exactly as usual;
-              //  - the tail from `hi` is scanned as removal operands, catching a
-              //    removal the OTHER reading puts there even when `lo` was a path
-              //    whose basename is empty (`env --C / rm -rf /etc`: `lo` is `/`,
-              //    which resolves to no executable, so the walk alone would miss).
-              // The value at `lo` is never operand-scanned, so a benign command
-              // behind a value option stays allowed (`env --P /bin ls -l /tmp`).
-              // All measured 2026-11-01.
-              // 兩種讀法把命令字放在相鄰一格（一個把 token 的值當獨立字吃掉、一個沒有），命令在一種讀法下在 `lo`、另一種在 `hi`，
-              // 而兩者之間那個字是選項值、不是目標。兩個命令位置都覆蓋到、又不掃那個值：`i` 停在 `lo`，讓一般走訪解析那裡的字——
-              // 碰到 carrier 的 heredoc／管線腳本（只有 carrier 機制讀得到）與那裡的 rm，一如往常；`hi` 起的尾端當刪除操作元掃，
-              // 連 `lo` 是 basename 為空的路徑（`env --C / rm`：`lo` 是 `/`、解析不出執行檔，單靠走訪會漏）時、另一種讀法放在那裡的
-              // 刪除也抓得到。`lo` 的值永不被當操作元掃，所以值選項後面的良性命令維持放行（`env --P /bin ls -l /tmp`）。
+              // and the word BETWEEN is an option-value, not a target. A carrier
+              // (`bash`) can be the command under EITHER reading, and its script may
+              // arrive by heredoc or by a pipe into env -- routes only the carrier
+              // walks read, and only when the ordinary walk is LEFT POINTING at that
+              // carrier. So:
+              //  - if the carrier is the LATER word (`env --C / bash <<EOF`,
+              //    `... | env --C / bash`: BSD reads `-C /` and runs bash), leave `i`
+              //    at `hi` so the carrier walks and the executable walk see it;
+              //  - if the carrier is the EARLIER word (`env --un bash <<EOF`: BSD
+              //    reads `-u n` and runs bash), leave `i` at `lo`, as before;
+              //  - otherwise the command is an rm at one position or the other:
+              //    leave `i` at `lo` (an rm there resolves normally) and scan the
+              //    tail from `hi` as removal operands, so an rm the other reading
+              //    puts there is caught even when `lo` is a path like `/` whose
+              //    basename resolves to no executable (`env --C / rm -rf /etc`).
+              // This is NOT unmodelledOption: the command word is resolved, not
+              // declared unknowable. The option-value between lo and hi is never
+              // operand-scanned, so a benign command behind a value option stays
+              // allowed (`env --P /bin ls -l /tmp`). All measured 2026-11-01.
+              // 兩種讀法把命令字放在相鄰一格（一個把 token 的值當獨立字吃、一個沒有）：命令在一種讀法下在 `lo`、另一種在 `hi`，
+              // 中間那個字是選項值、不是目標。carrier（`bash`）在任一讀法下都可能是命令，其腳本可能由 heredoc 或管線進 env——
+              // 只有 carrier 機制讀得到，且只在「一般走訪停在那個 carrier 上」時。所以：carrier 是較後的字（`env --C / bash <<EOF`：
+              // BSD 讀 `-C /` 跑 bash）就把 `i` 停在 `hi`，讓 carrier 機制與執行檔走訪看得到；carrier 是較前的字（`env --un bash`）
+              // 就停在 `lo`，一如之前；否則命令是某一位置的 rm：停在 `lo`（那裡的 rm 正常解析），並從 `hi` 把尾端當刪除操作元掃，
+              // 連 `lo` 是 `/` 這種 basename 解不出執行檔時、另一種讀法放在那裡的 rm 也抓得到。這不是 unmodelledOption：命令字是被
+              // 解析、不是宣告為不可知。lo 與 hi 之間的選項值永不被當操作元掃，所以值選項後的良性命令維持放行。
               const lo = Math.min(gnuNext, bsdNext);
               const hi = Math.max(gnuNext, bsdNext);
-              for (let k = hi; k < words.length && !operatorAt(k, separators); k += 1) {
-                const w = words[k];
-                if (w === '--') continue;
-                if (/\s/.test(w)) {
-                  if (depth >= 8) targets.push('/');
-                  else targets.push(...nestedScan(w, depth + 1, false, expansionEnv));
+              const carrierAt = (p) => p < words.length && shellCarriers.has(commandName(words[p]));
+              if (carrierAt(hi) && !carrierAt(lo)) {
+                // The carrier is the LATER word. Leave the walk there so the carrier
+                // walks (heredoc, stdin/pipe) and the executable walk read its
+                // script. The earlier word is this reading's option-value, not a
+                // command, so it is not scanned.
+                // carrier 是較後的字。把走訪停在那裡，讓 carrier 機制（heredoc、stdin／管線）與執行檔走訪讀它的腳本。較前的字是這種讀法的選項值、不是命令，不掃。
+                i = hi;
+              } else {
+                // The command is at the EARLIER word -- a carrier there (its heredoc
+                // or piped script read by the ordinary walk) or an rm -- so leave
+                // the walk at `lo`; and scan the tail from `hi` as removal operands,
+                // catching an rm the OTHER reading puts there even when `lo` is a
+                // path like `/` whose basename resolves to no executable. The value
+                // between is never scanned, so a benign command behind a value
+                // option stays allowed.
+                // 命令在較前的字——carrier（其 heredoc／管線腳本由一般走訪讀）或 rm——所以停在 `lo`；並從 `hi` 把尾端當刪除操作元掃，
+                // 連 `lo` 是 `/` 這種 basename 解不出執行檔時、另一種讀法放在那裡的 rm 也抓得到。中間的值永不被掃，值選項後的良性命令維持放行。
+                for (let k = hi; k < words.length && !operatorAt(k, separators); k += 1) {
+                  const w = words[k];
+                  if (w === '--') continue;
+                  if (/\s/.test(w)) {
+                    if (depth >= 8) targets.push('/');
+                    else targets.push(...nestedScan(w, depth + 1, false, expansionEnv));
+                  }
+                  if (!w.startsWith('-') || w === '-') targets.push(targetFromWord(w, dynamicExpansions[k], expansionEnv));
                 }
-                if (!w.startsWith('-') || w === '-') targets.push(targetFromWord(w, dynamicExpansions[k], expansionEnv));
+                i = lo;
               }
-              i = lo;
             }
           } else if (option.startsWith('-')) {
             // A real short token, BSD env's own cluster grammar, in one place
