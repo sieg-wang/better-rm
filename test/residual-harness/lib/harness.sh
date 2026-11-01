@@ -198,7 +198,9 @@ hs_track_bg() {
 }
 
 # ---------------------------------------------------------------------------
-# timeout（macOS 沒有內建）/ timeout (not shipped by stock macOS)
+# timeout（macOS 27.2 起內建 BSD /usr/bin/timeout，較舊的 macOS 沒有；GNU 版與 BSD 版這裡都能用，只用到
+# `timeout N` 與 `-s KILL N`）/ timeout (stock macOS ships BSD /usr/bin/timeout since 27.2, older
+# releases do not; the GNU and BSD builds both work here -- only `timeout N` and `-s KILL N` are used)
 # ---------------------------------------------------------------------------
 
 hs_detect_timeout() {
@@ -217,7 +219,8 @@ hs_require_timeout() {
     hs_detect_timeout
     [ -n "$HS_TIMEOUT_BIN" ] ||
         hs_die "this probe plants objects that make better-rm block forever and needs
-  coreutils 'timeout' (or 'gtimeout'). Stock macOS ships neither: brew install coreutils."
+  a 'timeout' (or 'gtimeout') on PATH. macOS 27.2 and later ship /usr/bin/timeout; on an
+  older macOS, brew install coreutils."
 }
 
 # ---------------------------------------------------------------------------
