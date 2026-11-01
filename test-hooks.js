@@ -1666,6 +1666,17 @@ const blocked = [
   // （複合寫法讓執行檔走訪在 heredoc 之前就結束），coproc 的 NAME 判斷要把 `grm` 當命令字，與 `rm` 一樣。
   "{ gtimeout 5 bash; } <<'EOF'\nrm -rf /etc\nEOF",
   'coproc NAME grm -rf /etc',
+  // gfind / gxargs, findutils' g-names. Not installed on this Mac, but an agent
+  // can `brew install findutils` in the session the guard is judging, so the
+  // mapping cannot wait for it. Each row is the g-twin of a plain find/xargs row
+  // the guard already refuses; all five were ALLOW at 197eb2a and at 767a2fe.
+  // gfind／gxargs，findutils 的 g 名字。本機未安裝，但 agent 可以在守衛正在判定的 session 裡 `brew install findutils`，
+  // 映射不能等它裝好。每一列都是守衛已拒絕之原名 find／xargs 列的 g 雙胞胎；五列在 197eb2a 與 767a2fe 都放行。
+  'gfind /etc -delete',
+  'gfind /etc -exec rm -rf {} +',
+  'echo /etc | gxargs rm -rf',
+  "echo 'rm -rf /etc' | gxargs -I{} sh -c '{}'",
+  'gfind . -name x -print0 | gxargs -0 rm -rf',
   // P-L1-2 (MED): getopt_long (GNU coreutils, and BSD timeout/xargs on macOS 27.2)
   // accepts ANY UNAMBIGUOUS PREFIX of a long option, so `--kill 1`, `--sig TERM`,
   // `--un FOO` each consume the following word exactly as the full spelling does.
@@ -1724,6 +1735,39 @@ const blocked = [
   'sudo chroot --us 0:0 / rm -rf /etc',
   'sudo chroot --groups 0 / rm -rf /etc',
   'sudo gchroot --u 0:0 / rm -rf /etc',
+  // sudo (1.9.17p2 here) uses getopt_long too: `sudo --vers` and `sudo --he`
+  // print what `--version` and `--help` do, and `--h` is rejected as ambiguous
+  // (measured 2026-11-01 with those no-value spellings only -- nothing that runs
+  // a command or prompts). So a prefix of a value option takes the next word:
+  // `--us root` is `--user root`, and the walk read `root` as the command word.
+  // Only `--ro`/`--t` (SELinux) prefixes were enumerated before. All of these
+  // were ALLOW at 197eb2a and at 767a2fe.
+  // sudo（本機 1.9.17p2）也用 getopt_long：`sudo --vers`、`sudo --he` 與 `--version`、`--help` 輸出相同，`--h` 被判歧義
+  // （只用不吃值、不跑命令也不問密碼的拼法實測）。所以吃值選項的前綴會吃下一個字：`--us root` 就是 `--user root`，走訪原本
+  // 把 `root` 當命令字。以前只列舉了 `--ro`/`--t`（SELinux）的前綴。下面每列在 197eb2a 與 767a2fe 都放行。
+  'sudo --us root rm -rf /etc',
+  'sudo --u root rm -rf /etc',
+  'sudo --gr wheel rm -rf /etc',
+  'sudo --chd /tmp rm -rf /etc',
+  'sudo --ch /tmp rm -rf /etc',
+  'sudo --close 3 rm -rf /etc',
+  'sudo --command-t 5 rm -rf /etc',
+  'sudo --pro x rm -rf /etc',
+  'sudo --ho localhost rm -rf /etc',
+  'sudo --u root grm -rf /etc',
+  // An AMBIGUOUS sudo prefix that could be a value option or a no-value one
+  // (`--h` help|host, `--p` prompt|preserve-*, `--r` role|re*-timestamp) must not
+  // pick a reading: the command word becomes unknowable and the removal behind it
+  // is refused either way. The last row is the one a value reading would ALLOW
+  // (it eats `rm`), so it pins that the permissive reading is never picked.
+  // 可能是吃值也可能是不吃值的 sudo 歧義前綴（`--h`、`--p`、`--r`）不可挑讀法：命令字變不可知，後面的刪除不論哪種讀法都被
+  // 拒絕。最後一列是「吃值讀法」會放行的那一種（它吃掉 `rm`），釘住「絕不挑寬鬆的讀法」。
+  'sudo --h x rm -rf /etc',
+  'sudo --p x rm -rf /etc',
+  'sudo --r x rm -rf /etc',
+  'sudo --h rm -rf /etc',
+  'sudo --p rm -rf /etc',
+  'sudo --r rm -rf /etc',
 ];
 
 const allowed = [
@@ -2478,6 +2522,21 @@ const allowed = [
   'gnice -n 5 echo hi',
   'genv FOO=1 ls',
   'gstdbuf -o0 cat file',
+  "gfind . -name '*.o'",
+  "gfind . -name '*.o' | gxargs grep foo",
+  'ls | gxargs echo',
+  // sudo prefixes wrapping a harmless command, a bare `sudo --vers`, no-value
+  // prefixes (`--non`, `--pre`), and the ambiguous `--h` with operands that name
+  // nothing protected: the unknowable reading refuses only what a removal there
+  // would reach.
+  // sudo 前綴包住無害命令、裸 `sudo --vers`、不吃值的前綴（`--non`、`--pre`），以及歧義的 `--h` 配上不指向受保護路徑的
+  // 操作元：不可知的讀法只拒絕那裡的刪除會碰到的東西。
+  'sudo --us root ls -l /tmp',
+  'sudo --chd /tmp make',
+  'sudo --vers',
+  'sudo --non ls -l /tmp',
+  'sudo --pre ls build',
+  'sudo --h x ls build',
   // timeout with full AND abbreviated options wrapping a harmless command. The
   // --verbose / --foreground rows are load-bearing: those long options take NO
   // value, so a guard that treated every `--xxx` as value-taking would eat the
@@ -2823,14 +2882,15 @@ assert.ok(wrapperModelChecks >= requiredExecWrapperNames.length + execWrappers.s
 // resolve to a program already in the model (a wrapper, a carrier, or rm/rmdir)
 // so the map adds no new program. Behaviour is exercised by the g-name rows in
 // `blocked`/`allowed`; this pins the DATA so those rows cannot pass for the wrong
-// reason. gfind/gxargs are deliberately ABSENT -- the finding named them, they
-// ARE find/xargs, but findutils is not installed on the machine this guards, and
-// mapping only measured-installed names is the rule the pinned lists follow.
+// reason. gfind/gxargs are PRESENT although findutils is not installed here: an
+// agent can install it in the session the guard is judging, so the map cannot
+// depend on what is installed today. gtime stays absent (see the hook).
 // g 前綴 GNU 名字映射，釘住（P-L1-1）。Homebrew 把與 macOS 同名的 GNU coreutils 以 `g` 前綴安裝，每個跑的
 // 都是真正的 GNU 程式（`grm -rf <受保護>` 是永久刪除，不是垃圾桶別名）。走訪拿 basename 比字面名字，於是每個
 // g 名字都看不到（放行）。映射在每次查表前把 g 名字換成守衛已建模的原名。像 SYSTEM_DIRS 一樣釘在這裡：加減一個
 // 名字就會紅，且每個映射目標都必須是模型裡已有的程式（包裝命令／carrier／rm／rmdir），不新增任何程式。行為由
-// `blocked`/`allowed` 的 g 名字列驗；這裡釘住「資料」。gfind/gxargs 刻意不在（findutils 本機未安裝，只映射實測安裝的）。
+// `blocked`/`allowed` 的 g 名字列驗；這裡釘住「資料」。gfind/gxargs 在表裡，雖然本機沒裝 findutils：agent 可以在守衛
+// 判定中的 session 裡安裝它，映射不能取決於今天裝了什麼。gtime 仍不在（見 hook）。
 {
   assert.ok(gnuPrefixedNames instanceof Map && gnuPrefixedNames.size > 0,
     'the hook exported no gnuPrefixedNames map; the g-name rows would pass vacuously');
@@ -2838,12 +2898,16 @@ assert.ok(wrapperModelChecks >= requiredExecWrapperNames.length + execWrappers.s
   const pinned = [
     ['grm', 'rm'], ['grmdir', 'rmdir'], ['gtimeout', 'timeout'], ['genv', 'env'],
     ['gnice', 'nice'], ['gnohup', 'nohup'], ['gstdbuf', 'stdbuf'], ['gchroot', 'chroot'],
+    ['gfind', 'find'], ['gxargs', 'xargs'],
   ];
   assert.deepStrictEqual([...gnuPrefixedNames.entries()].sort(byKey), pinned.sort(byKey),
     'the g-prefixed GNU name map drifted from the pinned list');
-  assert.ok(!gnuPrefixedNames.has('gfind') && !gnuPrefixedNames.has('gxargs'),
-    'gfind/gxargs map to find/xargs but findutils is not installed; map only measured-installed names');
-  const modelled = new Set([...wrapperCommands, ...shellCarriers, 'rm', 'rmdir']);
+  assert.ok(!gnuPrefixedNames.has('gtime'),
+    'gtime is deliberately unmapped: `time` is also a bash reserved word and gnu-time was not measured');
+  // find and xargs have their own branches and are not on wrapperCommands
+  // (xargs completes its operands from stdin), so they are named here.
+  // find 與 xargs 有自己的分支、不在 wrapperCommands 上（xargs 的操作元由 stdin 補），所以在這裡點名。
+  const modelled = new Set([...wrapperCommands, ...shellCarriers, 'rm', 'rmdir', 'find', 'xargs']);
   for (const plain of gnuPrefixedNames.values()) {
     assert.ok(modelled.has(plain),
       `the g-name map resolves to ${plain}, which the guard does not model -- the rule is to add no new program`);

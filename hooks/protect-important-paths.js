@@ -4089,17 +4089,19 @@ const wrapperCommands = new Set([
 // position anyway) and `gtimeout <protected deletion>` wraps one. The command-word
 // walks below compared path.basename(words[i]) against literal names, so every
 // g-name was invisible and ALLOW.
-// Only names MEASURED on this Mac (2026-11-01) to be the GNU build of a program
-// the guard ALREADY models are mapped: each `<g> --version` prints
-// "(GNU coreutils) 9.12". This adds NO new program to the model -- it only lets
-// the existing model see the second spelling, mapping the g-name to the plain
-// name BEFORE every table/set lookup.
+// Only g-names that are the GNU build of a program the guard ALREADY models are
+// mapped. The coreutils eight are MEASURED on this Mac (2026-11-01): each
+// `<g> --version` prints "(GNU coreutils) 9.12". gfind/gxargs are findutils',
+// confirmed from Homebrew's formula ("All commands have been installed with the
+// prefix g") but NOT installed here -- mapped anyway, because an agent can
+// `brew install findutils` in the same session the guard is judging, and a
+// mapping for an absent name costs nothing (as /boot in SYSTEM_DIRS does not).
+// This adds NO new program to the model -- it only lets the existing model see
+// the second spelling, mapping the g-name to the plain name BEFORE every
+// table/set lookup.
 // Deliberately NOT mapped, and why:
-//   - gfind / gxargs: the finding named them, and they ARE find/xargs, but
-//     findutils is NOT installed here (no /opt/homebrew/bin/gfind, no Cellar), so
-//     the names cannot be invoked; mapping only what is measured-installed is the
-//     rule the three pinned-list guards already follow. If findutils is installed
-//     later they belong here, mapping to 'find' and 'xargs'.
+//   - gtime (gnu-time): `time` is a bash reserved word as well as a program, and
+//     gnu-time is not installed here to measure; it stays unmapped.
 //   - gecho / gprintf / gtrue / gfalse: these ARE echo/printf/true/false, but an
 //     UNRECOGNISED producer is REFUSED (fail-closed), so leaving them out
 //     over-refuses `gecho x | bash` rather than missing anything -- the safe
@@ -4109,15 +4111,18 @@ const wrapperCommands = new Set([
 // Homebrew 的 g 前綴 GNU 工具。Homebrew 把與 macOS 同名的 GNU coreutils 以 `g` 前綴安裝，
 // macOS 27.2 起本機自己的工具偏好它們（`gtimeout` 勝過 BSD `timeout`），agent 也照抄。g 名字
 // 跑的是真正的 GNU 程式，所以 `grm -rf <受保護>` 是永久刪除、`gtimeout <受保護刪除>` 會包住一個。
-// 下面的命令字走訪拿 path.basename 去比字面名字，於是每個 g 名字都看不到、放行。只映射本機實測
-// （2026-11-01、`<g> --version` 印「(GNU coreutils) 9.12」）、且是「守衛已建模程式」之 GNU build
-// 的名字；不新增任何程式，只讓既有模型看到第二個拼法，在每次查表／查集合之前把 g 名字換成原名。
-// 刻意不映射：gfind／gxargs（findutils 本機未安裝，名字叫不出來，裝了才該加）、
+// 下面的命令字走訪拿 path.basename 去比字面名字，於是每個 g 名字都看不到、放行。只映射「守衛已建模程式」之
+// GNU build 的 g 名字：coreutils 八個是本機實測（`<g> --version` 印「(GNU coreutils) 9.12」）；gfind／gxargs 是
+// findutils 的，由 Homebrew formula 確認名字、本機未安裝，仍然映射——agent 可以在同一個 session 裡
+// `brew install findutils`，而替不存在的名字映射沒有成本（就像 SYSTEM_DIRS 裡的 /boot）。不新增任何程式，只讓既有
+// 模型看到第二個拼法，在每次查表／查集合之前把 g 名字換成原名。
+// 刻意不映射：gtime（`time` 既是 bash 保留字也是程式，gnu-time 本機未安裝無從實測）、
 // gecho／gprintf／gtrue／gfalse（未識別的 producer 一律拒絕＝fail-closed，不映射只會過度拒絕而不會漏）、
 // gmv／gcp／gln／gsed／gstat（mv/cp/ln/sed/stat 這個守衛不建模，規則是不新增程式）。
 const gnuPrefixedNames = new Map([
   ['grm', 'rm'], ['grmdir', 'rmdir'], ['gtimeout', 'timeout'], ['genv', 'env'],
   ['gnice', 'nice'], ['gnohup', 'nohup'], ['gstdbuf', 'stdbuf'], ['gchroot', 'chroot'],
+  ['gfind', 'find'], ['gxargs', 'xargs'],
 ]);
 // The basename of a command word, with a g-prefixed GNU tool mapped to the plain
 // name the guard models. Used where a g-name can hide a removal or a wrapper: the
@@ -4168,9 +4173,10 @@ function longOptionMatches(option, longOptions) {
 // gets that step. Only a prefix that could be a value option OR a no-value one is
 // 'unknowable', and the caller then marks the command word unknowable
 // (`unmodelledOption`), the answer xcrun's `knownOptions` already gives: no reading
-// is picked, so the permissive one cannot be. xargs's `--max` is the one measured
-// prefix of that kind (three value options and the optional-argument
-// `--max-lines`); both xargs reject it, so it only over-refuses. It is wired in
+// is picked, so the permissive one cannot be. xargs's `--max` (three value
+// options and the optional-argument `--max-lines`) and sudo's `--h` (help|host),
+// `--p` and `--r` are the measured prefixes of that kind; the real tools reject
+// each as ambiguous, so this only over-refuses. It is wired in
 // ONE place (resolveExecutable's longOptionTakesValue closure), and test-hooks.js
 // pins the helper (unit rows on synthetic lists), the wiring through the
 // exec-wrapper table (a synthetic row) and the real xargs case.
@@ -4179,8 +4185,8 @@ function longOptionMatches(option, longOptions) {
 // 拒絕它、什麼都不跑。候選「全部吃值」或「全部不吃值」的歧義前綴，在每一種讀法下步進都一樣（GNU timeout 的 `--v`：
 // 'none'），就照那樣步進。只有「可能是吃值選項、也可能是不吃值選項」的前綴才是 'unknowable'，呼叫端會把命令字標成
 // 不可知（`unmodelledOption`，與 xcrun 的 `knownOptions` 同一個答案）：不挑任何一種讀法，寬鬆的那種就不可能被挑到。
-// 實測清單裡唯一這種前綴是 xargs 的 `--max`（三個吃值選項加上選填值 `--max-lines`）；兩種 xargs 都拒絕它，所以只會過度
-// 拒絕。它只接在一處（resolveExecutable 的 longOptionTakesValue closure），test-hooks.js 釘住 helper（合成清單的單元列）、
+// 實測清單裡這種前綴是 xargs 的 `--max`（三個吃值選項加上選填值 `--max-lines`）與 sudo 的 `--h`（help|host）、`--p`、`--r`；
+// 真實工具都判它們歧義而拒絕，所以只會過度拒絕。它只接在一處（resolveExecutable 的 longOptionTakesValue closure），test-hooks.js 釘住 helper（合成清單的單元列）、
 // 經過 exec-wrapper 表的接線（一列合成列），以及真實的 xargs 情形。
 function longOptionArity(option, longOptions, valueLongOptions) {
   if (!option.startsWith('--') || option === '--') return 'none';
@@ -5142,12 +5148,41 @@ function commandTargetsScanOneReading(
 
       if (executable === 'sudo') {
         const optionsWithValue = new Set(['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from', '-T', '--command-timeout', '-R', '--chroot', '-D', '--chdir', '-r', '--role', '-t', '--type']);
+        // sudo's long options, from sudo(8) of 1.9.17p2 on this Mac, plus the
+        // SELinux `--role`/`--type` that Linux builds compile in (not in this
+        // build's man page). The value-taking ones are the `=value` entries there;
+        // `--preserve-env` takes an OPTIONAL attached list only. sudo's
+        // getopt_long accepts any unambiguous prefix: `sudo --vers` and
+        // `sudo --he` print exactly what `--version` and `--help` do, and `--h`
+        // (help|host) is rejected as ambiguous (measured 2026-11-01 with those
+        // no-value spellings only, never one that runs a command or prompts). So
+        // `--us root` is `--user root`, and the walk read `root` as the command
+        // word. This replaces the old `--ro`/`--rol`/`--t`/`--ty`/`--typ` regex,
+        // which enumerated the SELinux prefixes and nothing else: each of those
+        // now resolves here, and `--r` (role|remove-timestamp|reset-timestamp)
+        // and `--p` (prompt|preserve-*) are 'unknowable' instead of a guess.
+        // sudo 的長選項，取自本機 1.9.17p2 的 sudo(8)，加上 Linux build 才編進去的 SELinux `--role`/`--type`。吃值的就是
+        // man page 上 `=value` 的那些；`--preserve-env` 只吃相連的選填清單。sudo 的 getopt_long 接受不歧義前綴：`sudo --vers`、
+        // `sudo --he` 與 `--version`、`--help` 輸出相同，`--h`（help|host）被判歧義拒絕（2026-11-01 只用這些不吃值、不跑命令也
+        // 不問密碼的拼法實測）。所以 `--us root` 就是 `--user root`，走訪原本把 `root` 當命令字。這取代了原本只列舉 SELinux 前綴
+        // 的 `--ro`/`--t` regex：那些前綴現在都在這裡解析，`--r`、`--p` 則是 'unknowable' 而不是猜一個。
+        const longOptions = [
+          '--askpass', '--background', '--bell', '--chdir', '--chroot', '--close-from',
+          '--command-timeout', '--edit', '--group', '--help', '--host', '--list', '--login',
+          '--no-update', '--non-interactive', '--other-user', '--preserve-env',
+          '--preserve-groups', '--prompt', '--remove-timestamp', '--reset-timestamp', '--role',
+          '--set-home', '--shell', '--stdin', '--type', '--user', '--validate', '--version',
+        ];
+        const longValueOptions = [
+          '--chdir', '--chroot', '--close-from', '--command-timeout', '--group', '--host',
+          '--other-user', '--prompt', '--role', '--type', '--user',
+        ];
         i += 1;
         while (i < words.length && words[i].startsWith('-')) {
           const option = words[i];
           i += optionsWithValue.has(option)
-            || /^--(?:ro(?:l)?|t(?:y(?:p)?)?)$/.test(option)
             || /^-[ABbEeHikKNnPSVvs]*[CDghprtRTu]$/.test(option)
+            || longOptionTakesValue(option, longOptions, longValueOptions)
             ? 2
             : 1;
         }
